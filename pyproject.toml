@@ -1,0 +1,11 @@
+[project]
+name = "tickertaka-backend"
+version = "0.1.0"
+description = "Backend for the TickerTaka AI stock debate dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
