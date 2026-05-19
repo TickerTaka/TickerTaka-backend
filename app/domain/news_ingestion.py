@@ -19,12 +19,16 @@ logger = logging.getLogger(__name__)
 
 try:
     import redis
-except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment
+except Exception:  # pragma: no cover - depends on runtime environment
     redis = None
 
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "ref"}
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TITLE_TOKEN_RE = re.compile(r"[^\w\s]")
+HANGUL_RE = re.compile(r"[가-힣]")
+WHITESPACE_RE = re.compile(r"\s+")
+AD_MARKERS = ("[광고]", " 광고 ", "ad:", "sponsored", "pr newswire", "globenewswire", "보도자료")
+MIRROR_MARKERS = ("무단전재", "재배포", "기사제보")
 
 
 @dataclass(slots=True)
@@ -36,6 +40,7 @@ class SyncNewsResult:
     body_failed_count: int = 0
     grouped_count: int = 0
     body_saved_count: int = 0
+    filtered_count: int = 0
     trimmed_rows_count: int = 0
     trimmed_content_count: int = 0
     elapsed_ms: int = 0
@@ -57,6 +62,9 @@ class NewsIngestionService:
     BODY_CRAWL_LIMIT = 5
     MAX_CACHE_ROWS = 100
     MAX_CONTENT_ROWS = 10
+    MAX_ARTICLE_AGE_DAYS = 7
+    MIN_TITLE_LENGTH = 8
+    MIN_CONTENT_LENGTH = 200
     COOLDOWN_MINUTES = 15
     LOCK_TTL_SECONDS = 600
     RECENT_GROUPING_HOURS = 24
@@ -110,6 +118,7 @@ class NewsIngestionService:
             result.fetched_count = len(items)
 
             candidates = self._build_candidates(symbol, items)
+            candidates = self._prefilter_candidates(ticker, candidates, result)
             recent_rows = self.repo.get_recent_by_symbol(symbol, since_hours=self.RECENT_GROUPING_HOURS)
             body_candidates = self._select_body_candidates(candidates, recent_rows)
             result.grouped_count = len(body_candidates)
@@ -121,6 +130,9 @@ class NewsIngestionService:
 
             for candidate in candidates:
                 scraped = body_urls.get(candidate.normalized_url)
+                if not self._passes_storage_filters(ticker, candidate, scraped):
+                    result.filtered_count += 1
+                    continue
                 if candidate.existing is None:
                     row = self._build_news_row(symbol, candidate, scraped)
                     self.repo.save(row)
@@ -181,6 +193,20 @@ class NewsIngestionService:
                 )
             )
         return candidates
+
+    def _prefilter_candidates(
+        self,
+        ticker: TickerMetadata,
+        candidates: list[NewsCandidate],
+        result: SyncNewsResult,
+    ) -> list[NewsCandidate]:
+        filtered: list[NewsCandidate] = []
+        for candidate in candidates:
+            if self._passes_prefilter(ticker, candidate):
+                filtered.append(candidate)
+            else:
+                result.filtered_count += 1
+        return filtered
 
     def _select_body_candidates(
         self,
@@ -295,6 +321,48 @@ class NewsIngestionService:
             logger.exception("article scrape failed for %s", candidate.normalized_url)
             return None
 
+    def _passes_prefilter(self, ticker: TickerMetadata, candidate: NewsCandidate) -> bool:
+        item = candidate.item
+        published_at = item.published_at
+        if published_at and published_at < datetime.now(UTC) - timedelta(days=self.MAX_ARTICLE_AGE_DAYS):
+            return False
+
+        normalized_title = self._normalize_text(item.title)
+        if len(normalized_title) < self.MIN_TITLE_LENGTH:
+            return False
+
+        metadata_text = self._metadata_text(candidate)
+        if self._contains_block_marker(metadata_text):
+            return False
+
+        if self._is_korean_market(ticker) and not (
+            self._contains_hangul(metadata_text)
+            or self._contains_symbol_reference(metadata_text, ticker.symbol)
+        ):
+            return False
+
+        return True
+
+    def _passes_storage_filters(
+        self,
+        ticker: TickerMetadata,
+        candidate: NewsCandidate,
+        scraped: ScrapedArticle | None,
+    ) -> bool:
+        metadata_text = self._metadata_text(candidate)
+        body_text = self._normalize_text(scraped.content) if scraped and scraped.content else ""
+
+        if not self._matches_ticker_reference(metadata_text, body_text, ticker):
+            return False
+
+        if scraped is not None:
+            if not scraped.content:
+                return False
+            if len(body_text) < self.MIN_CONTENT_LENGTH:
+                return False
+
+        return True
+
     @staticmethod
     def normalize_url(url: str) -> str:
         parsed = urlparse(url.strip())
@@ -316,6 +384,47 @@ class NewsIngestionService:
     def normalize_title(title: str) -> set[str]:
         cleaned = TITLE_TOKEN_RE.sub(" ", title).lower()
         return {token for token in cleaned.split() if len(token) > 1}
+
+    @staticmethod
+    def _normalize_text(value: str | None) -> str:
+        return WHITESPACE_RE.sub(" ", (value or "")).strip()
+
+    def _metadata_text(self, candidate: NewsCandidate) -> str:
+        return self._normalize_text(f"{candidate.item.title} {candidate.item.description}")
+
+    @staticmethod
+    def _contains_hangul(value: str) -> bool:
+        return HANGUL_RE.search(value) is not None
+
+    @staticmethod
+    def _contains_symbol_reference(value: str, symbol: str) -> bool:
+        return bool(symbol and symbol in value)
+
+    @classmethod
+    def _contains_exact_name_reference(cls, value: str, name_kr: str | None) -> bool:
+        return bool(name_kr and name_kr in value)
+
+    @classmethod
+    def _matches_ticker_reference(
+        cls,
+        metadata_text: str,
+        body_text: str,
+        ticker: TickerMetadata,
+    ) -> bool:
+        combined_text = f"{metadata_text} {body_text}".strip()
+        return cls._contains_exact_name_reference(combined_text, ticker.name_kr) or cls._contains_symbol_reference(
+            combined_text, ticker.symbol
+        )
+
+    @staticmethod
+    def _contains_block_marker(value: str) -> bool:
+        lowered = f" {value.lower()} "
+        return any(marker in lowered for marker in AD_MARKERS + MIRROR_MARKERS)
+
+    @staticmethod
+    def _is_korean_market(ticker: TickerMetadata) -> bool:
+        market = getattr(ticker.market, "value", str(ticker.market))
+        return market in {"KOSPI", "KOSDAQ"}
 
     @staticmethod
     def _titles_similar(

@@ -6,8 +6,10 @@
 
 이번 턴에서 진행한 범위:
 - 동기 SQLAlchemy 세션이 실제 `.env.local`의 PostgreSQL URL로 연결되도록 정리
+- `news_ingestion.py`에 기사 선택 기준 기반 필터링 정책 구현
 - `sync_news_for_ticker(symbol)` 정책 검증 스크립트 작성
 - `news_cache`의 insert / update / content 보강 / content NULL 처리 / row trim 정책 검증
+- 설치된 `trafilatura` / `redis` 버전 기준 import 및 검증 재확인
 
 이번 턴에서 의도적으로 보류한 것:
 - 네이버 뉴스 API 실호출 검증
@@ -33,7 +35,52 @@
 결론:
 - 동기 경로에서 DB 연결 방식이 명확해졌고, 모델/검증 스크립트 재사용성이 좋아졌다.
 
-### 2. news ingestion 검증 스크립트 추가
+### 2. 기사 선택 기준 필터링 구현
+
+수정 파일:
+- `app/domain/news_ingestion.py`
+
+추가된 정책:
+- prefilter
+  - 최근 7일 초과 기사 제외
+  - 제목 길이 8자 미만 제외
+  - 광고성/보도자료/미러링 문구 제외
+  - 한국 종목 기준 한글 근거 또는 종목코드 근거가 없는 메타데이터 제외
+- 저장 전 최종 필터
+  - `ticker_metadata.name_kr` exact match 또는 종목코드 exact match 필요
+  - 본문 확보 시 길이 200자 미만 제외
+  - scraper가 빈 본문을 돌려준 경우 저장 제외
+
+구현 방식:
+- 스크래핑 전에 값싼 필터를 먼저 적용해 quota 낭비를 줄임
+- 스크래핑 후에는 저장 직전 최종 관련성/본문 품질 필터를 다시 적용
+- 본문 크롤링 실패(`Exception -> None`)는 partial insert 허용 정책을 유지
+
+정리:
+- 이전 상태는 `조회 -> dedupe -> 그룹화 -> 저장` 흐름이었다.
+- 현재는 `조회 -> prefilter -> dedupe/그룹화 -> 스크래핑 -> 저장 전 최종 필터 -> 저장` 흐름으로 보완됐다.
+
+### 3. 설치 버전 기준 런타임 정리
+
+수정 파일:
+- `app/domain/news_ingestion.py`
+- `requirements.txt`
+
+반영 내용:
+- `redis` import 실패를 `ModuleNotFoundError`뿐 아니라 일반 예외까지 fallback 처리
+- 현재 설치/확인된 버전에 맞춰 requirements 갱신
+  - `trafilatura==2.0.0`
+  - `redis==7.4.0`
+
+배경:
+- 현재 `venv`에서는 `trafilatura 2.0.0`, `redis 7.4.0` 설치 및 import 확인 완료
+- 이전에는 `redis` import 시 예외가 재현된 적이 있어, import 단계에서 서비스 전체가 깨지지 않도록 가드는 유지
+
+결론:
+- 현재 설치 버전 기준으로 `news_ingestion` 모듈 import와 검증 스크립트 실행은 가능
+- 패키지 설치/import 문제는 현재 기준으로 해소
+
+### 4. news ingestion 검증 스크립트 추가/보강
 
 추가 파일:
 - `scripts/validate_news_ingestion.py`
@@ -54,6 +101,12 @@
 - 제목 유사도 그룹화에 따른 본문 quota 제한
 - `MAX_CACHE_ROWS` 초과 시 오래된 row 삭제
 - `MAX_CONTENT_ROWS` 초과 시 오래된 본문 `NULL` 처리
+- 본문 크롤링 실패 시 partial insert
+- 제목 유사도 6시간 gap 룰
+- cooldown skip
+- Redis lock 미획득 skip
+- `ttl_until = published_at + 30 days`
+- 필터링 정책(최근성/제목 길이/광고/미러링/관련성/짧은 본문)
 
 ## 검증 결과
 
@@ -75,6 +128,10 @@
 - live DB 세션 사용
 - fake dependency 주입
 - 각 시나리오 종료 후 rollback
+- 현재 설치 버전 기준 import 검증 통과
+  - `trafilatura 2.0.0`
+  - `redis 7.4.0` 설치 및 import 상태
+  - `news_ingestion`은 예외 상황 대비 redis import fallback 가드 유지
 
 #### 시나리오 1. 초기 적재
 
@@ -125,46 +182,102 @@
 - row 상한 초과 시 오래된 기사 삭제 동작 확인
 - content 상한 초과 시 오래된 본문 `NULL` 처리 동작 확인
 
+#### 시나리오 4. 본문 크롤링 실패 시 partial insert
+
+결과:
+- `inserted=1`
+- `body_failed=1`
+- `final_rows=1`
+- `final_content_rows=0`
+
+의미:
+- scraper 예외가 나더라도 메타데이터 조건만 맞으면 row는 저장됨
+- `content` 없이 partial insert 허용 정책 확인
+
+#### 시나리오 5. 제목 유사도 6시간 gap 룰
+
+결과:
+- `grouped=2`
+- `body_saved=2`
+
+의미:
+- 제목 토큰이 같아도 기사 시각 차이가 6시간을 넘으면 같은 그룹으로 묶지 않음
+- 본문 quota 보호가 과도하게 작동하지 않는 것 확인
+
+#### 시나리오 6. cooldown skip
+
+결과:
+- `fetched=0`
+- `skipped=1`
+- `inserted=0`
+
+의미:
+- `force=False`이고 마지막 실행 시각이 15분 이내면 API 호출 전에 바로 스킵
+
+#### 시나리오 7. Redis lock 미획득 skip
+
+결과:
+- `fetched=0`
+- `skipped=1`
+- `inserted=0`
+
+의미:
+- lock이 이미 잡혀 있으면 동시 실행 없이 바로 종료
+
+#### 시나리오 8. TTL 정확성
+
+결과:
+- `inserted=1`
+- 저장 row의 `ttl_until == published_at + 30 days`
+
+의미:
+- TTL anchor 계산이 계획 문서 기준과 일치
+
+#### 시나리오 9. 필터링 정책
+
+검증 데이터:
+- 정상 기사
+- 종목코드 기준 통과 기사
+- 7일 초과 기사
+- 짧은 제목
+- 무관 기사
+- 광고성 기사
+- 미러링 문구 기사
+- 본문 200자 미만 기사
+
+결과:
+- `fetched=8`
+- `inserted=2`
+- `filtered=6`
+- `body_saved=2`
+
+의미:
+- 필터링 정책이 실제 저장 결과에 반영됨
+- 허용된 row는 정상 기사 1건 + 종목코드 기준 통과 기사 1건만 남음
+
 ## 현재까지 확인된 결론
 
 계획 문서의 아래 정책은 현재 코드 기준으로 동작 확인됐다.
 
 - `15/5/5` 기본 정책
+- 최근성/제목 길이/광고/미러링/관련성/짧은 본문 필터링
 - `source_url` 기준 dedupe
 - 기존 `content IS NULL` row 본문 보강
 - 제목 유사도 그룹화로 본문 quota 보호
+- 제목 유사도 6시간 gap 룰
+- 본문 크롤링 실패 시 partial insert
+- cooldown skip
+- Redis lock 미획득 skip
+- `ttl_until = published_at + 30 days`
 - 종목별 row 상한 적용
 - 종목별 content 상한 적용
 - 오래된 본문 `NULL` 처리
 
-즉, 외부 API/실크롤링을 제외한 `news_cache` 핵심 적재 정책은 코드 레벨에서 한 번 검증된 상태다.
+즉, 외부 API/실크롤링을 제외한 `news_cache` 핵심 적재 정책은 코드와 검증 스크립트 기준으로 Phase 1 수준까지 닫힌 상태다.
 
 ## 남은 이슈
 
-### 1. 새 의존성 설치 실패
-
-설치 대상:
-- `trafilatura==1.12.2`
-- `redis==5.0.8`
-
-현재 상태:
-- `pip install` 실패
-
-원인:
-- `pyenv` 기반 Python 3.12가 `OPENSSL_3.3.0` 기준으로 빌드되어 있음
-- 현재 시스템 `libcrypto.so.3`와 버전이 맞지 않음
-- 결과적으로 `pip`에서 SSL 사용 불가처럼 보이는 상태
-
-실패 형태:
-- `ImportError: /usr/lib/x86_64-linux-gnu/libcrypto.so.3: version 'OPENSSL_3.3.0' not found`
-- `pip is configured with locations that require TLS/SSL, however the ssl module is not available`
-
-영향:
-- 실 API 기반 Naver 호출 검증 불가
-- `trafilatura` 기반 실본문 크롤링 검증 불가
-- Redis 실연결 검증 불가
-
-### 2. 실운영 연결 검증은 아직 미완료
+### 1. 실운영 연결 검증은 아직 미완료
 
 아직 하지 않은 것:
 - 네이버 뉴스 API 실호출
@@ -174,16 +287,17 @@
 
 ## 다음 권장 순서
 
-1. `pyenv` Python/OpenSSL 문제 해결
-2. `pip install -r requirements.txt` 재실행
-3. 실 API 기반 `sync_news_for_ticker(symbol)` 검증
-4. watchlist 등록 후 background task 연결
-5. 필요 시 scheduler/worker 연결
+1. Redis 실제 연결 확인
+2. 실 API 기반 `sync_news_for_ticker(symbol)` 검증
+3. watchlist 등록 후 background task 연결
+4. 필요 시 scheduler/worker 연결
 
 ## 변경 파일
 
 수정:
 - `app/core/db.py`
+- `app/domain/news_ingestion.py`
+- `requirements.txt`
 
 추가:
 - `scripts/validate_news_ingestion.py`

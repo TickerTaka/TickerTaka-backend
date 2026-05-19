@@ -28,14 +28,14 @@ chromadb
 rank-bm25
 
 # 캐시/큐
-redis[asyncio]==5.0.8
+redis==7.4.0
 celery[redis]
 
 # 데이터
 yfinance==0.2.43
 pandas==2.2.3
 beautifulsoup4==4.12.3
-trafilatura==1.12.2
+trafilatura==2.0.0
 
 # 설정/인증
 pydantic==2.9.2
