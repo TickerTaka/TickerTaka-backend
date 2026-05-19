@@ -13,11 +13,13 @@ AI 종목 토론 대시보드를 위한 FastAPI 백엔드입니다.
    - `source .venv/bin/activate`
 4. 의존성을 설치합니다.
    - `pip install -r requirements.txt`
-5. 데이터베이스 마이그레이션을 적용합니다.
+5. 원격 PostgreSQL 연결을 확인합니다.
+   - `.env`의 `DATABASE_URL`을 채운 뒤 `python -m scripts.test_db_connection`
+6. 데이터베이스 마이그레이션을 적용합니다.
    - `alembic upgrade head`
-6. 시드 데이터를 적재합니다.
+7. 시드 데이터를 적재합니다.
    - `python -m scripts.seed`
-7. 개발 서버를 실행합니다.
+8. 개발 서버를 실행합니다.
    - `uvicorn app.main:app --reload`
 
 ## Required API Keys
