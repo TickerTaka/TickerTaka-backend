@@ -45,4 +45,3 @@ redisdata/
 *.aof
 
 docs/_build/
-memo/
