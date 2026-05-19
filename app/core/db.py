@@ -8,10 +8,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 
 
+def _to_sync_database_url(database_url: str) -> str:
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return database_url
+
+
 def create_db_engine() -> Engine:
     settings = get_settings()
     return create_engine(
-        settings.database_url,
+        _to_sync_database_url(settings.database_url),
         pool_pre_ping=True,
     )
 

@@ -58,6 +58,7 @@
 반영 사항:
 - `SessionLocal`
 - `session_scope()`
+- `postgresql+asyncpg://` 입력을 동기 SQLAlchemy용 `postgresql://`로 정규화
 
 이후 repository / domain service에서 공통 사용 가능하도록 정리했다.
 
@@ -68,6 +69,7 @@
 - `app/external/article_scraper.py`
 - `app/repositories/news_cache_repository.py`
 - `app/domain/news_ingestion.py`
+- `scripts/validate_news_ingestion.py`
 
 구현된 정책:
 - `sync_news_for_ticker(symbol)` 함수 골격
@@ -116,6 +118,47 @@
 결과:
 - 현재 코드 구조상 import 가능
 
+### 4. news ingestion 정책 검증 성공
+
+검증 스크립트:
+- `scripts/validate_news_ingestion.py`
+
+검증 방식:
+- 원격 DB에 실제 세션 연결
+- 외부 API/본문 크롤러/Redis는 fake dependency 주입
+- 트랜잭션 rollback으로 실제 DB 데이터는 남기지 않음
+
+검증된 시나리오:
+- 초기 적재 `15/5/5`
+- 기존 `content IS NULL` row 보강
+- `source_url` 중복 스킵
+- row 상한 초과 시 오래된 row 삭제
+- `content` 상한 초과 시 오래된 본문 `NULL` 처리
+
+실행 결과:
+- `initial_insert`
+  - `inserted=15`
+  - `body_saved=5`
+  - `grouped=5`
+  - `final_rows=15`
+  - `final_content_rows=5`
+- `duplicate_update`
+  - `inserted=1`
+  - `updated=1`
+  - `skipped=1`
+  - `final_rows=3`
+  - `final_content_rows=3`
+- `trim_rows_and_content`
+  - `inserted=6`
+  - `trimmed_rows=2`
+  - `trimmed_content=2`
+  - `final_rows=4`
+  - `final_content_rows=2`
+
+해석:
+- 계획 문서의 핵심 정책은 현재 코드 기준으로 동작 확인됨
+- 제목 유사도 그룹화도 body crawl quota 보호에 맞게 작동함
+
 ## 남은 이슈
 
 ### 1. 새 의존성 설치는 아직 미완료
@@ -124,27 +167,29 @@
 - `trafilatura==1.12.2`
 - `redis==5.0.8`
 
-하지만 현재 venv의 Python이 SSL 모듈 없이 빌드되어 있어 `pip install`이 실패했다.
+하지만 현재 `venv`의 Python 3.12가 `pyenv` OpenSSL 3.3 기준으로 빌드되어 있고, 시스템 `libcrypto.so.3`와 버전이 맞지 않아 `pip install`이 실패한다.
 
 실패 원인:
-- `Can't connect to HTTPS URL because the ssl module is not available.`
+- `ImportError: /usr/lib/x86_64-linux-gnu/libcrypto.so.3: version 'OPENSSL_3.3.0' not found`
+- 그 결과 `pip`에서는 `ssl module is not available` 경고로 보임
 
 대응:
 - 현재 코드는 `trafilatura`, `redis`가 없어도 import 시점에 바로 깨지지 않도록 지연 로딩 처리함
-- 실제 news ingestion 실행 전에는 Python/venv SSL 문제를 해결하고 의존성을 설치해야 함
+- 정책 검증은 fake dependency 주입으로 먼저 진행함
+- 실제 외부 API 기반 ingestion 실행 전에는 Python/venv OpenSSL 문제를 해결하고 의존성을 설치해야 함
 
-### 2. 실제 ingestion 실행은 아직 안 함
+### 2. 실제 외부 연동 ingestion 실행은 아직 안 함
 
 아직 하지 않은 것:
 - 네이버 뉴스 API 실제 호출 검증
 - 기사 본문 크롤링 실동작 검증
-- `news_cache` 실제 insert/update 검증
 - watchlist 등록 후 background task 연결
 
 즉 현재 상태는:
 - 모델은 검증 완료
 - 도메인 코드는 골격 구현 완료
-- 실운영 동작 검증은 다음 단계
+- DB 정책 검증은 완료
+- 외부 API/실크롤링 기반 실운영 동작 검증은 다음 단계
 
 ## `ticker_metadata`를 팀원이 채워둔 상태에 대한 판단
 
@@ -170,7 +215,7 @@
 
 1. Python/venv SSL 문제 해결
 2. `pip install -r requirements.txt`
-3. `sync_news_for_ticker(symbol)` 실제 실행 검증 스크립트 추가
+3. `sync_news_for_ticker(symbol)` 실 API 기반 검증
 4. `watchlist` 등록 이후 background task 연결
 5. `news_cache` 실제 적재/정리 정책 검증
 
@@ -193,6 +238,7 @@
 - `app/external/article_scraper.py`
 - `app/domain/news_ingestion.py`
 - `scripts/validate_models.py`
+- `scripts/validate_news_ingestion.py`
 
 ---
 
