@@ -10,6 +10,8 @@ requests==2.32.3
 yfinance==0.2.43
 beautifulsoup4==4.12.3
 pandas==2.2.3
+trafilatura==1.12.2
+redis==5.0.8
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.12

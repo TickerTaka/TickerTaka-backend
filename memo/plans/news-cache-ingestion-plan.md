@@ -347,13 +347,18 @@ URL 정규화 규칙:
 
 ## 시간대 정책
 
-현재 DB 컬럼은 `TIMESTAMP`다.
+현재 DB 컬럼은 `TIMESTAMPTZ` (timezone-aware)이며, 클라우드 DB의 session timezone은 `Asia/Seoul`로 설정되어 있다.
 
 저장 기준:
 - 네이버 `pubDate`는 timezone-aware로 파싱
-- 내부에서는 UTC로 변환
-- DB에는 UTC 기준 naive timestamp로 저장
-- 애플리케이션 표시 단계에서 KST로 변환
+- timezone이 누락된 경우(거의 없음) **KST 가정**으로 처리
+- 내부 코드에서는 **UTC aware datetime**으로 통일 (`datetime.now(UTC)`, `astimezone(UTC)`)
+- DB에 저장 시 자동으로 timezone 정보 보존
+- 조회 시 session timezone(KST)으로 표시되며 같은 instant를 가리킨다
+
+코드 원칙:
+- 모든 `datetime`은 **aware** (UTC 또는 KST). naive datetime 사용 금지 (`.replace(tzinfo=None)` 사용 금지)
+- 비교/연산은 timezone 차이와 무관하게 동작하지만, 가독성을 위해 UTC 기준으로 일관
 
 정렬 기준:
 - `published_at`가 NULL일 수 있으므로 조회 시 `NULLS LAST`를 명시하는 쿼리를 사용
