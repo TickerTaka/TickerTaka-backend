@@ -1,1 +1,0 @@
-"""TickerTaka backend package."""
