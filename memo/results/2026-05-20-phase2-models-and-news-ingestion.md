@@ -540,28 +540,39 @@ plan Phase 3 전체.
 - 더 이상 `app_user`가 0건이라서 endpoint 검증을 못 하는 상태는 아님
 - 이후 `POST /api/watchlists` 실호출 검증에 필요한 최소 전제 데이터는 준비됨
 
-### 2. endpoint 레벨 검증 시도 결과
+### 2. endpoint 레벨 검증 (TestClient smoke test) — 통과
 
-목표:
-- `fastapi.testclient.TestClient`로 ASGI in-process 호출
-- `POST /api/watchlists`
-- `GET /api/watchlists/{user_id}`
+이전 시점에 기록했던 `_ssl` 링크 문제는 시스템 재진단 결과 이미 해소된 상태였다.
 
-실행 시도 결과:
-- `from fastapi.testclient import TestClient; from app.main import app`
-- 현재 `venv`/`pyenv` 런타임의 `_ssl` 링크 문제로 실패
+진단 결과:
+- 시스템: Ubuntu 26.04 + `OpenSSL 3.5.5`
+- venv Python 3.12.10의 `ssl.OPENSSL_VERSION` = `OpenSSL 3.5.5 27 Jan 2026`
+- `from fastapi.testclient import TestClient; from app.main import app` 정상 import
 
-실패 에러:
-- `ImportError: /usr/lib/x86_64-linux-gnu/libcrypto.so.3: version 'OPENSSL_3.3.0' not found`
+검증 스크립트:
+- `scripts/validate_watchlist_api.py`
+
+검증 방식:
+- 시드된 `phase2-test-user@example.com` 사용
+- `sync_watchlist_news`는 `unittest.mock.patch`로 가로채 실제 네이버 API/Redis/news_cache 변경 없음
+- 생성된 watchlist row는 시작·종료 시점에 명시적 cleanup
+
+검증된 케이스 (8/8 PASS):
+- `GET /health` → 200
+- `POST /api/watchlists` happy → 201, `ticker_name_kr=동화약품`, `sync_enqueued=True`, background이 `sync_watchlist_news("000020")` 1회 호출
+- `GET /api/watchlists/{user_id}` → 200, 방금 등록한 종목 포함
+- 중복 POST → 409, background 미호출
+- 없는 user_id POST → 404, background 미호출
+- 없는 symbol POST → 404, background 미호출
+- 없는 user_id GET → 404
+- 필수 필드 누락 POST → 422 (Pydantic validation)
 
 영향:
-- watchlist 비즈니스 로직 자체가 막힌 것은 아님
-- `service/repository/background trigger` 검증은 이미 통과
-- `TestClient` 기반 endpoint smoke test만 런타임 환경 문제로 미완료
+- 라우터 등록, Pydantic request/response 직렬화, HTTPException → 4xx 변환, BackgroundTasks 등록 흐름까지 ASGI 레벨에서 정상 동작 확인
 
 ### 3. 현재 시점 Phase 2 종료 판단
 
-코드/정책/서비스 검증 기준으로는 Phase 2 핵심 범위가 닫혔다고 볼 수 있다.
+코드/정책/서비스 검증 + endpoint 레벨 smoke test까지 모두 통과로 Phase 2 핵심 범위가 닫혔다.
 
 닫힌 항목:
 - SQLAlchemy 모델 구현 및 live DB 매핑 검증
@@ -571,14 +582,11 @@ plan Phase 3 전체.
 - `watchlist -> background sync` 서비스 레벨 연결
 - watchlist 보완사항 1~7 반영 및 rollback 검증
 - 테스트용 `app_user` 시드 완료
-
-남은 환경 의존 항목:
-- `TestClient` 기반 endpoint 레벨 smoke test 1건
+- TestClient 기반 endpoint smoke test 8/8 통과 (라우팅, Pydantic, 4xx 매핑, BackgroundTasks 등록까지)
 
 정리:
-- Phase 2의 기능 구현과 서비스 레벨 검증은 완료
-- 남은 것은 애플리케이션 런타임(OpenSSL) 환경 정상화 후 수행할 endpoint smoke test
-- 따라서 다음 구현 작업은 Phase 3 (`scheduler/cleanup`)로 넘어가고, endpoint smoke test는 환경 이슈 해소 후 보강 검증으로 처리하는 것이 자연스럽다
+- Phase 2의 기능 구현, 서비스 레벨 검증, endpoint 레벨 smoke test 모두 닫힘
+- 다음 구현 작업은 Phase 3 (`scheduler/cleanup`)로 자연스럽게 이어진다
 
 8. **인증/권한 부재**
    - `WatchlistCreateRequest.user_id`를 클라이언트가 임의로 보낼 수 있는 구조.
