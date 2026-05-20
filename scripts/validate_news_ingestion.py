@@ -493,7 +493,10 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
         "unrelated": f"https://news.example.com/{ticker.symbol}/filter/unrelated",
         "ad": f"https://news.example.com/{ticker.symbol}/filter/ad",
         "mirror": f"https://news.example.com/{ticker.symbol}/filter/mirror",
+        "graphic": f"https://news.example.com/{ticker.symbol}/filter/graphic",
         "short_body": f"https://news.example.com/{ticker.symbol}/filter/short-body",
+        "weak_body_ref": f"https://news.example.com/{ticker.symbol}/filter/weak-body-ref",
+        "strong_body_ref": f"https://news.example.com/{ticker.symbol}/filter/strong-body-ref",
     }
 
     good_item = build_item(ticker, urls["good"], "growth outlook demand supply margins", base)
@@ -517,7 +520,31 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
     )
     ad_item = build_item(ticker, urls["ad"], "[광고] investment summit partner benefits", base - timedelta(minutes=4))
     mirror_item = build_item(ticker, urls["mirror"], "distribution update and 무단전재 notice", base - timedelta(minutes=5))
+    graphic_item = NaverNewsItem(
+        title=f"[그래픽] {ticker.name_kr} labor issue overview",
+        description=f"{ticker.name_kr} graphic summary",
+        link=urls["graphic"],
+        original_link=urls["graphic"],
+        published_at=base - timedelta(minutes=5),
+        source_name="example.com",
+    )
     short_body_item = build_item(ticker, urls["short_body"], "factory expansion update cost demand", base - timedelta(minutes=6))
+    weak_body_ref_item = NaverNewsItem(
+        title="semiconductor labor update market impact",
+        description="industry issue description only",
+        link=urls["weak_body_ref"],
+        original_link=urls["weak_body_ref"],
+        published_at=base - timedelta(minutes=7),
+        source_name="example.com",
+    )
+    strong_body_ref_item = NaverNewsItem(
+        title="semiconductor cycle outlook market view",
+        description="반도체 업황 관련 산업 동향 설명",
+        link=urls["strong_body_ref"],
+        original_link=urls["strong_body_ref"],
+        published_at=base - timedelta(minutes=8),
+        source_name="example.com",
+    )
 
     items = [
         good_item,
@@ -527,12 +554,33 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
         unrelated_item,
         ad_item,
         mirror_item,
+        graphic_item,
         short_body_item,
+        weak_body_ref_item,
+        strong_body_ref_item,
     ]
     articles = {
         urls["good"]: build_scraped(urls["good"], good_item.title, good_item.published_at or base),
         urls["symbol"]: build_scraped(urls["symbol"], symbol_item.title, symbol_item.published_at or base),
         urls["short_body"]: build_short_scraped(urls["short_body"], short_body_item.title, short_body_item.published_at or base),
+        urls["weak_body_ref"]: ScrapedArticle(
+            content=f"시장 전체에 대한 언급과 {ticker.name_kr} 한 번 언급",
+            summary="weak ref",
+            source_name="example.com",
+            canonical_url=urls["weak_body_ref"],
+            published_at=weak_body_ref_item.published_at,
+        ),
+        urls["strong_body_ref"]: ScrapedArticle(
+            content=(
+                f"시장 설명과 함께 {ticker.name_kr} 이슈를 길게 설명한다. "
+                f"추가 문단에서도 {ticker.name_kr} 관련 수요와 공급을 반복적으로 다룬다. "
+                + ("세부 내용 " * 80)
+            ),
+            summary="strong ref",
+            source_name="example.com",
+            canonical_url=urls["strong_body_ref"],
+            published_at=strong_body_ref_item.published_at,
+        ),
     }
 
     with SessionLocal() as session:
@@ -544,15 +592,18 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
         )
         service.BODY_CRAWL_LIMIT = 8
         try:
-            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=8)
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=11)
             rows = list(session.scalars(select(NewsCache).where(NewsCache.symbol == ticker.symbol).order_by(NewsCache.source_url)))
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("filtering_policy", raw, final_rows, final_content_rows)
             saved_urls = {row.source_url for row in rows}
-            expect(result.inserted == 2, "filtering_policy: inserted should be 2")
-            expect(result.filtered == 6, "filtering_policy: filtered should be 6")
-            expect(result.body_saved == 2, "filtering_policy: body_saved should be 2")
-            expect(saved_urls == {urls["good"], urls["symbol"]}, "filtering_policy: only good and symbol urls should remain")
+            expect(result.inserted == 3, "filtering_policy: inserted should be 3")
+            expect(result.filtered == 8, "filtering_policy: filtered should be 8")
+            expect(result.body_saved == 3, "filtering_policy: body_saved should be 3")
+            expect(
+                saved_urls == {urls["good"], urls["symbol"], urls["strong_body_ref"]},
+                "filtering_policy: only good, symbol, strong_body_ref urls should remain",
+            )
             return result
         finally:
             session.rollback()

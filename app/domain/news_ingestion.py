@@ -29,6 +29,7 @@ HANGUL_RE = re.compile(r"[가-힣]")
 WHITESPACE_RE = re.compile(r"\s+")
 AD_MARKERS = ("[광고]", " 광고 ", "ad:", "sponsored", "pr newswire", "globenewswire", "보도자료")
 MIRROR_MARKERS = ("무단전재", "재배포", "기사제보")
+TITLE_EXCLUDE_MARKERS = ("[포토]", "[사진]", "[그래픽]", "[표]", "[인포그래픽]")
 
 
 @dataclass(slots=True)
@@ -330,6 +331,8 @@ class NewsIngestionService:
         normalized_title = self._normalize_text(item.title)
         if len(normalized_title) < self.MIN_TITLE_LENGTH:
             return False
+        if self._contains_title_exclude_marker(item.title):
+            return False
 
         metadata_text = self._metadata_text(candidate)
         if self._contains_block_marker(metadata_text):
@@ -349,10 +352,11 @@ class NewsIngestionService:
         candidate: NewsCandidate,
         scraped: ScrapedArticle | None,
     ) -> bool:
+        title_text = self._normalize_text(candidate.item.title)
         metadata_text = self._metadata_text(candidate)
         body_text = self._normalize_text(scraped.content) if scraped and scraped.content else ""
 
-        if not self._matches_ticker_reference(metadata_text, body_text, ticker):
+        if not self._matches_ticker_reference(title_text, metadata_text, body_text, ticker):
             return False
 
         if scraped is not None:
@@ -405,21 +409,43 @@ class NewsIngestionService:
         return bool(name_kr and name_kr in value)
 
     @classmethod
+    def _count_exact_name_reference(cls, value: str, name_kr: str | None) -> int:
+        if not value or not name_kr:
+            return 0
+        return value.count(name_kr)
+
+    @classmethod
     def _matches_ticker_reference(
         cls,
+        title_text: str,
         metadata_text: str,
         body_text: str,
         ticker: TickerMetadata,
     ) -> bool:
+        if cls._contains_exact_name_reference(title_text, ticker.name_kr):
+            return True
+        if cls._contains_symbol_reference(title_text, ticker.symbol):
+            return True
+
         combined_text = f"{metadata_text} {body_text}".strip()
-        return cls._contains_exact_name_reference(combined_text, ticker.name_kr) or cls._contains_symbol_reference(
-            combined_text, ticker.symbol
-        )
+        if cls._contains_symbol_reference(combined_text, ticker.symbol):
+            return True
+
+        body_match_count = cls._count_exact_name_reference(body_text, ticker.name_kr)
+        if body_match_count >= 2:
+            return True
+
+        return False
 
     @staticmethod
     def _contains_block_marker(value: str) -> bool:
         lowered = f" {value.lower()} "
         return any(marker in lowered for marker in AD_MARKERS + MIRROR_MARKERS)
+
+    @staticmethod
+    def _contains_title_exclude_marker(value: str) -> bool:
+        compact = re.sub(r"\s+", "", value).lower()
+        return any(re.sub(r"\s+", "", marker).lower() in compact for marker in TITLE_EXCLUDE_MARKERS)
 
     @staticmethod
     def _is_korean_market(ticker: TickerMetadata) -> bool:

@@ -10,12 +10,13 @@
 - `sync_news_for_ticker(symbol)` 정책 검증 스크립트 작성
 - `news_cache`의 insert / update / content 보강 / content NULL 처리 / row trim 정책 검증
 - 설치된 `trafilatura` / `redis` 버전 기준 import 및 검증 재확인
+- 실연동 검증용 live sync 스크립트 추가 및 rollback 모드 실검증
+- 실 Redis 연결 기반 lock/cooldown/TTL/fail-closed 검증 스크립트 추가 및 통과
+- relevance 필터 값싼 정교화 2종(A/B) 반영 및 재검증
 
 이번 턴에서 의도적으로 보류한 것:
-- 네이버 뉴스 API 실호출 검증
-- 실제 기사 본문 크롤링 검증
 - watchlist 등록 후 background task 연결
-- Redis 실서버 연결 기반 lock/cooldown 검증
+- 다종목 rollback live sync 기반 노이즈 비율 비교
 
 ## 구현 내용
 
@@ -59,6 +60,36 @@
 정리:
 - 이전 상태는 `조회 -> dedupe -> 그룹화 -> 저장` 흐름이었다.
 - 현재는 `조회 -> prefilter -> dedupe/그룹화 -> 스크래핑 -> 저장 전 최종 필터 -> 저장` 흐름으로 보완됐다.
+
+### 2-1. 값싼 relevance 정교화(A/B) 추가
+
+수정 파일:
+- `app/domain/news_ingestion.py`
+
+A. 제목 패턴 제외:
+- `[포토]`
+- `[사진]`
+- `[그래픽]`
+- `[표]`
+- `[인포그래픽]`
+
+B. 제목 우선 매칭:
+- 제목에 `ticker_metadata.name_kr` exact match가 있으면 통과
+- 제목에 종목코드 exact match가 있으면 통과
+- 제목에 근거가 없으면 본문 내 `name_kr` exact match가 `2회 이상`일 때만 통과
+- `description`이나 본문에 `name_kr`이 1회만 등장하는 약한 참조는 통과시키지 않음
+
+의도:
+- 그래픽/사진류 기사와 주변 맥락에서 종목이 한 번만 언급되는 노이즈를 값싸게 줄이기
+- 점수제나 도메인 블랙리스트 같은 무거운 튜닝은 Phase 2로 미루기
+
+추가 보완:
+- 네이버 뉴스 API 제목의 `<b>...</b>` 강조 태그가 공백으로 치환되면서 `[ 포토 ]`, `[포 토]`처럼 보일 수 있으므로
+- 제목 제외 마커 비교 시 공백을 제거한 뒤 substring 매칭하도록 보완
+
+검증 포인트:
+- 그래픽/포토 류 제목은 공백이 끼어도 차단
+- B의 positive 분기(`본문 내 name_kr 2회 이상`)와 negative 분기(`본문 1회`)를 모두 검증
 
 ### 3. 설치 버전 기준 런타임 정리
 
@@ -107,6 +138,23 @@
 - Redis lock 미획득 skip
 - `ttl_until = published_at + 30 days`
 - 필터링 정책(최근성/제목 길이/광고/미러링/관련성/짧은 본문)
+- A/B 정교화(그래픽 기사 제외, 약한 본문 참조 차단)
+
+### 5. live sync 실행 스크립트 추가
+
+추가 파일:
+- `scripts/run_live_news_sync.py`
+
+목적:
+- 특정 `symbol`에 대해 실제 Naver 뉴스 API + 실제 본문 크롤링 경로를 한 번에 실행
+- 기본값은 rollback 모드로 두어 DB 오염 없이 결과만 확인
+- 필요 시 `--commit`으로 실제 적재 가능
+
+구성:
+- 기본 symbol: `005930`
+- 기본 mode: `initial`
+- 기본은 in-memory Redis 사용
+- `--use-real-redis` 옵션으로 실제 Redis 경로 테스트 가능
 
 ## 검증 결과
 
@@ -243,17 +291,120 @@
 - 무관 기사
 - 광고성 기사
 - 미러링 문구 기사
+- 그래픽 기사
 - 본문 200자 미만 기사
+- 제목 근거 없이 본문에만 `name_kr`이 1회 등장하는 약한 참조 기사
+- 제목 근거 없이 본문에만 `name_kr`이 2회 이상 등장하는 강한 참조 기사
 
 결과:
-- `fetched=8`
-- `inserted=2`
-- `filtered=6`
-- `body_saved=2`
+- `fetched=10`
+- `fetched=11`
+- `inserted=3`
+- `filtered=8`
+- `body_saved=3`
 
 의미:
 - 필터링 정책이 실제 저장 결과에 반영됨
-- 허용된 row는 정상 기사 1건 + 종목코드 기준 통과 기사 1건만 남음
+- 허용된 row는 정상 기사 1건 + 종목코드 기준 통과 기사 1건 + 강한 본문 참조 기사 1건만 남음
+- A/B 정교화로 그래픽 기사와 약한 본문 참조 기사도 차단되고, 의도한 strong body reference는 통과함
+
+### 3. Redis 실제 연결 및 fail-closed 검증 성공
+
+실행:
+- `docker compose up -d redis`
+- `docker compose exec redis redis-cli ping`
+- `python -c "import redis; print(redis.Redis.from_url('redis://localhost:6379/0').ping())"`
+- `python -m scripts.validate_redis_integration`
+
+기본 연결 확인:
+- Redis 컨테이너 기동 성공 (`tickertaka-redis`, 0.0.0.0:6379)
+- `redis-cli ping -> PONG`
+- 호스트(WSL) 측 `redis-cli` 도 `+PONG`
+- Python client `redis.Redis.from_url("redis://localhost:6379/0").ping() -> True`
+
+검증 스크립트 구성:
+- 외부 API/스크래퍼는 Fake(`FakeNaverNewsClient`, `FakeArticleScraper`) 유지
+- Redis만 실연결 (`redis.Redis.from_url(settings.redis_url, decode_responses=True)`)
+- 사용 ticker: `ticker_metadata`에서 자동 선택 (예: `000020 동화약품 KOSPI`)
+- 각 케이스 종료 시 `news-sync:lock:{symbol}`, `news-sync:last-run:{symbol}` 명시적 cleanup
+- DB는 `session.rollback()`으로 흔적 없음
+
+검증 결과 (7/7 PASS):
+
+| # | 케이스 | 핵심 측정값 |
+| --- | --- | --- |
+| 1 | `redis_ping` | `PING -> True` |
+| 2 | `normal_run_releases_lock_and_sets_last_run` | `fetched=1 skipped=0 lock_after=None last_run=<ts> last_run_ttl=86400` |
+| 3 | `lock_held_skips_and_preserves_holder` | `skipped=1 fetched=0 lock_value="external-holder" lock_ttl=600` |
+| 4 | `lock_ttl_within_600s_window` | `captured_ttl=600 captured_value=<uuid>` |
+| 5 | `cooldown_within_window_skips` | `skipped=1 fetched=0 inserted=0` (5분 전 last-run) |
+| 6 | `cooldown_outside_window_runs` | `fetched=1 inserted=1 skipped=0` (16분 전 last-run) |
+| 7 | `redis_unavailable_fails_closed` | `skipped=1 fetched=0 inserted=0` (포트 6390 / connect refused) |
+
+확인된 정책:
+- `SET NX EX=600`으로 lock 획득, 정상 종료 시 token 일치 확인 후 `DELETE` 해제
+- 다른 holder가 잡은 lock은 우리 token과 다르므로 release 단계에서 보존됨
+- `last-run` 키에 UTC timestamp + 24h TTL 기록, 15분 윈도우 판정
+- Redis 통신 실패는 `try/except`로 잡혀 `_acquire_lock`이 `None` 반환 → fail-closed skip
+  - 운영 관측성을 위해 `logger.exception("redis lock error; skipping sync for %s", symbol)` 트레이스가 의도적으로 출력됨
+  - 검증 스크립트에서도 같은 트레이스가 한 번 보이지만 직후 `skipped_count += 1`로 정상 처리되어 케이스는 `PASS`
+
+결론:
+- Redis lock / cooldown 정책은 실제 Docker Desktop 기반 Redis에서 동작 확인됨
+- 이전 문서에 남아 있던 “Redis 실연결 미검증” 상태는 해소
+- fail-closed 보강까지 포함하여 Phase 1 Redis 통합 검증은 닫힌 상태
+
+### 4. 실 API + 실 스크래퍼 기반 live sync 검증 성공
+
+실행:
+- `python -m scripts.run_live_news_sync --symbol 005930 --mode initial --limit 10`
+
+대상:
+- `005930 삼성전자`
+- rollback 모드
+- in-memory Redis 사용
+
+결과:
+- `fetched=10`
+- `inserted=10`
+- `updated=0`
+- `skipped=0`
+- `filtered=0`
+- `body_failed=0`
+- `grouped=5`
+- `body_saved=5`
+- `trimmed_rows=0`
+- `trimmed_content=0`
+- `elapsed_ms=1011`
+- 최종 출력 후 `ROLLBACK`
+
+의미:
+- 실제 네이버 뉴스 API 호출 성공
+- 실제 기사 본문 추출 성공
+- 실제 `sync_news_for_ticker()` 경로가 DB 저장 직전까지 정상 동작
+- rollback 모드로 검증했으므로 DB 오염 없음
+
+주의:
+- 쉘에서 실행한 `python -c "import ssl, requests; ..."` one-liner 실패는 코드 실패가 아니라 문자열이 줄바꿈되면서 생긴 `SyntaxError`
+- live sync가 실제로 성공했으므로 HTTPS/OpenSSL 경로는 현재 실행 환경에서 동작한 것으로 봐야 함
+
+### 5. 실데이터 기준 relevance 품질 이슈 확인
+
+live sync 결과를 보면 `filtered=0`인데도 아래처럼 종목 관련성이 약한 기사들이 일부 포함됐다.
+
+예:
+- `"빚투 버티기 어렵다"…반대매매 917억 터져`
+- `양향자 단식농성장` 관련 기사
+
+의미:
+- 현재 필터링 정책은 계획 문서상 구현됐고 테스트 데이터 기준으로도 통과했지만
+- 실데이터에서는 `삼성전자`가 메타데이터 어딘가에 포함되면 통과하는 케이스가 남아 있음
+- 즉 Phase 1의 “실행 가능성”은 검증됐고, 다음 개선 포인트는 relevance precision 강화
+
+후속 조치:
+- 위 노이즈를 줄이기 위해 A/B 정교화(그래픽 기사 제외, 제목 우선 매칭)를 코드에 반영
+- 테스트 데이터 기준으로는 `filtered=8 / inserted=3`까지 개선 확인
+- 다만 다종목 rollback live sync 비교는 이 세션 실행 환경의 HTTPS 재현성 이슈로 보류
 
 ## 현재까지 확인된 결론
 
@@ -274,23 +425,41 @@
 - 오래된 본문 `NULL` 처리
 
 즉, 외부 API/실크롤링을 제외한 `news_cache` 핵심 적재 정책은 코드와 검증 스크립트 기준으로 Phase 1 수준까지 닫힌 상태다.
+추가로 Redis 실연결과 live sync rollback 검증까지 통과했다.
 
 ## 남은 이슈
 
-### 1. 실운영 연결 검증은 아직 미완료
+### 1. relevance precision 추가 관찰 필요
+
+현재 상태:
+- 값싼 A/B 정교화는 구현 및 테스트 완료
+- 실데이터 1종목 rollback에서 보인 노이즈에 대한 1차 대응은 들어감
+- 다종목 실데이터 비교는 추가 필요
+
+의미:
+- 기능상 Phase 1은 완료권
+- 운영 품질 기준으로는 `관련성 precision`의 추가 관찰/튜닝이 다음 우선순위
+
+개선 후보:
+- `005930`, `000660`, `035420` 등 2~3종목 rollback live sync로 노이즈 잔존율 비교
+- 필요 시 description-only 매칭 추가 완화
+- 필요 시 점수제/도메인 패턴은 Phase 2에서 검토
+- 짧은 `name_kr` 종목(prefix 충돌 위험) 노출도 점검 결과를 바탕으로 exact match 규칙 보강 여부 검토
+
+사전 점검 메모:
+- `SELECT symbol, name_kr, length(name_kr) ... WHERE length(name_kr) <= 3` 조회 결과, `LG`, `LS`, `CJ`, `DL`, `기아`, `한화` 등 짧은 종목명이 다수 존재
+- 이런 종목은 substring count 기반 규칙에서 prefix 충돌 가능성이 있으므로 Phase 2 백로그로 관리
 
 아직 하지 않은 것:
-- 네이버 뉴스 API 실호출
-- 실제 기사 페이지 본문 추출
-- Redis 실제 lock/cooldown 검증
 - watchlist 등록 후 background task 연결
 
 ## 다음 권장 순서
 
-1. Redis 실제 연결 확인
-2. 실 API 기반 `sync_news_for_ticker(symbol)` 검증
-3. watchlist 등록 후 background task 연결
-4. 필요 시 scheduler/worker 연결
+1. `005930`, `000660`, `035420` 등 대표 종목으로 rollback 재검증
+2. 노이즈가 허용 가능하면 `--commit`으로 실제 적재 검증
+3. 여전히 시끄러우면 점수제/도메인 패턴을 Phase 2로 설계
+4. watchlist 등록 후 background task 연결
+5. 필요 시 scheduler/worker 연결
 
 ## 변경 파일
 
@@ -301,3 +470,5 @@
 
 추가:
 - `scripts/validate_news_ingestion.py`
+- `scripts/run_live_news_sync.py`
+- `scripts/validate_redis_integration.py`
