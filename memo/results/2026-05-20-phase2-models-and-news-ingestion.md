@@ -519,6 +519,67 @@ plan Phase 3 전체.
 
 ### 🟢 메모만 (Phase 3 백로그로 자연 흡수)
 
+---
+
+## 4차 진행: Phase 2 종료 준비 (test user 시드 + endpoint 검증 전제 정리)
+
+### 1. 테스트용 `app_user` 실제 시드 완료
+
+추가 파일:
+- `scripts/seed.py`
+
+실행:
+- `python -m scripts.seed`
+
+실행 결과:
+- `phase2-test-user@example.com`
+- `Phase2 Test User`
+- 실제 클라우드 DB `app_user` 테이블에 1건 생성 완료
+
+의미:
+- 더 이상 `app_user`가 0건이라서 endpoint 검증을 못 하는 상태는 아님
+- 이후 `POST /api/watchlists` 실호출 검증에 필요한 최소 전제 데이터는 준비됨
+
+### 2. endpoint 레벨 검증 시도 결과
+
+목표:
+- `fastapi.testclient.TestClient`로 ASGI in-process 호출
+- `POST /api/watchlists`
+- `GET /api/watchlists/{user_id}`
+
+실행 시도 결과:
+- `from fastapi.testclient import TestClient; from app.main import app`
+- 현재 `venv`/`pyenv` 런타임의 `_ssl` 링크 문제로 실패
+
+실패 에러:
+- `ImportError: /usr/lib/x86_64-linux-gnu/libcrypto.so.3: version 'OPENSSL_3.3.0' not found`
+
+영향:
+- watchlist 비즈니스 로직 자체가 막힌 것은 아님
+- `service/repository/background trigger` 검증은 이미 통과
+- `TestClient` 기반 endpoint smoke test만 런타임 환경 문제로 미완료
+
+### 3. 현재 시점 Phase 2 종료 판단
+
+코드/정책/서비스 검증 기준으로는 Phase 2 핵심 범위가 닫혔다고 볼 수 있다.
+
+닫힌 항목:
+- SQLAlchemy 모델 구현 및 live DB 매핑 검증
+- `sync_news_for_ticker(symbol)` 구현
+- 실 네이버 API + 실 스크래퍼 + 실제 DB `news_cache` commit 확인
+- Redis lock/cooldown/fail-closed 실연결 검증
+- `watchlist -> background sync` 서비스 레벨 연결
+- watchlist 보완사항 1~7 반영 및 rollback 검증
+- 테스트용 `app_user` 시드 완료
+
+남은 환경 의존 항목:
+- `TestClient` 기반 endpoint 레벨 smoke test 1건
+
+정리:
+- Phase 2의 기능 구현과 서비스 레벨 검증은 완료
+- 남은 것은 애플리케이션 런타임(OpenSSL) 환경 정상화 후 수행할 endpoint smoke test
+- 따라서 다음 구현 작업은 Phase 3 (`scheduler/cleanup`)로 넘어가고, endpoint smoke test는 환경 이슈 해소 후 보강 검증으로 처리하는 것이 자연스럽다
+
 8. **인증/권한 부재**
    - `WatchlistCreateRequest.user_id`를 클라이언트가 임의로 보낼 수 있는 구조.
    - JWT 통합 시 request body의 `user_id` → 토큰 sub로 대체 필요.
