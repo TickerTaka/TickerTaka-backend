@@ -257,6 +257,92 @@ DB 검증 스크립트(`scripts/check_tz.py`)로 클라우드 DB의 실제 상�
 → 코드도 UTC aware datetime으로 통일하고, DB가 알아서 KST로 표시하는 방향으로 결정.
 → plan의 시간대 정책 섹션도 `TIMESTAMP / naive` → `TIMESTAMPTZ / aware` 로 갱신.
 
+## 2차 진행: Phase 2 시작 (watchlist 트리거 연결)
+
+이번 단계에서 추가한 내용:
+- `watchlist` 생성/조회 API 초안 구현
+- `watchlist` 저장 후 `BackgroundTasks`로 `sync_news_for_ticker(symbol)` 트리거 연결
+- `watchlist` 서비스/트리거 rollback 검증 스크립트 추가
+
+추가/수정 파일:
+- `app/api/watchlist.py`
+- `app/schemas/watchlist.py`
+- `app/repositories/watchlist_repository.py`
+- `app/domain/watchlist_service.py`
+- `app/core/db.py`
+- `app/main.py`
+- `app/config.py`
+- `scripts/validate_watchlist_flow.py`
+
+구현 범위:
+- `POST /api/watchlists`
+  - `user_id`, `symbol`, `memo` 입력
+  - 사용자/종목 존재 확인
+  - 중복 watchlist 차단
+  - 저장 후 background sync enqueue
+- `GET /api/watchlists/{user_id}`
+  - 사용자 watchlist 목록 조회
+
+현재 검증 상태:
+- `python -m compileall app` 통과
+- FastAPI 라우트 import 수준의 정적 코드는 정상
+- 다만 실제 `app.main` import 기반 런타임 검증은 현재 pyenv/OpenSSL `_ssl` 링크 문제 때문에 막힘
+- `python -m scripts.validate_watchlist_flow` 통과
+  - 임시 사용자 rollback 기반 watchlist 생성/목록 조회/중복 차단 확인
+  - background trigger가 `sync_news_for_ticker(symbol, mode=\"initial\", force=True)`를 호출하는 경로 확인
+
+추가 메모:
+- 현재 원격 DB의 `app_user`는 0건이라, 실사용자 기준 `POST /api/watchlists` 실호출 검증은 아직 전제 데이터가 없음
+- 따라서 이번 단계에서는 rollback 기반 서비스 검증으로 Phase 2 첫 연결부를 확인
+
+의미:
+- Phase 2의 첫 구현인 "관심 종목 추가 -> news sync 트리거" 흐름은 코드상 연결 완료
+- 남은 것은 런타임 환경 정상화 후 API 실호출 검증
+
+## 3차 보완: watchlist 연결부 보완 검토 반영
+
+반영한 보완:
+1. `create_watchlist` 응답 일관성
+   - `repo.create()`가 생성 직후 `joinedload(ticker)` 기준 객체를 다시 반환하도록 수정
+   - create/list 응답 모두 `ticker_name_kr` 채움
+
+2. `sync_enqueued` 의미 정리
+   - `background_tasks.add_task(...)` 성공 시에만 `sync_enqueued=True`
+   - 예외 시 `False` 반환 가능하도록 변경
+
+3. `validate_watchlist_flow.py` 검증 범위 확장
+   - empty watchlist 사용자 → 빈 리스트
+   - 존재하지 않는 사용자 create/list → `UserNotFoundError`
+   - 존재하지 않는 symbol create → `TickerNotFoundError`
+   - background sync 내부 예외 발생 시 caller 쪽 예외 전파 없이 `logger.exception`만 호출되는지 확인
+   - 검증용 symbol 하드코딩 제거, DB에서 동적으로 조회
+
+4. 저장 직후 재조회 비용 정리
+   - `repo.create()`에서 `refresh()` + `get_by_id()` 2회 조회 대신
+   - `session.refresh(watchlist, attribute_names=["ticker"])`로 1회화
+
+5. `add_task()` 실패 로그 추가
+   - `sync_enqueued=False`만 두지 않고 `logger.exception(...)` 남기도록 보완
+
+추가/수정 파일:
+- `app/api/watchlist.py`
+- `app/repositories/watchlist_repository.py`
+- `scripts/validate_watchlist_flow.py`
+
+추가 검증 결과:
+- `python -m scripts.validate_watchlist_flow` 통과
+  - `service_flow`
+  - `empty_watchlist`
+  - `missing_user`
+  - `missing_ticker`
+  - `background_trigger`
+  - `background_failure`
+
+남겨둔 항목:
+- 실제 `POST /api/watchlists` endpoint 레벨 검증
+  - 현재 원격 DB `app_user` 0건
+  - FastAPI 런타임 import는 여전히 `_ssl` 링크 문제 영향
+
 ### 적용된 코드 수정
 
 #### 🔴 1. aware datetime 일관화
@@ -388,3 +474,75 @@ plan Phase 3 전체.
 추가:
 - `scripts/check_tz.py`
 - `scripts/validate_enums.py`
+
+---
+
+## 2차 보완 검토 (Phase 2 첫 연결부 시점)
+
+`validate_watchlist_flow.py`까지 통과한 시점 기준으로 코드/검증을 재점검한 결과 정리. 운영 검증으로 넘어가기 전에 닫고 가는 게 좋은 항목과, Phase 3 백로그로 미뤄도 무방한 항목을 분리.
+
+### ✅ 잘 잡혀 있는 부분
+
+- `db.commit()` 직후 `background_tasks.add_task(sync_watchlist_news, symbol)` 호출 순서 — commit 실패 시 enqueue 안 됨이 코드상 보장됨 (`app/api/watchlist.py:47-64`).
+- 중복 watchlist의 race condition을 `WatchlistAlreadyExistsError` + `IntegrityError` 양쪽으로 커버 → 409로 일관 변환.
+- `sync_watchlist_news`가 자체 `session_scope()`를 열어 API 세션과 독립 트랜잭션으로 동작.
+- `sync_watchlist_news` 내부 `except Exception`이 background sync 실패가 API 응답을 깨지 않도록 흡수.
+- `WatchlistService`에서 user/ticker 존재 검사 → 명시적 도메인 예외 → API 레이어에서 404/409 매핑.
+
+### 🔴 닫고 가는 게 좋은 보완
+
+1. **`sync_enqueued: bool` 응답이 항상 True 고정 (`app/api/watchlist.py:65`)**
+   - 현재 `WatchlistCreateResponse(watchlist=..., sync_enqueued=True)`가 무조건 True.
+   - `background_tasks.add_task`는 동기 등록이라 실패할 일은 거의 없지만, 그러면 필드 자체가 정보 0.
+   - 권장: 필드 제거하거나, 의미를 가질 수 있는 시점(쿨다운으로 skip이 예상되면 False 등)에만 노출. Phase 2 단계에선 제거가 깔끔.
+
+2. **Create 응답의 `ticker_name_kr`이 항상 `None`으로 응답됨**
+   - `WatchlistRepository.create()`는 `joinedload(ticker)` 없이 flush+refresh만 하므로 `_to_item_response`에서 `getattr(item, "ticker", None)` → None.
+   - 반면 `list_watchlists`는 `joinedload(Watchlist.ticker)`로 채워짐 → 같은 응답 스키마인데 create/list 결과가 다름.
+   - 권장: `repo.create()` 직후 `session.refresh(watchlist, ["ticker"])` 한 줄 추가, 또는 create 직후 `get_by_user_and_symbol`로 다시 읽기.
+
+### 🟡 검증 시나리오 보강
+
+현재 `validate_watchlist_flow.py`는 happy path 2케이스(서비스 생성/중복, background trigger)만 검증. 다음 케이스가 비어 있음:
+
+3. **존재하지 않는 `user_id` → `UserNotFoundError`**
+4. **존재하지 않는 `symbol` → `TickerNotFoundError`**
+5. **빈 watchlist 사용자의 `list_watchlists` → 빈 리스트**
+6. **`sync_watchlist_news` 내부에서 sync 함수가 예외를 던져도 호출자 측면에서는 silent (logger.exception만)**
+   - patch한 FakeNewsIngestionService가 `sync_news_for_ticker`에서 `raise RuntimeError(...)` 하는 케이스로 한 줄 추가
+
+추가로:
+
+7. **`validate_watchlist_flow.py`의 `symbol="005930"` 하드코딩**
+   - `ticker_metadata`에 005930 없으면 통째로 깨짐.
+   - 권장: `validate_news_ingestion.py`의 `get_test_ticker(session)` 패턴 재사용 (가장 안전한 종목 자동 선택).
+
+### 🟢 메모만 (Phase 3 백로그로 자연 흡수)
+
+8. **인증/권한 부재**
+   - `WatchlistCreateRequest.user_id`를 클라이언트가 임의로 보낼 수 있는 구조.
+   - JWT 통합 시 request body의 `user_id` → 토큰 sub로 대체 필요.
+   - 단, 현 단계는 API 실호출 대상이 아직 없어 즉각 영향 없음.
+
+9. **`NewsIngestionService` 매 호출 시 새 Redis 클라이언트 생성**
+   - `sync_watchlist_news` → `NewsIngestionService(session)` → `_build_redis_client(redis_url)` 매번 신규.
+   - 워치리스트 등록 빈도가 낮아 성능 영향 미미. Phase 3에서 dependency injection 정리할 때 함께 해결.
+
+10. **`sync_watchlist_news` 안에서 `ticker_metadata` 사라지면 silent fail**
+    - 시퀀스 상 user가 watchlist 생성 직후 다른 누가 ticker_metadata를 삭제하는 케이스만 해당 → 운영상 거의 0.
+    - `logger.exception`만 남으므로 관측은 됨.
+
+### 🟢 API 실호출 검증 우회 (OpenSSL 회피)
+
+11. **FastAPI 런타임 import가 `_ssl` 링크 문제로 흔들리는 상황 대안**
+    - `fastapi.testclient.TestClient`는 ASGI 인메모리 transport라 외부 HTTPS 모듈 호출이 필요 없음.
+    - `httpx` import만 통과하면 TestClient로 `POST /api/watchlists` happy path 확인이 가능.
+    - 권장: OpenSSL 정비 전에도 `validate_watchlist_api.py`(가칭) 한 개로 endpoint 레벨 검증 시도 → 환경 문제와 코드 문제 분리.
+
+### 다음 단계 정리 (보고서 본문 위 "다음 작업"과 동일 정렬)
+
+- (a) **테스트용 `app_user` 1명 INSERT** → `POST /api/watchlists` 실호출 → background sync 동작까지 end-to-end 확인.
+- (b) 위 보완 1, 2, 3, 4, 5, 6, 7 닫기 (서비스 레벨 검증만이라 OpenSSL 무관).
+- (c) Phase 3 (scheduler/cleanup) 진입.
+
+(a)와 (b)는 독립이라 어느 쪽 먼저 가도 무방. (b)가 외부 환경 무관하게 바로 진행 가능하다는 점이 장점.

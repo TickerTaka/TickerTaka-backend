@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     )
 
     app_env: str = Field(default="development", alias="APP_ENV")
+    app_name: str = Field(default="TickerTaka Backend", alias="APP_NAME")
 
     # DB
     database_url: str = Field(
