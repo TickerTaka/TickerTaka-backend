@@ -472,3 +472,384 @@ live sync 결과를 보면 `filtered=0`인데도 아래처럼 종목 관련성�
 - `scripts/validate_news_ingestion.py`
 - `scripts/run_live_news_sync.py`
 - `scripts/validate_redis_integration.py`
+
+## Phase 3 진행: scheduler / cleanup 골격 구현
+
+이번 단계에서 추가한 범위:
+- watchlist 등록 종목 대상 `mode="refresh"` 주기 실행 서비스 추가
+- `ttl_until < now()` 기준 TTL cleanup 서비스 추가
+- 종목별 row/content trim sweep을 정기 실행 경로로 분리
+- sweep 단위 최근 실행 시각 Redis 기록 추가
+- 네이버 뉴스 API 일일 호출량 Redis 카운터 추가
+- 외부 API 없이 검증 가능한 Phase 3 검증 스크립트 추가
+
+### 구현 파일
+
+수정:
+- `app/repositories/watchlist_repository.py`
+- `app/repositories/news_cache_repository.py`
+
+추가:
+- `app/domain/news_cache_scheduler.py`
+- `scripts/run_news_cache_scheduler.py`
+- `scripts/validate_news_cache_scheduler.py`
+
+### 구현 내용
+
+#### 1. watchlist symbol sweep
+
+`WatchlistRepository.list_distinct_symbols()` 추가:
+- 현재 watchlist에 등록된 종목 symbol 집합을 중복 없이 조회
+- Phase 3 refresh sweep의 순회 기준으로 사용
+
+#### 2. news cache cleanup helpers
+
+`NewsCacheRepository`에 아래 메서드 추가:
+- `list_symbols_with_cache()`
+- `delete_expired_rows(now=None)`
+
+용도:
+- cleanup 시 실제 캐시가 존재하는 symbol만 순회
+- `ttl_until < now()` row를 일괄 삭제
+
+#### 3. scheduler service
+
+`app/domain/news_cache_scheduler.py`
+
+추가된 핵심 메서드:
+- `run_watchlist_refresh(force=False, limit=None)`
+  - watchlist symbol 순회
+  - 각 symbol에 대해 `sync_news_for_ticker(symbol, mode="refresh")` 호출
+  - symbol마다 별도 session_scope를 사용해 트랜잭션 격리
+  - 집계 결과를 `RefreshSweepResult`로 반환
+- `run_news_cleanup(now=None)`
+  - TTL 만료 row 삭제
+  - symbol별 row trim
+  - symbol별 content trim
+  - 집계 결과를 `CleanupSweepResult`로 반환
+
+추가된 진입점:
+- `run_scheduled_watchlist_refresh()`
+- `run_scheduled_news_cleanup()`
+
+이 함수들은 `session_scope()`를 열어 한 번의 운영 실행 단위로 바로 사용할 수 있게 구성했다.
+
+추가 보완:
+- refresh sweep은 symbol별로 별도 세션을 열어 한 symbol 실패가 이후 symbol 처리까지 전염되지 않게 했다
+- refresh / cleanup 각각에 대해 `news-sync:sweep:last-run:{mode}` Redis 키를 남긴다
+- last-run 값은 unix timestamp가 아니라 `KST ISO 8601` 문자열로 저장해 운영자가 `redis-cli`에서 바로 읽을 수 있게 했다
+
+#### 3-1. 일일 API 호출량 집계
+
+`app/domain/news_ingestion.py`
+
+추가된 동작:
+- 네이버 뉴스 API 호출 직후 `naver-api-count:YYYY-MM-DD` Redis 키를 `INCR`
+- 첫 호출 시 `48시간 TTL` 설정
+
+의미:
+- plan Phase 3의 `일일 API 호출량 로그 집계`를 가장 가벼운 Redis 방식으로 충족
+- 외부 로그 분석기 없이도 일별 호출량을 바로 확인 가능
+- 날짜 기준은 운영/UI 기준에 맞춰 `KST(Asia/Seoul)`로 계산
+
+#### 4. 운영 실행 스크립트
+
+`scripts/run_news_cache_scheduler.py`
+
+지원 모드:
+- `--mode refresh`
+- `--mode cleanup`
+- `--mode all`
+
+옵션:
+- `--force`
+- `--limit`
+
+용도:
+- 외부 cron 또는 별도 scheduler 프로세스에서 바로 호출 가능한 최소 진입점
+- 출력은 Python repr이 아니라 JSON 한 줄 포맷으로 맞춤
+
+### 검증
+
+실행:
+- `source venv/bin/activate && python -m compileall app scripts`
+- `source venv/bin/activate && python -m scripts.validate_news_cache_scheduler`
+
+검증 스크립트:
+- `scripts/validate_news_cache_scheduler.py`
+
+검증 시나리오:
+
+0. `daily_api_counter`
+- `scripts/validate_news_ingestion.py`에서 검증
+- Naver 호출 1회당 Redis 일일 카운터가 증가하는지 확인
+- 첫 증가 시 TTL이 설정되는지 확인
+
+결과:
+- counter=`1`
+- ttl=`172800`
+
+1. `watchlist_refresh`
+- watchlist symbol 집합만 순회하는지 확인
+- 각 symbol에 대해 `mode="refresh"`, `force=True`, `limit=4`로 호출되는지 확인
+- 집계 결과가 호출 수와 일치하는지 확인
+
+결과:
+- `symbols=['000020', '000040']`
+- `fetched=6`
+- `inserted=2`
+- `ALL PASSED`
+
+2. `refresh_failure_isolation`
+- 한 symbol은 강제 실패, 다른 symbol은 정상 처리되게 구성
+- 한 symbol 실패가 sweep 전체를 망치지 않고 다음 symbol이 계속 처리되는지 확인
+
+결과:
+- `failed=000020`
+- `processed=000040`
+
+3. `cleanup_sweep`
+- TTL 만료 row 삭제
+- row 상한 초과분 trim
+- content 상한 초과분 trim
+- 정리 후 최종 row/content 개수가 기대값과 일치하는지 확인
+
+결과:
+- `deleted=1`
+- `trimmed_rows=2`
+- `trimmed_content=1`
+- 정리 후 해당 symbol row=`3`, content row=`2`
+
+4. `cleanup_no_expired`
+- TTL 만료 row가 없을 때 `deleted_expired_rows=0` 확인
+
+5. `cleanup_under_limits`
+- row 수와 content 수가 상한 미만일 때 trim이 발생하지 않는지 확인
+
+6. `empty_watchlist`
+- watchlist symbol이 0건일 때 `processed=0`, `failed=0` 확인
+
+### 현재 상태
+
+Phase 3 핵심 명세 기준으로 아래가 닫혔다.
+
+- watchlist 대상 refresh 실행 진입점
+- TTL cleanup 실행 진입점
+- row/content trim 정기 실행 경로
+- sweep 단위 최근 실행 시각 기록
+- 일일 네이버 API 호출량 집계
+- symbol 단위 트랜잭션 격리
+- fake sync + live DB 세션 기반 검증 스크립트
+
+추가 보강:
+- plan "최소 구조화 로그"의 `그룹화로 절약된 본문 크롤링 건수`를 `SyncNewsResult.body_quota_saved_count`로 노출
+- sync 로그 `extra`와 refresh sweep 결과에 `body_quota_saved` 키 추가
+- `scripts/validate_news_ingestion.py`에 `body_quota_saved` 시나리오 추가 (4건이 1그룹으로 묶이는 케이스, 절약 3건 PASS)
+
+아직 남은 것:
+- 실제 cron / worker 연결
+- 필요 시 `DataRefreshJob` 테이블과의 연결
+
+참고:
+- `DataRefreshJob`은 현재 스키마상 `symbol NOT NULL`이라 sweep 전체를 1 row로 남기기엔 바로 맞지 않는다
+- 따라서 현재는 Redis last-run 기록으로 Phase 3 실행 시각 추적을 닫고, `DataRefreshJob` 연동은 후속 확장으로 둔다
+
+## 라이브 검증과 관련성 매칭 보강
+
+### 1. 라이브 테스트 스크립트 추가
+
+`scripts/live_test_watchlist_sync.py`
+
+목적:
+- watchlist 등록 → BackgroundTasks → `sync_news_for_ticker` → 네이버 API + 본문 크롤링 + `news_cache` 적재까지 한 사이클을 실제 외부 의존성에 붙여 end-to-end 검증
+
+흐름:
+- `phase2-test-user@example.com` 시드 사용자 + 검증 대상 종목(`000660` SK하이닉스 기본)
+- 시작 시점에 해당 사용자/종목의 잔여 row 정리
+- `TestClient`로 `POST /api/watchlists` 호출 (FastAPI `BackgroundTasks`가 sync를 동기 실행)
+- 적재된 `news_cache` row 결과 출력 (총 row 수, content 보유 수, source 다양성, 상위 5건 샘플)
+- 적재 후 row는 DB에 남겨두어 운영자가 직접 확인 가능
+- `--cleanup` 옵션으로 watchlist + news_cache row 정리 단계 분리
+
+로깅:
+- `root` logger를 `INFO`로 올리고 `ExtraFormatter`로 sync 로그 `extra`를 한 줄에 같이 출력
+- `sqlalchemy` / `urllib3` / `httpx` / `httpcore` / `asyncio`는 `WARNING`으로 억제
+- sync 종료 시 `news sync finished | symbol=... fetched=... grouped=... body_quota_saved=... body_saved=... filtered=...` 형태로 카운터가 그대로 콘솔에 노출됨
+
+### 2. 첫 라이브 결과 (000660 SK하이닉스)
+
+```
+target  : 000660 (SK하이닉스)
+news sync finished | symbol=000660 fetched=15 inserted=2 updated=0 skipped=0 body_failed=0 grouped=5 body_quota_saved=10 body_saved=2 elapsed_ms=1766
+total_rows=2 content_not_null=2 distinct_sources=2 (매일경제, 연합뉴스)
+filtered=13
+```
+
+분해:
+- 네이버 검색 15건 모두 `_passes_prefilter` 통과 (Filter A — 제목 패턴/광고/외국어 차단 단계 통과)
+- 제목 유사도 Jaccard 0.7 그룹화로 그룹 5개 형성 → 그룹 대표 5건만 본문 크롤링 (`body_quota_saved=10`)
+- 본문 크롤링 5건 모두 성공 (`body_failed=0`)
+- `_passes_storage_filters`에서 13건 filtered, 2건 inserted
+  - 본문 없는 후보 10건은 제목/요약 기준 매칭 부족
+  - 본문 있는 5건 중 3건은 본문 매칭(`name_kr ≥ 2회`) 또는 200자 기준에서 컷
+
+### 3. 매칭 누락 발견: 띄어쓰기 변형
+
+`_contains_exact_name_reference`/`_count_exact_name_reference`가 단순 `str.__contains__` / `str.count` 기반이라 `name_kr="SK하이닉스"`와 본문 `"SK 하이닉스"` 같은 띄어쓰기 변형이 매칭되지 않음.
+
+영향:
+- 한국 매체 표기 관행상 `SK하이닉스` / `SK 하이닉스` / `삼성전자` / `삼성 전자` / `현대자동차` / `현대 자동차` 등이 매체별로 갈림
+- 13건 filtered 중 상당수가 본문에 띄어쓰기 변형으로만 등장해 매칭 실패한 케이스로 추정
+
+### 4. 옵션 1: 공백 무시 매칭 구현
+
+`app/domain/news_ingestion.py`
+
+추가/변경:
+- `_strip_whitespace(value)` 헬퍼 추가 (`WHITESPACE_RE.sub("", value)`)
+- `_contains_exact_name_reference`와 `_count_exact_name_reference` 양쪽에서 비교 직전에 양변 공백 제거
+- 결과적으로 본문/제목의 띄어쓰기 변형을 정확 매칭과 동일하게 취급
+
+다음은 영향을 받지 않는다:
+- `_passes_prefilter`의 한글/심볼 존재 검사 (`_contains_hangul`, `_contains_symbol_reference`)
+- 제목 유사도 그룹화의 `normalize_title` (토큰화 기반이라 별도)
+- 광고/미러링 마커, 제목 패턴 차단
+
+### 5. 검증 시나리오 추가
+
+`scripts/validate_news_ingestion.py`에 단위 검증 시나리오 `whitespace_variant_match` 추가.
+
+검증 케이스:
+- `name_kr="SK하이닉스"` 기준
+- 제목 `"SK 하이닉스 호실적 발표"` → 매칭 통과
+- 본문 `"... SK 하이닉스가 ... SK 하이닉스의 ..."` (2회) → 매칭 통과
+- 본문 `"... SK 하이닉스가 언급되었다."` (1회) → 매칭 실패 (2회 미만)
+- 본문 `"삼성전자 ... 삼성전자 ..."` → 매칭 실패 (다른 종목)
+
+결과:
+- `validate_news_ingestion` 전체 11 시나리오 PASS (whitespace_variant_match 포함)
+- `validate_news_cache_scheduler` 6 시나리오 PASS
+
+### 6. 운영 후속 액션
+
+- 동일 라이브 테스트 재실행 시 `filtered` 카운터 감소 / `inserted` 증가 여부 관찰
+- 영문 표기 (`SK Hynix`), 한글 표기 변형 (`에스케이하이닉스`)은 여전히 매칭 불가 → 필요해지면 `ticker_metadata` alias 컬럼 도입 검토 (옵션 2, 현재는 보류)
+
+## partial insert 보강 + 초기 적재 정책 완화
+
+### 1. 발견 — plan과 구현의 격차
+
+`scripts/live_test_watchlist_sync` 재실행 결과 `fetched=15 → inserted=1`이 다시 관찰되었다. 분석 결과:
+
+- plan 본문은 "본문 크롤링 실패 시 `content` 없이 partial insert 허용 / 메타데이터만으로도 저장 가능"을 명시 (`memo/plans/news-cache-ingestion-plan.md:171-173`)
+- 그러나 `_matches_ticker_reference`가 **본문이 없는 후보에 대해서는 제목 또는 metadata+body에 `symbol` 매칭만** 요구해 description에 `name_kr`이 들어 있어도 컷됨
+- 결과적으로 그룹화로 본문 시도 안 한 `body_quota_saved` 후보 다수가 storage filter에서 떨어져 plan의 "partial insert 허용" 의도가 실현되지 못함
+
+### 2. 옵션 P1 — 본문 없는 후보에만 metadata `name_kr` 매칭 허용
+
+`app/domain/news_ingestion.py`
+
+변경 위치: `_matches_ticker_reference`
+
+```python
+if not body_text and cls._contains_exact_name_reference(metadata_text, ticker.name_kr):
+    return True
+```
+
+설계:
+- 본문이 있는 후보는 기존대로 `body name_kr ≥ 2회` 기준 유지 → 노이즈 컷 강도 유지
+- 본문이 없는 후보는 metadata(title + description)에 `name_kr` 1회 매칭으로 통과 허용 → partial insert 허용
+- 옵션 1(공백 무시 매칭)과 시너지 → 띄어쓰기 변형도 같은 경로로 통과
+
+본문 있는 케이스에 대한 안전성은 `body_quota_saved` / `whitespace_variant_match` 시나리오로 회귀 검증.
+
+### 3. 초기 적재 정책 완화
+
+운영 시나리오: 사용자가 watchlist 등록 직후 토론을 바로 시작할 때 evidence 후보가 너무 적은 문제 대응.
+
+| 상수 | 이전 | 변경 | 사유 |
+|---|---|---|---|
+| `INITIAL_FETCH_COUNT` | 15 | **20** | 첫 적재 후보 풀을 5건 더 확보 |
+| `REFRESH_FETCH_COUNT` | 5 | 5 (유지) | 정기 refresh는 누적이라 그대로 |
+| `BODY_CRAWL_LIMIT` | 5 | 5 (유지) | 본문 quota는 비용 보호 그대로 |
+| `MIN_CONTENT_LENGTH` | 200 | **120** | trafilatura 본문 추출이 부실해도 한 문단 수준이면 evidence로 사용 가능 |
+
+네이버 일일 API 한도(25,000건) 영향:
+- initial 1회 호출량만 15 → 20으로 증가
+- refresh 5건/시간 그대로 → 일일 누적 호출량 변화 미미
+
+plan 본문은 `15/5/5` + `200자`로 기록되어 있으나, 본 변경은 plan 본문의 "기본값" 정의 안에서 운영 튜닝 범위로 해석한다. plan 본문 수정은 별도 검토.
+
+### 4. 검증 시나리오 추가
+
+`scripts/validate_news_ingestion.py`에 단위 검증 `metadata_name_match` 추가.
+
+검증 케이스 (`name_kr="SK하이닉스"`):
+- 제목에 종목명 없음 + description에 `"SK하이닉스"` + 본문 없음 → 매칭 통과 (P1)
+- 제목에 종목명 없음 + description에 `"SK 하이닉스"` + 본문 없음 → 매칭 통과 (P1 + 옵션 1)
+- 제목에 종목명 없음 + description에 다른 종목명만 + 본문 없음 → 매칭 실패
+
+### 5. 회귀 검증
+
+- `validate_news_ingestion` 12 시나리오 모두 PASS (`metadata_name_match` 추가, `whitespace_variant_match` 유지)
+- `validate_news_cache_scheduler` 6 시나리오 모두 PASS
+- 본문 있는 케이스의 `name_kr ≥ 2회` 기준은 회귀 없음
+
+### 6. 후속 관찰 포인트
+
+- 라이브 재실행 시 `body_quota_saved` 10건 중 일부가 storage filter를 통과해 `inserted`가 늘어나는지 측정
+- `MIN_CONTENT_LENGTH=120` 완화로 trafilatura 부실 추출 케이스가 살아나는지 / 노이즈 증가량은 어느 정도인지 운영 데이터로 관찰
+- 노이즈가 너무 늘면 `MIN_CONTENT_LENGTH`만 다시 150~180 사이로 미세 조정 검토
+
+## 본문 추출 실패 측정 보강
+
+### 1. 라이브 재실행 결과의 두 번째 보틀넥
+
+partial insert 보강 후 라이브 결과:
+```
+fetched=20 inserted=16 grouped=5 body_quota_saved=15 body_saved=1 filtered=4
+content_not_null=1 (16 row 중 본문 보유는 1건)
+```
+
+`body_quota_saved`로 묶인 15건이 모두 적재됐다는 점에서 partial insert는 의도대로 작동. 다만 grouped 5건 중 본문이 채워진 건 1건뿐. trafilatura가 일부 매체 페이지(chosun.com, bizwnews 등)에서 raise 없이 **빈 본문을 반환**하는 케이스가 보틀넥으로 드러났다.
+
+### 2. 측정 보강 — `body_failed` 카운터 확장
+
+`app/domain/news_ingestion.py`의 `_scrape_candidate`가 기존에는 raise한 경우만 `body_failed_count`를 증가시켰다. 빈 본문 반환 케이스를 정확히 측정하기 위해 다음과 같이 확장:
+
+```python
+scraped = self.article_scraper.scrape(candidate.normalized_url)
+if scraped is None or not (scraped.content and scraped.content.strip()):
+    result.body_failed_count += 1
+    logger.info("article scrape returned empty content for %s", ...)
+```
+
+이제 다음 두 케이스 모두 `body_failed`로 잡힌다:
+- 스크래퍼가 예외를 던진 경우 (네트워크/파싱 오류)
+- 스크래퍼가 예외 없이 빈 `content`를 반환한 경우 (trafilatura 부실 추출)
+
+### 3. 검증 시나리오 추가
+
+`scripts/validate_news_ingestion.py`에 `body_failed_empty_content` 시나리오 추가.
+
+| 시나리오 | body_failed | inserted | 비고 |
+|---|---|---|---|
+| `partial_insert_on_scrape_failure` | 1 | 1 | scraper raise → partial insert |
+| `body_failed_empty_content` | 1 | 0 | 빈 본문 반환 → storage filter 컷 |
+
+전체 13 시나리오 PASS.
+
+### 4. 발견 — partial insert 경로 비대칭
+
+위 표에서 보이듯 같은 "본문 실패" 상황에서도 raise 경로는 partial insert를 받지만, 빈 본문 반환 경로는 storage filter 컷으로 row 자체가 안 들어간다. 코드 동선 차이:
+
+- **raise** → `_scrape_candidate` None 반환 → storage filter `scraped is None` 경로 → P1 매칭으로 통과 가능
+- **빈 본문 반환** → `scraped` not None 상태로 storage filter 진입 → `not scraped.content` 조건에서 컷
+
+plan의 "본문 크롤링 실패 시 partial insert 허용" 의도 관점에서 보면 두 경로가 동일하게 partial insert를 받는 게 자연스럽다. 다만 본 단계에서는 측정 보강만 적용하고, 동작 변경은 후속 결정으로 둔다.
+
+### 5. 후속 결정 후보
+
+- 빈 본문 반환 케이스도 None 반환으로 통일해 partial insert 경로로 합치기 (plan 의도 정렬)
+- 도메인별 `body_failed` 누적 (Redis `naver-body-fail:{host}:YYYY-MM-DD` INCR 등) → plan "추가 운영 지표 — 도메인별 본문 실패율" 충족 + blocklist 후보 발굴
+- trafilatura fallback 추출기 도입 (newspaper3k 등) → 본문 적재율 직접 개선

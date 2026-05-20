@@ -31,6 +31,10 @@ class WatchlistRepository:
         )
         return list(self.session.scalars(stmt))
 
+    def list_distinct_symbols(self) -> list[str]:
+        stmt = select(Watchlist.symbol).distinct().order_by(Watchlist.symbol)
+        return list(self.session.scalars(stmt))
+
     def get_by_id(self, watchlist_id: UUID) -> Watchlist | None:
         stmt = select(Watchlist).options(joinedload(Watchlist.ticker)).where(Watchlist.id == watchlist_id)
         return self.session.scalar(stmt)

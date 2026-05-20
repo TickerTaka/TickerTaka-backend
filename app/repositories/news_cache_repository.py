@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, case, select
+from sqlalchemy import Select, delete, distinct, select
 from sqlalchemy.orm import Session
 
 from app.models import NewsCache
@@ -36,6 +36,21 @@ class NewsCacheRepository:
         self.session.add(row)
         self.session.flush()
         return row
+
+    def list_symbols_with_cache(self) -> list[str]:
+        stmt = select(distinct(NewsCache.symbol)).order_by(NewsCache.symbol)
+        return list(self.session.scalars(stmt))
+
+    def delete_expired_rows(self, now: datetime | None = None) -> int:
+        cutoff = now or datetime.now(UTC)
+        result = self.session.execute(
+            delete(NewsCache).where(
+                NewsCache.ttl_until.is_not(None),
+                NewsCache.ttl_until < cutoff,
+            )
+        )
+        self.session.flush()
+        return int(result.rowcount or 0)
 
     def trim_rows_for_symbol(self, symbol: str, max_rows: int) -> int:
         rows = list(

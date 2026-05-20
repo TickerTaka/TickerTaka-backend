@@ -30,6 +30,7 @@ class ScenarioResult:
     body_failed: int
     body_saved: int
     grouped: int
+    body_quota_saved: int
     trimmed_rows: int
     trimmed_content: int
     final_rows: int
@@ -39,18 +40,33 @@ class ScenarioResult:
 class FakeRedis:
     def __init__(self, initial: dict[str, str] | None = None) -> None:
         self.store: dict[str, str] = dict(initial or {})
+        self.expiry: dict[str, int] = {}
 
     def set(self, key: str, value: str | float, nx: bool = False, ex: int | None = None) -> bool:
         if nx and key in self.store:
             return False
         self.store[key] = str(value)
+        if ex is not None:
+            self.expiry[key] = ex
         return True
 
     def get(self, key: str) -> str | None:
         return self.store.get(key)
 
     def delete(self, key: str) -> int:
+        self.expiry.pop(key, None)
         return int(self.store.pop(key, None) is not None)
+
+    def incr(self, key: str) -> int:
+        value = int(self.store.get(key, "0")) + 1
+        self.store[key] = str(value)
+        return value
+
+    def expire(self, key: str, seconds: int) -> bool:
+        if key not in self.store:
+            return False
+        self.expiry[key] = seconds
+        return True
 
 
 class FakeNaverNewsClient:
@@ -208,6 +224,7 @@ def to_result(name: str, raw_result, final_rows: int, final_content_rows: int) -
         body_failed=raw_result.body_failed_count,
         body_saved=raw_result.body_saved_count,
         grouped=raw_result.grouped_count,
+        body_quota_saved=raw_result.body_quota_saved_count,
         trimmed_rows=raw_result.trimmed_rows_count,
         trimmed_content=raw_result.trimmed_content_count,
         final_rows=final_rows,
@@ -483,6 +500,197 @@ def run_ttl_accuracy_scenario(ticker: TestTicker) -> ScenarioResult:
             session.rollback()
 
 
+def run_daily_api_counter_scenario(ticker: TestTicker) -> ScenarioResult:
+    base = datetime.now(UTC).replace(microsecond=0)
+    url = f"https://news.example.com/{ticker.symbol}/daily-api-counter"
+    item = build_item(ticker, url, "daily api usage counter headline", base)
+    redis_client = FakeRedis()
+
+    with SessionLocal() as session:
+        service = NewsIngestionService(
+            session,
+            news_client=FakeNaverNewsClient([item]),
+            article_scraper=FakeArticleScraper({url: build_scraped(url, item.title, base)}),
+            redis_client=redis_client,
+        )
+        try:
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
+            key = service._daily_api_count_key(base)
+            final_rows, final_content_rows = count_rows(session, ticker.symbol)
+            result = to_result("daily_api_counter", raw, final_rows, final_content_rows)
+            expect(redis_client.get(key) == "1", "daily_api_counter: daily counter should be incremented once")
+            expect(
+                redis_client.expiry.get(key) == service.DAILY_API_COUNT_TTL_SECONDS,
+                "daily_api_counter: daily counter ttl mismatch",
+            )
+            return result
+        finally:
+            session.rollback()
+
+
+def run_whitespace_variant_scenario() -> ScenarioResult:
+    """공백 변형 본문/제목에서도 name_kr 매칭이 되는지 단위 검증."""
+
+    class _MockTicker:
+        name_kr = "SK하이닉스"
+        symbol = "000660"
+
+    ticker = _MockTicker()
+
+    title_with_space = "SK 하이닉스 호실적 발표"
+    expect(
+        NewsIngestionService._matches_ticker_reference(title_with_space, "", "", ticker),
+        "whitespace_variant: title 'SK 하이닉스' should match name_kr 'SK하이닉스'",
+    )
+
+    body_two_hits = "오늘 SK 하이닉스가 발표했다. 추가로 SK 하이닉스의 신제품도 공개됐다."
+    expect(
+        NewsIngestionService._matches_ticker_reference("", "", body_two_hits, ticker),
+        "whitespace_variant: body with two 'SK 하이닉스' should match",
+    )
+
+    body_one_hit = "산업 전반 동향에서 SK 하이닉스가 언급되었다."
+    expect(
+        not NewsIngestionService._matches_ticker_reference("", "", body_one_hit, ticker),
+        "whitespace_variant: body with single 'SK 하이닉스' should NOT match (need >= 2)",
+    )
+
+    body_unrelated = "삼성전자는 호실적을 기록했다. 삼성전자가 또 발표했다."
+    expect(
+        not NewsIngestionService._matches_ticker_reference("", "", body_unrelated, ticker),
+        "whitespace_variant: unrelated body should NOT match",
+    )
+
+    return ScenarioResult(
+        name="whitespace_variant_match",
+        fetched=0,
+        inserted=0,
+        updated=0,
+        skipped=0,
+        filtered=0,
+        body_failed=0,
+        body_saved=0,
+        grouped=0,
+        body_quota_saved=0,
+        trimmed_rows=0,
+        trimmed_content=0,
+        final_rows=0,
+        final_content_rows=0,
+    )
+
+
+def run_body_failed_empty_content_scenario(ticker: TestTicker) -> ScenarioResult:
+    """스크래퍼가 raise 없이 빈 본문을 반환한 케이스가 body_failed로 잡히는지 확인."""
+    base = datetime.now(UTC).replace(microsecond=0)
+    url = f"https://news.example.com/{ticker.symbol}/empty-body"
+    item = build_item(ticker, url, "empty body extraction case", base)
+    empty_scraped = ScrapedArticle(
+        content="",
+        summary="",
+        source_name="example.com",
+        canonical_url=url,
+        published_at=base,
+    )
+
+    with SessionLocal() as session:
+        service = NewsIngestionService(
+            session,
+            news_client=FakeNaverNewsClient([item]),
+            article_scraper=FakeArticleScraper({url: empty_scraped}),
+            redis_client=FakeRedis(),
+        )
+        try:
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
+            final_rows, final_content_rows = count_rows(session, ticker.symbol)
+            result = to_result("body_failed_empty_content", raw, final_rows, final_content_rows)
+            expect(
+                result.body_failed == 1,
+                "body_failed_empty_content: scraper returning empty content should bump body_failed",
+            )
+            return result
+        finally:
+            session.rollback()
+
+
+def run_metadata_name_match_scenario() -> ScenarioResult:
+    """본문이 없어도 metadata(제목+description)에 name_kr이 있으면 매칭되는지 단위 검증 (옵션 P1)."""
+
+    class _MockTicker:
+        name_kr = "SK하이닉스"
+        symbol = "000660"
+
+    ticker = _MockTicker()
+
+    title = "AI 메모리 전쟁 마이크론 호실적"
+    metadata_with_name = (
+        "AI 메모리 전쟁 마이크론 호실적 SK하이닉스 등 한국 메모리 업체 동향"
+    )
+    expect(
+        NewsIngestionService._matches_ticker_reference(title, metadata_with_name, "", ticker),
+        "metadata_name_match: name_kr in metadata_text should match (P1)",
+    )
+
+    metadata_with_space_name = (
+        "AI 메모리 전쟁 마이크론 호실적 SK 하이닉스 등 한국 메모리 업체 동향"
+    )
+    expect(
+        NewsIngestionService._matches_ticker_reference(title, metadata_with_space_name, "", ticker),
+        "metadata_name_match: 'SK 하이닉스' in metadata_text should match (P1 + 옵션1)",
+    )
+
+    metadata_unrelated = "AI 메모리 전쟁 마이크론 호실적 삼성전자 동향"
+    expect(
+        not NewsIngestionService._matches_ticker_reference(title, metadata_unrelated, "", ticker),
+        "metadata_name_match: unrelated metadata should NOT match",
+    )
+
+    return ScenarioResult(
+        name="metadata_name_match",
+        fetched=0,
+        inserted=0,
+        updated=0,
+        skipped=0,
+        filtered=0,
+        body_failed=0,
+        body_saved=0,
+        grouped=0,
+        body_quota_saved=0,
+        trimmed_rows=0,
+        trimmed_content=0,
+        final_rows=0,
+        final_content_rows=0,
+    )
+
+
+def run_body_quota_saved_scenario(ticker: TestTicker) -> ScenarioResult:
+    base = datetime.now(UTC).replace(microsecond=0)
+    urls = [f"https://news.example.com/{ticker.symbol}/quota/{idx}" for idx in range(4)]
+    common_suffix = "분기 영업이익 14조원 돌파 사상 최고 갱신 실적"
+    items = [
+        build_item(ticker, url, common_suffix, base - timedelta(minutes=10 * idx))
+        for idx, url in enumerate(urls)
+    ]
+    scrapers = {urls[0]: build_scraped(urls[0], items[0].title, base)}
+
+    with SessionLocal() as session:
+        service = NewsIngestionService(
+            session,
+            news_client=FakeNaverNewsClient(items),
+            article_scraper=FakeArticleScraper(scrapers),
+            redis_client=FakeRedis(),
+        )
+        try:
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
+            final_rows, final_content_rows = count_rows(session, ticker.symbol)
+            result = to_result("body_quota_saved", raw, final_rows, final_content_rows)
+            expect(result.grouped == 1, "body_quota_saved: grouped should be 1")
+            expect(result.body_quota_saved == 3, "body_quota_saved: quota saved should be 3")
+            expect(result.body_saved == 1, "body_quota_saved: body_saved should be 1")
+            return result
+        finally:
+            session.rollback()
+
+
 def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
     base = datetime.now(UTC).replace(microsecond=0)
     urls = {
@@ -622,6 +830,11 @@ def main() -> None:
         run_cooldown_scenario(ticker),
         run_lock_skip_scenario(ticker),
         run_ttl_accuracy_scenario(ticker),
+        run_daily_api_counter_scenario(ticker),
+        run_body_failed_empty_content_scenario(ticker),
+        run_metadata_name_match_scenario(),
+        run_body_quota_saved_scenario(ticker),
+        run_whitespace_variant_scenario(),
         run_filtering_policy_scenario(ticker),
     ]
 
@@ -644,6 +857,7 @@ def main() -> None:
                     f"body_failed={scenario.body_failed}",
                     f"body_saved={scenario.body_saved}",
                     f"grouped={scenario.grouped}",
+                    f"body_quota_saved={scenario.body_quota_saved}",
                     f"trimmed_rows={scenario.trimmed_rows}",
                     f"trimmed_content={scenario.trimmed_content}",
                 ]

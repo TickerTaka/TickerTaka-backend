@@ -6,6 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 import logging
 import re
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -30,6 +31,7 @@ WHITESPACE_RE = re.compile(r"\s+")
 AD_MARKERS = ("[광고]", " 광고 ", "ad:", "sponsored", "pr newswire", "globenewswire", "보도자료")
 MIRROR_MARKERS = ("무단전재", "재배포", "기사제보")
 TITLE_EXCLUDE_MARKERS = ("[포토]", "[사진]", "[그래픽]", "[표]", "[인포그래픽]")
+KST = ZoneInfo("Asia/Seoul")
 
 
 @dataclass(slots=True)
@@ -40,6 +42,7 @@ class SyncNewsResult:
     skipped_count: int = 0
     body_failed_count: int = 0
     grouped_count: int = 0
+    body_quota_saved_count: int = 0
     body_saved_count: int = 0
     filtered_count: int = 0
     trimmed_rows_count: int = 0
@@ -58,17 +61,18 @@ class NewsCandidate:
 class NewsIngestionService:
     """Implements the news_cache ingestion policy."""
 
-    INITIAL_FETCH_COUNT = 15
+    INITIAL_FETCH_COUNT = 20
     REFRESH_FETCH_COUNT = 5
     BODY_CRAWL_LIMIT = 5
     MAX_CACHE_ROWS = 100
     MAX_CONTENT_ROWS = 10
     MAX_ARTICLE_AGE_DAYS = 7
     MIN_TITLE_LENGTH = 8
-    MIN_CONTENT_LENGTH = 200
+    MIN_CONTENT_LENGTH = 120
     COOLDOWN_MINUTES = 15
     LOCK_TTL_SECONDS = 600
     RECENT_GROUPING_HOURS = 24
+    DAILY_API_COUNT_TTL_SECONDS = 60 * 60 * 48
 
     def __init__(
         self,
@@ -116,6 +120,7 @@ class NewsIngestionService:
 
             fetch_limit = limit or (self.INITIAL_FETCH_COUNT if mode == "initial" else self.REFRESH_FETCH_COUNT)
             items = self.news_client.search_news(ticker.name_kr, display=fetch_limit, sort="date")
+            self._record_daily_api_call()
             result.fetched_count = len(items)
 
             candidates = self._build_candidates(symbol, items)
@@ -123,6 +128,7 @@ class NewsIngestionService:
             recent_rows = self.repo.get_recent_by_symbol(symbol, since_hours=self.RECENT_GROUPING_HOURS)
             body_candidates = self._select_body_candidates(candidates, recent_rows)
             result.grouped_count = len(body_candidates)
+            result.body_quota_saved_count = max(0, len(candidates) - len(body_candidates))
 
             body_urls = {
                 candidate.normalized_url: self._scrape_candidate(candidate, result)
@@ -168,6 +174,7 @@ class NewsIngestionService:
                 "skipped": result.skipped_count,
                 "body_failed": result.body_failed_count,
                 "grouped": result.grouped_count,
+                "body_quota_saved": result.body_quota_saved_count,
                 "body_saved": result.body_saved_count,
                 "trimmed_rows": result.trimmed_rows_count,
                 "trimmed_content": result.trimmed_content_count,
@@ -316,11 +323,19 @@ class NewsIngestionService:
         self, candidate: NewsCandidate, result: SyncNewsResult
     ) -> ScrapedArticle | None:
         try:
-            return self.article_scraper.scrape(candidate.normalized_url)
+            scraped = self.article_scraper.scrape(candidate.normalized_url)
         except Exception:
             result.body_failed_count += 1
             logger.exception("article scrape failed for %s", candidate.normalized_url)
             return None
+        if scraped is None or not (scraped.content and scraped.content.strip()):
+            result.body_failed_count += 1
+            logger.info(
+                "article scrape returned empty content for %s",
+                candidate.normalized_url,
+            )
+            return scraped
+        return scraped
 
     def _passes_prefilter(self, ticker: TickerMetadata, candidate: NewsCandidate) -> bool:
         item = candidate.item
@@ -404,15 +419,21 @@ class NewsIngestionService:
     def _contains_symbol_reference(value: str, symbol: str) -> bool:
         return bool(symbol and symbol in value)
 
+    @staticmethod
+    def _strip_whitespace(value: str) -> str:
+        return WHITESPACE_RE.sub("", value)
+
     @classmethod
     def _contains_exact_name_reference(cls, value: str, name_kr: str | None) -> bool:
-        return bool(name_kr and name_kr in value)
+        if not name_kr:
+            return False
+        return cls._strip_whitespace(name_kr) in cls._strip_whitespace(value)
 
     @classmethod
     def _count_exact_name_reference(cls, value: str, name_kr: str | None) -> int:
         if not value or not name_kr:
             return 0
-        return value.count(name_kr)
+        return cls._strip_whitespace(value).count(cls._strip_whitespace(name_kr))
 
     @classmethod
     def _matches_ticker_reference(
@@ -429,6 +450,9 @@ class NewsIngestionService:
 
         combined_text = f"{metadata_text} {body_text}".strip()
         if cls._contains_symbol_reference(combined_text, ticker.symbol):
+            return True
+
+        if not body_text and cls._contains_exact_name_reference(metadata_text, ticker.name_kr):
             return True
 
         body_match_count = cls._count_exact_name_reference(body_text, ticker.name_kr)
@@ -528,6 +552,17 @@ class NewsIngestionService:
         except Exception:
             logger.exception("failed to persist cooldown for %s", symbol)
 
+    def _record_daily_api_call(self) -> None:
+        if self.redis_client is None:
+            return
+        key = self._daily_api_count_key(datetime.now(UTC))
+        try:
+            count = self.redis_client.incr(key)
+            if count == 1:
+                self.redis_client.expire(key, self.DAILY_API_COUNT_TTL_SECONDS)
+        except Exception:
+            logger.exception("failed to record daily naver api usage")
+
     @staticmethod
     def _lock_key(symbol: str) -> str:
         return f"news-sync:lock:{symbol}"
@@ -535,3 +570,7 @@ class NewsIngestionService:
     @staticmethod
     def _last_run_key(symbol: str) -> str:
         return f"news-sync:last-run:{symbol}"
+
+    @staticmethod
+    def _daily_api_count_key(now: datetime) -> str:
+        return f"naver-api-count:{now.astimezone(KST).date().isoformat()}"
