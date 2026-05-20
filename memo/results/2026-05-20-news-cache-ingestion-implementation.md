@@ -853,3 +853,232 @@ plan의 "본문 크롤링 실패 시 partial insert 허용" 의도 관점에서 
 - 빈 본문 반환 케이스도 None 반환으로 통일해 partial insert 경로로 합치기 (plan 의도 정렬)
 - 도메인별 `body_failed` 누적 (Redis `naver-body-fail:{host}:YYYY-MM-DD` INCR 등) → plan "추가 운영 지표 — 도메인별 본문 실패율" 충족 + blocklist 후보 발굴
 - trafilatura fallback 추출기 도입 (newspaper3k 등) → 본문 적재율 직접 개선
+
+## 그룹 내 본문 즉시 fallback (옵션 E)
+
+### 1. 발견 배경
+
+`body_failed_empty_content` 라이브 결과(`chosun.com` 2건이 빈 본문)에서 해당 URL을 브라우저로 직접 열어보니 `403 Forbidden`이 반환됨. 즉 trafilatura의 추출 능력 문제가 아니라 **매체 측에서 우리 요청을 차단한 것**. trafilatura fallback 추출기(C)나 도메인 blocklist(D)로는 해결되지 않는 케이스다 — 응답 자체에 본문이 없기 때문.
+
+사용자 의도: "그룹이 5개로 나뉘었으니 최소 그만큼 본문이 들어와야 한다".
+
+### 2. plan 정신과 즉시 fallback
+
+plan 본문 (`memo/plans/news-cache-ingestion-plan.md:305-307`):
+```
+실패 처리:
+- 403, 429, timeout, parsing 실패 시 재시도 없이 partial insert
+- 동일 그룹 내 대표 본문이 실패하면 다음 refresh 주기에 같은 그룹의 다른 후보를 우선 시도
+```
+
+plan은 "다음 refresh 주기"라 했지만, 첫 watchlist 등록 시 토론을 바로 시작하는 운영 시나리오에서는 한 시간 뒤 회복은 너무 늦다. 같은 sync 사이클 안에서 그룹 내 다음 후보로 즉시 fallback하는 정책으로 보강한다.
+
+### 3. 구현
+
+`app/domain/news_ingestion.py`
+
+추가/변경:
+- `BODY_ATTEMPTS_PER_GROUP = 3` 상수 추가 (그룹당 최대 본문 시도 횟수)
+- `SyncNewsResult.body_attempts_count` 추가 (실제 본문 크롤링 시도 횟수)
+- `_select_body_candidates` → `_select_body_candidate_groups`로 이름/반환 타입 변경
+  - 반환 타입: `list[list[NewsCandidate]]` (그룹별 후보 리스트의 리스트)
+  - 그룹 외부 길이 ≤ `BODY_CRAWL_LIMIT` (= 5)
+  - 그룹 내부 길이 ≤ `BODY_ATTEMPTS_PER_GROUP` (= 3)
+  - 그룹 내 후보는 published_at 내림차순 + originallink 우선 정렬을 그대로 상속
+- `sync_news_for_ticker` 본문 처리 루프를 그룹 순회로 변경:
+  ```python
+  for group in body_candidate_groups:
+      for candidate in group:
+          result.body_attempts_count += 1
+          scraped = self._scrape_candidate(candidate, result)
+          if scraped is not None and scraped.content and scraped.content.strip():
+              body_urls[candidate.normalized_url] = scraped
+              break
+  ```
+  본문이 채워지면 그 그룹은 즉시 break, 다음 그룹으로 진행.
+
+`app/domain/news_cache_scheduler.py`
+
+- `RefreshSweepResult.body_attempts_count` 추가
+- `_merge_sync_result`와 sweep 로그 `extra`에 `body_attempts` 키 노출
+
+### 4. 카운터 의미 정리
+
+| 카운터 | 의미 |
+|---|---|
+| `grouped_count` | 본문 시도 대상 그룹 수 (≤ BODY_CRAWL_LIMIT) |
+| `body_quota_saved_count` | `candidates - grouped_count` — 그룹화 효과로 본문 시도 그룹에 포함되지 않은 후보 수 |
+| `body_attempts_count` | **실제 본문 크롤링 시도 횟수** — 그룹당 1~3회 누적 |
+| `body_failed_count` | 본문 추출 실패 시도 횟수 (raise + 빈 본문) |
+| `body_saved_count` | 본문이 row에 적재된 건수 (= 본문 있는 그룹 수) |
+
+운영 관찰:
+- `body_attempts > grouped` → fallback이 발동된 횟수만큼 차이가 벌어짐
+- `body_failed > 0`이면서 `body_saved`가 그룹 수와 같으면 fallback이 회복 효과를 보고 있음
+
+### 5. 검증 시나리오 추가
+
+`scripts/validate_news_ingestion.py`에 `body_fallback_within_group` 추가.
+
+구성:
+- 4건 후보, 같은 그룹으로 묶이는 유사 제목
+- 1번째 URL: 빈 본문 반환 (404/차단 시뮬레이션)
+- 2번째 URL: 정상 본문
+- 3번째 URL: 정상 본문 (사용 안 됨, 2번에서 break)
+- 4번째 후보: `BODY_ATTEMPTS_PER_GROUP=3` 초과로 그룹에 들어가지 못함
+
+PASS 결과:
+- `grouped=1`
+- `body_failed=1` (1번 빈 본문)
+- `body_attempts=2` (1번 실패 → 2번 성공 break)
+- `body_saved=1` (2번 본문 적재)
+- `body_quota_saved=3` (4 candidates - 1 group)
+- `inserted=4` (모두 적재, 1건 본문 있음 + 3건 partial)
+
+### 6. 회귀 검증
+
+- `validate_news_ingestion` 14 시나리오 모두 PASS
+- `validate_news_cache_scheduler` 6 시나리오 모두 PASS
+- 기존 `body_quota_saved` / `title_similarity_6h_gap` / `filtering_policy` 등 회귀 없음
+
+### 7. 후속 관찰 포인트
+
+- 라이브 재실행 시 `body_attempts`가 `grouped`보다 큰지 (fallback 발동 빈도)
+- chosun.com 같은 차단 도메인이 첫 시도일 때 두 번째 매체로 회복되는 비율
+- `BODY_ATTEMPTS_PER_GROUP=3`이 적절한지 (5~7 그룹 sync에서 외부 매체 호출 횟수 부담 측정)
+
+## storage filter 컷 fallback (옵션 E')
+
+### 1. E 적용 후 라이브 관찰
+
+E 적용 후 라이브 재실행 결과:
+```
+fetched=20 grouped=5 body_quota_saved=15
+body_attempts=5 body_failed=0 body_saved=1 filtered=4
+```
+
+`body_failed=0` + `body_attempts=5` → 그룹당 1번씩만 시도되고 모두 본문 추출은 성공했지만 storage filter에서 4건이 컷됐다. E의 fallback 조건이 "본문 추출 실패"만이라 트리거 자체가 안 일어남.
+
+또 한 가지 발견: chosun.com 본문 URL을 브라우저로 직접 열면 `403 Forbidden`이라 trafilatura의 추출 능력 문제가 아니라 매체 측 봇 차단. fallback 추출기(C)나 도메인 blocklist(D)로는 풀리지 않는 케이스.
+
+### 2. 정책 조정
+
+| 항목 | 이전 | 변경 |
+|---|---|---|
+| `BODY_CRAWL_LIMIT` | 5 | 5 (유지) — 본문 적재 자연 상한 5건 |
+| `_passes_storage_filters` 호출 위치 | 적재 루프에서만 | **fallback 루프에서도 호출** → 컷이면 같은 그룹 다음 후보로 fallback |
+
+본문 적재 상한은 plan 본문(`BODY_CRAWL_LIMIT = 5`)을 그대로 유지. fallback 트리거만 확장.
+
+### 3. 구현
+
+`app/domain/news_ingestion.py` 본문 처리 루프:
+
+```python
+body_urls: dict[str, ScrapedArticle] = {}
+for group in body_candidate_groups:
+    for candidate in group:
+        result.body_attempts_count += 1
+        scraped = self._scrape_candidate(candidate, result)
+        if scraped is None or not (scraped.content and scraped.content.strip()):
+            continue
+        if not self._passes_storage_filters(ticker, candidate, scraped):
+            continue
+        body_urls[candidate.normalized_url] = scraped
+        break
+```
+
+이제 fallback 트리거 조건이 두 가지:
+- 본문 추출 실패 (raise + 빈 본문) — 기존
+- 본문은 가져왔지만 storage filter 컷 — **신규**
+
+같은 그룹에 후보가 더 있으면 다음으로 넘어가고, 본문 성공 + storage filter 통과면 break.
+
+### 4. 적재 루프와의 관계
+
+fallback 루프에서 컷된 후보는 `body_urls`에 들어가지 않는다. 적재 루프 (`for candidate in candidates`)에서 `scraped=None`으로 처리되고, **본문 없는 후보의 P1 경로**(metadata에 `name_kr` 매칭)를 다시 탄다.
+
+- 그룹 우승자(본문 성공 + 매칭 통과): `body_urls`에 있음 → 본문 있는 row 적재 (`body_saved += 1`)
+- 그룹 비우승자(시도했지만 컷됐거나 시도 자체 안 됨): `body_urls`에 없음 → P1 매칭 → 통과 시 partial insert, 실패 시 `filtered`
+
+본문 짧음(`MIN_CONTENT_LENGTH=120` 미달) 케이스도 fallback 루프에서 컷 → 적재 루프에서 본문 없는 P1 경로 → 제목/메타에 종목 매칭 있으면 partial insert로 살아남는다. 이건 `filtering_policy` 시나리오 갱신으로 확인된 의도된 변화.
+
+### 5. 검증 시나리오 추가
+
+`scripts/validate_news_ingestion.py`에 `body_fallback_on_storage_cut` 추가.
+
+구성:
+- 4건 후보, 같은 그룹으로 묶이는 유사 제목 (`build_neutral_item` 패턴: 제목에 `ticker.symbol` 없이 한글만)
+- 1번 본문: `name_kr` 1회 매칭 (Filter B의 `≥2회` 기준 미달) → storage filter 컷
+- 2번 본문: `name_kr` 2회 매칭 → 통과
+
+PASS 결과:
+- `grouped=1`
+- `body_failed=0` (추출은 성공)
+- `body_attempts=2` (1번 컷 → 2번 성공 break)
+- `body_saved=1`
+- `inserted=1`, `filtered=3`
+
+### 6. 기존 시나리오 영향과 갱신
+
+`filtering_policy` 시나리오 기대값 갱신:
+- `inserted` 3 → **4** (`short_body_item`이 partial insert로 살아남음)
+- `filtered` 8 → **7** (prefilter 7건만)
+- `body_saved` 3 (변화 없음)
+- `saved_urls`에 `short_body` URL 추가
+
+`initial_insert` 시나리오는 `service.BODY_CRAWL_LIMIT = 5` 명시 override로 기존 의도 보존.
+
+### 7. 회귀 검증
+
+- `validate_news_ingestion` **15 시나리오** 모두 PASS (신규 `body_fallback_on_storage_cut` 포함)
+- `validate_news_cache_scheduler` **6 시나리오** 모두 PASS
+
+### 8. 운영 측면 — 본문 적재 상한 5건 유지
+
+`BODY_CRAWL_LIMIT=5`는 plan 본문 그대로 유지. 그룹당 1건 적재 원칙으로 sync 1회 본문 row는 최대 **5건**.
+
+부담 계산:
+- sync 1회 본문 시도 최대: `BODY_CRAWL_LIMIT × BODY_ATTEMPTS_PER_GROUP = 5 × 3 = 15회`
+- 실제로는 첫 시도 성공이 다수라 `body_attempts`는 보통 그룹 수와 비슷한 수준
+- 외부 매체 호출은 도메인 분산되므로 종목당 sync 1회 15회 / 매체 분산 시 매체당 1~3회
+
+E'의 효과는 같은 그룹에 다른 매체 후보가 있을 때 발휘된다. 그룹이 단일 매체로 구성된 경우는 fallback 발동 안 됨 → 그 그룹은 본문 없이 partial insert 경로로 처리.
+
+## 검색 관련도 정렬로 전환 (sort=date → sort=sim)
+
+### 1. E' 적용 후 라이브 관찰
+
+```
+fetched=20 grouped=5 body_quota_saved=15 body_attempts=6 body_failed=0 body_saved=1~2 filtered=0
+total_rows=20 content_not_null=1~2
+```
+
+`body_attempts > grouped` → fallback 발동 확인. 그러나 `content_not_null`이 여전히 1~2건. 본질적 원인:
+- 검색이 `sort=date`(최신순)이라 검색 결과가 **그 시점 가장 뜨거운 시장 이슈(삼성전자 노사 합의)** 중심으로 차서, SK하이닉스를 메인으로 다룬 기사가 결과에 적게 들어옴
+- 본문 시도 6번 중 5번이 Filter B의 `name_kr ≥ 2회` 미달 (산업/비교 기사라 SK하이닉스 단독 mention)
+
+### 2. 정책 전환
+
+| 항목 | 이전 | 변경 |
+|---|---|---|
+| `search_news` 호출 시 `sort` | `"date"` | **`"sim"`** (네이버 관련도 정렬) |
+
+`sort=sim`은 검색어와 본문/제목 관련도 높은 기사를 위로 올린다. SK하이닉스를 메인으로 다룬 기사가 결과 상위로 올라올 가능성이 높음.
+
+plan 본문 (`memo/plans/news-cache-ingestion-plan.md:72-75`)은 `sort=date` 명시. 본 변경은 운영 튜닝 범위로 보고 plan 본문은 그대로 두되, 보고서에 변경 사실 기록.
+
+### 3. 7일 컷은 그대로 유지
+
+`MAX_ARTICLE_AGE_DAYS = 7`은 `_passes_prefilter`에서 그대로 동작. `sort=sim`이라도 published_at이 7일 초과면 prefilter에서 컷. 단, sort=sim은 관련도 우선이라 오래된 관련도 높은 기사가 결과에 섞일 수 있어 **prefilter에서 stale로 컷되는 비율이 늘 수 있음** → `filtered` 카운트 증가 가능. 이는 정상 동작이며 plan의 "최근 7일" 정책과 일치.
+
+### 4. 회귀 검증
+
+- `validate_news_ingestion` 15 시나리오 모두 PASS (`FakeNaverNewsClient`는 sort 옵션을 무시하고 fixture를 그대로 반환하므로 시나리오 결과는 동일)
+- `validate_news_cache_scheduler` 6 시나리오 모두 PASS
+
+### 5. 운영 후속 관찰 포인트
+
+- 라이브 재실행 시 `content_not_null` 비율이 늘어나는지 (관련도 우선 효과)
+- `filtered`가 늘었다면 stale 컷 비율 증가인지 본문 매칭 컷 증가인지 분해
+- SK하이닉스 외 다른 종목(삼성전자, 카카오 등)에서도 동일 효과 확인되는지

@@ -43,6 +43,7 @@ class SyncNewsResult:
     body_failed_count: int = 0
     grouped_count: int = 0
     body_quota_saved_count: int = 0
+    body_attempts_count: int = 0
     body_saved_count: int = 0
     filtered_count: int = 0
     trimmed_rows_count: int = 0
@@ -64,6 +65,7 @@ class NewsIngestionService:
     INITIAL_FETCH_COUNT = 20
     REFRESH_FETCH_COUNT = 5
     BODY_CRAWL_LIMIT = 5
+    BODY_ATTEMPTS_PER_GROUP = 3
     MAX_CACHE_ROWS = 100
     MAX_CONTENT_ROWS = 10
     MAX_ARTICLE_AGE_DAYS = 7
@@ -119,21 +121,28 @@ class NewsIngestionService:
                 return result
 
             fetch_limit = limit or (self.INITIAL_FETCH_COUNT if mode == "initial" else self.REFRESH_FETCH_COUNT)
-            items = self.news_client.search_news(ticker.name_kr, display=fetch_limit, sort="date")
+            items = self.news_client.search_news(ticker.name_kr, display=fetch_limit, sort="sim")
             self._record_daily_api_call()
             result.fetched_count = len(items)
 
             candidates = self._build_candidates(symbol, items)
             candidates = self._prefilter_candidates(ticker, candidates, result)
             recent_rows = self.repo.get_recent_by_symbol(symbol, since_hours=self.RECENT_GROUPING_HOURS)
-            body_candidates = self._select_body_candidates(candidates, recent_rows)
-            result.grouped_count = len(body_candidates)
-            result.body_quota_saved_count = max(0, len(candidates) - len(body_candidates))
+            body_candidate_groups = self._select_body_candidate_groups(candidates, recent_rows)
+            result.grouped_count = len(body_candidate_groups)
+            result.body_quota_saved_count = max(0, len(candidates) - len(body_candidate_groups))
 
-            body_urls = {
-                candidate.normalized_url: self._scrape_candidate(candidate, result)
-                for candidate in body_candidates
-            }
+            body_urls: dict[str, ScrapedArticle] = {}
+            for group in body_candidate_groups:
+                for candidate in group:
+                    result.body_attempts_count += 1
+                    scraped = self._scrape_candidate(candidate, result)
+                    if scraped is None or not (scraped.content and scraped.content.strip()):
+                        continue
+                    if not self._passes_storage_filters(ticker, candidate, scraped):
+                        continue
+                    body_urls[candidate.normalized_url] = scraped
+                    break
 
             for candidate in candidates:
                 scraped = body_urls.get(candidate.normalized_url)
@@ -175,6 +184,7 @@ class NewsIngestionService:
                 "body_failed": result.body_failed_count,
                 "grouped": result.grouped_count,
                 "body_quota_saved": result.body_quota_saved_count,
+                "body_attempts": result.body_attempts_count,
                 "body_saved": result.body_saved_count,
                 "trimmed_rows": result.trimmed_rows_count,
                 "trimmed_content": result.trimmed_content_count,
@@ -216,13 +226,13 @@ class NewsIngestionService:
                 result.filtered_count += 1
         return filtered
 
-    def _select_body_candidates(
+    def _select_body_candidate_groups(
         self,
         candidates: list[NewsCandidate],
         recent_rows: list[NewsCache],
-    ) -> list[NewsCandidate]:
-        selected: list[NewsCandidate] = []
-        groups: list[tuple[set[str], datetime | None]] = []
+    ) -> list[list[NewsCandidate]]:
+        selected_groups: list[list[NewsCandidate]] = []
+        group_keys: list[tuple[set[str], datetime | None]] = []
         recent_titles: list[tuple[set[str], bool, datetime | None]] = [
             (self.normalize_title(row.title), row.content is not None, row.published_at)
             for row in recent_rows
@@ -237,6 +247,14 @@ class NewsIngestionService:
                     return True
             return False
 
+        def find_matching_group(
+            tokens: set[str], published_at: datetime | None
+        ) -> int | None:
+            for idx, (group_tokens, group_published_at) in enumerate(group_keys):
+                if self._titles_similar(tokens, group_tokens, published_at, group_published_at):
+                    return idx
+            return None
+
         epoch_floor = datetime.min.replace(tzinfo=UTC)
 
         new_candidates = [c for c in candidates if c.existing is None]
@@ -249,29 +267,28 @@ class NewsIngestionService:
         )
 
         for candidate in new_candidates:
-            if len(selected) >= self.BODY_CRAWL_LIMIT:
-                break
-            if len(candidate.title_tokens) < 5:
-                selected.append(candidate)
-                groups.append((candidate.title_tokens, candidate.item.published_at))
-                continue
-            if group_has_content(candidate.title_tokens, candidate.item.published_at):
-                continue
-            if any(
-                self._titles_similar(
-                    candidate.title_tokens,
-                    group_tokens,
-                    candidate.item.published_at,
-                    group_published_at,
-                )
-                for group_tokens, group_published_at in groups
-            ):
-                continue
-            selected.append(candidate)
-            groups.append((candidate.title_tokens, candidate.item.published_at))
+            tokens = candidate.title_tokens
+            published_at = candidate.item.published_at
 
-        if len(selected) >= self.BODY_CRAWL_LIMIT:
-            return selected
+            if len(tokens) < 5:
+                if len(selected_groups) >= self.BODY_CRAWL_LIMIT:
+                    continue
+                selected_groups.append([candidate])
+                group_keys.append((tokens, published_at))
+                continue
+
+            if group_has_content(tokens, published_at):
+                continue
+
+            matched = find_matching_group(tokens, published_at)
+            if matched is None:
+                if len(selected_groups) >= self.BODY_CRAWL_LIMIT:
+                    continue
+                selected_groups.append([candidate])
+                group_keys.append((tokens, published_at))
+            else:
+                if len(selected_groups[matched]) < self.BODY_ATTEMPTS_PER_GROUP:
+                    selected_groups[matched].append(candidate)
 
         null_candidates = [c for c in candidates if c.existing is not None and c.existing.content is None]
         null_candidates.sort(
@@ -279,25 +296,17 @@ class NewsIngestionService:
             reverse=True,
         )
         for candidate in null_candidates:
-            if len(selected) >= self.BODY_CRAWL_LIMIT:
-                break
             candidate_published_at = (
                 candidate.existing.published_at if candidate.existing else candidate.item.published_at
             )
-            if any(
-                self._titles_similar(
-                    candidate.title_tokens,
-                    group_tokens,
-                    candidate_published_at,
-                    group_published_at,
-                )
-                for group_tokens, group_published_at in groups
-            ):
+            if find_matching_group(candidate.title_tokens, candidate_published_at) is not None:
                 continue
-            selected.append(candidate)
-            groups.append((candidate.title_tokens, candidate_published_at))
+            if len(selected_groups) >= self.BODY_CRAWL_LIMIT:
+                continue
+            selected_groups.append([candidate])
+            group_keys.append((candidate.title_tokens, candidate_published_at))
 
-        return selected
+        return selected_groups
 
     def _build_news_row(
         self,

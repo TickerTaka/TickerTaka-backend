@@ -31,6 +31,7 @@ class ScenarioResult:
     body_saved: int
     grouped: int
     body_quota_saved: int
+    body_attempts: int
     trimmed_rows: int
     trimmed_content: int
     final_rows: int
@@ -225,6 +226,7 @@ def to_result(name: str, raw_result, final_rows: int, final_content_rows: int) -
         body_saved=raw_result.body_saved_count,
         grouped=raw_result.grouped_count,
         body_quota_saved=raw_result.body_quota_saved_count,
+        body_attempts=raw_result.body_attempts_count,
         trimmed_rows=raw_result.trimmed_rows_count,
         trimmed_content=raw_result.trimmed_content_count,
         final_rows=final_rows,
@@ -251,6 +253,7 @@ def run_initial_insert_scenario(ticker: TestTicker) -> ScenarioResult:
             article_scraper=FakeArticleScraper(articles),
             redis_client=FakeRedis(),
         )
+        service.BODY_CRAWL_LIMIT = 5
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True)
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
@@ -572,11 +575,121 @@ def run_whitespace_variant_scenario() -> ScenarioResult:
         body_saved=0,
         grouped=0,
         body_quota_saved=0,
+        body_attempts=0,
         trimmed_rows=0,
         trimmed_content=0,
         final_rows=0,
         final_content_rows=0,
     )
+
+
+def run_body_fallback_on_storage_cut_scenario(ticker: TestTicker) -> ScenarioResult:
+    """그룹 대표 본문이 추출은 성공했지만 storage filter 컷일 때 같은 그룹 다음 후보로 fallback."""
+    base = datetime.now(UTC).replace(microsecond=0)
+    common_suffix = "storage filter fallback 검증 매우 유사한 제목 토큰 다수 같은 사건"
+    urls = [f"https://news.example.com/{ticker.symbol}/storage-fallback/{idx}" for idx in range(4)]
+
+    def make_neutral_item(url: str, published_at: datetime) -> NaverNewsItem:
+        title = f"메모리 산업 동향 호황 분기 호실적 발표 갱신 실적 {common_suffix}"
+        return NaverNewsItem(
+            title=title,
+            description=f"메모리 산업 description {common_suffix}",
+            link=url,
+            original_link=url,
+            published_at=published_at,
+            source_name="example.com",
+        )
+
+    def make_partial_scraped(url: str, published_at: datetime, match_count: int) -> ScrapedArticle:
+        body_intro = " ".join([f"{ticker.name_kr} 관련 산업 동향"] * match_count)
+        body_rest = "추가 산업 일반 내용 메모리 시장 호황 분기 실적 발표 종목 관련 동향 " * 10
+        return ScrapedArticle(
+            content=f"{body_intro} {body_rest}".strip(),
+            summary="storage fallback summary",
+            source_name="example.com",
+            canonical_url=url,
+            published_at=published_at,
+        )
+
+    items = [make_neutral_item(urls[idx], base - timedelta(minutes=10 * idx)) for idx in range(4)]
+    scrapers = {
+        urls[0]: make_partial_scraped(urls[0], base, match_count=1),
+        urls[1]: make_partial_scraped(urls[1], base - timedelta(minutes=10), match_count=2),
+        urls[2]: make_partial_scraped(urls[2], base - timedelta(minutes=20), match_count=2),
+    }
+
+    with SessionLocal() as session:
+        service = NewsIngestionService(
+            session,
+            news_client=FakeNaverNewsClient(items),
+            article_scraper=FakeArticleScraper(scrapers),
+            redis_client=FakeRedis(),
+        )
+        try:
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
+            final_rows, final_content_rows = count_rows(session, ticker.symbol)
+            result = to_result("body_fallback_on_storage_cut", raw, final_rows, final_content_rows)
+            expect(result.grouped == 1, "storage_fallback: should form 1 group")
+            expect(
+                result.body_failed == 0,
+                "storage_fallback: extraction succeeded, body_failed should remain 0",
+            )
+            expect(
+                result.body_attempts == 2,
+                "storage_fallback: 1st cut on matching -> 2nd attempt success break",
+            )
+            expect(result.body_saved == 1, "storage_fallback: 2nd attempt body should be saved")
+            return result
+        finally:
+            session.rollback()
+
+
+def run_body_fallback_within_group_scenario(ticker: TestTicker) -> ScenarioResult:
+    """그룹 대표 본문 실패 시 같은 그룹의 다음 후보로 즉시 fallback되는지 확인."""
+    base = datetime.now(UTC).replace(microsecond=0)
+    urls = [f"https://news.example.com/{ticker.symbol}/fallback/{idx}" for idx in range(4)]
+    common_suffix = "그룹 fallback 검증 매우 유사한 제목 토큰 다수 포함 동일 사건"
+    items = [
+        build_item(ticker, url, common_suffix, base - timedelta(minutes=10 * idx))
+        for idx, url in enumerate(urls)
+    ]
+    scrapers = {
+        urls[0]: ScrapedArticle(
+            content="",
+            summary="",
+            source_name="example.com",
+            canonical_url=urls[0],
+            published_at=base,
+        ),
+        urls[1]: build_scraped(urls[1], items[1].title, base),
+        urls[2]: build_scraped(urls[2], items[2].title, base),
+    }
+
+    with SessionLocal() as session:
+        service = NewsIngestionService(
+            session,
+            news_client=FakeNaverNewsClient(items),
+            article_scraper=FakeArticleScraper(scrapers),
+            redis_client=FakeRedis(),
+        )
+        try:
+            raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
+            final_rows, final_content_rows = count_rows(session, ticker.symbol)
+            result = to_result("body_fallback_within_group", raw, final_rows, final_content_rows)
+            expect(result.grouped == 1, "fallback: should form 1 group")
+            expect(result.body_failed == 1, "fallback: 1st empty body should bump body_failed")
+            expect(
+                result.body_attempts == 2,
+                "fallback: 2 attempts expected (1st failed, 2nd success break)",
+            )
+            expect(result.body_saved == 1, "fallback: 2nd attempt body should be saved")
+            expect(
+                result.body_quota_saved == 3,
+                "fallback: grouped 1 from 4 candidates -> quota saved 3",
+            )
+            return result
+        finally:
+            session.rollback()
 
 
 def run_body_failed_empty_content_scenario(ticker: TestTicker) -> ScenarioResult:
@@ -655,6 +768,7 @@ def run_metadata_name_match_scenario() -> ScenarioResult:
         body_saved=0,
         grouped=0,
         body_quota_saved=0,
+        body_attempts=0,
         trimmed_rows=0,
         trimmed_content=0,
         final_rows=0,
@@ -805,12 +919,17 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("filtering_policy", raw, final_rows, final_content_rows)
             saved_urls = {row.source_url for row in rows}
-            expect(result.inserted == 3, "filtering_policy: inserted should be 3")
-            expect(result.filtered == 8, "filtering_policy: filtered should be 8")
+            expect(result.inserted == 4, "filtering_policy: inserted should be 4 (short_body partial)")
+            expect(result.filtered == 7, "filtering_policy: filtered should be 7 (prefilter only)")
             expect(result.body_saved == 3, "filtering_policy: body_saved should be 3")
             expect(
-                saved_urls == {urls["good"], urls["symbol"], urls["strong_body_ref"]},
-                "filtering_policy: only good, symbol, strong_body_ref urls should remain",
+                saved_urls == {
+                    urls["good"],
+                    urls["symbol"],
+                    urls["short_body"],
+                    urls["strong_body_ref"],
+                },
+                "filtering_policy: good/symbol/short_body(partial)/strong_body_ref should remain",
             )
             return result
         finally:
@@ -834,6 +953,8 @@ def main() -> None:
         run_body_failed_empty_content_scenario(ticker),
         run_metadata_name_match_scenario(),
         run_body_quota_saved_scenario(ticker),
+        run_body_fallback_within_group_scenario(ticker),
+        run_body_fallback_on_storage_cut_scenario(ticker),
         run_whitespace_variant_scenario(),
         run_filtering_policy_scenario(ticker),
     ]
@@ -858,6 +979,7 @@ def main() -> None:
                     f"body_saved={scenario.body_saved}",
                     f"grouped={scenario.grouped}",
                     f"body_quota_saved={scenario.body_quota_saved}",
+                    f"body_attempts={scenario.body_attempts}",
                     f"trimmed_rows={scenario.trimmed_rows}",
                     f"trimmed_content={scenario.trimmed_content}",
                 ]

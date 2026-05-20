@@ -31,6 +31,7 @@ class RefreshSweepResult:
     filtered_count: int = 0
     body_failed_count: int = 0
     body_quota_saved_count: int = 0
+    body_attempts_count: int = 0
     body_saved_count: int = 0
     trimmed_rows_count: int = 0
     trimmed_content_count: int = 0
@@ -109,6 +110,7 @@ class NewsCacheSchedulerService:
                 "updated": result.updated_count,
                 "filtered": result.filtered_count,
                 "body_quota_saved": result.body_quota_saved_count,
+                "body_attempts": result.body_attempts_count,
                 "body_saved": result.body_saved_count,
                 "trimmed_rows": result.trimmed_rows_count,
                 "trimmed_content": result.trimmed_content_count,
@@ -154,6 +156,7 @@ class NewsCacheSchedulerService:
         sweep_result.filtered_count += sync_result.filtered_count
         sweep_result.body_failed_count += sync_result.body_failed_count
         sweep_result.body_quota_saved_count += sync_result.body_quota_saved_count
+        sweep_result.body_attempts_count += sync_result.body_attempts_count
         sweep_result.body_saved_count += sync_result.body_saved_count
         sweep_result.trimmed_rows_count += sync_result.trimmed_rows_count
         sweep_result.trimmed_content_count += sync_result.trimmed_content_count

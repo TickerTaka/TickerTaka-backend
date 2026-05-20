@@ -45,6 +45,7 @@ class ExtraFormatter(logging.Formatter):
         "body_failed",
         "grouped",
         "body_quota_saved",
+        "body_attempts",
         "body_saved",
         "trimmed_rows",
         "trimmed_content",
