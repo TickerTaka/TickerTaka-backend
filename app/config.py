@@ -19,8 +19,9 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://stock_user:tickertaka@101.79.19.53:5432/stock_debate",
         alias="DATABASE_URL",
     )
-    redis_url:  str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
-    chroma_url: str = Field(default="http://localhost:8001",    alias="CHROMA_URL")
+    redis_url:   str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    chroma_url:  str = Field(default="http://localhost:8080",    alias="CHROMA_URL")
+    chroma_token: str = Field(default="",                        alias="CHROMA_TOKEN")
 
     # OpenRouter
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")
