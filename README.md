@@ -33,6 +33,7 @@ AI 종목 토론 대시보드를 위한 FastAPI 백엔드입니다.
 ```text
 .
 ├── alembic/
+│   └── versions/
 ├── app/
 │   ├── agents/
 │   │   ├── nodes/

@@ -23,7 +23,7 @@
 
 ## 현재 진행 상태
 - WSL Ubuntu 환경
-- GitHub 레포 클론 완료: ~/projects/TickerTaka-backend
+- GitHub 레포 클론 완료: ~/TickerTaka-backend
 - Git SSH 인증 설정 완료
 - Git user.name, user.email 설정 완료
 - 다음 작업: 디렉터리 구조 생성부터 첫 푸시까지
@@ -85,4 +85,4 @@
 - 파일 생성 전에 항상 현재 상태(ls, git status) 먼저 확인
 - 명령어 실행 결과를 보여줘서 검증 가능하게
 - Docker 컨테이너는 이 단계에서 띄우지 말 것 (다음 세션에서 .env 채운 후 시작)
-- WSL 환경임을 인지하고 경로는 ~/projects/TickerTaka-backend 기준
+- WSL 환경임을 인지하고 경로는 ~/TickerTaka-backend 기준

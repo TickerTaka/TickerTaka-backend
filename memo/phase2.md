@@ -87,6 +87,58 @@ Phase 1 검증에서 발견된 보완사항.
 - `app/models/watchlist.py`의 `Watchlist` 모델
 
 ## 마무리 (5번 단계 이후)
-- [ ] uc 브랜치 푸시
-- [ ] main으로 PR 생성 또는 merge 시점 결정 (선택)
-- [ ] news-cache-plan 구현 phase로 전환
+- [x] uc 브랜치 푸시
+- [x] main으로 PR 생성 또는 merge 시점 결정 (선택)
+- [x] news-cache-plan 구현 phase로 전환
+
+---
+
+## Phase 2 완료 보고서 (2026-05-20)
+
+상세 결과는 `memo/results/2026-05-20-phase2-models-and-news-ingestion.md` 및 `memo/results/2026-05-20-news-cache-ingestion-implementation.md` 참고.
+
+### 머지 상태
+- `main` HEAD: `a1e7743 Merge branch 'uc' into main`
+
+### 사전 정리 체크리스트 처리 결과
+- `docker-compose.yml` redis 볼륨: 영속화 안 하기로 결정 → compose에 redis volume 추가하지 않음 + `.gitignore`의 `redisdata/` 라인 제거
+- `scripts/.gitkeep` 제거 (seed.py 등 실파일이 디렉터리 유지)
+- `pyproject.toml`의 `dependencies = []` 유지 → `requirements.txt` 단일 관리로 결정
+- `README.md` 디렉터리 트리에 `alembic/versions/` 명시 보강
+- `memo/phase1.md` 경로 표기를 `~/TickerTaka-backend` 기준으로 통일 (phase2.md와 일치)
+- `requirements.txt`에 `trafilatura==2.0.0` 추가 완료
+
+### 이번 phase에서 닫힌 핵심 결과물
+- SQLAlchemy 2.0 모델 (`app/models/`) 전 테이블 매핑 (`app_user`, `ticker_metadata`, `watchlist`, `price_cache`, `financial_cache`, `technical_indicator_cache`, `news_cache`, `filing_cache`, `event_timeline`, `data_refresh_job`, `debate_session` 외)
+- DB 세션 유틸 (`app/core/db.py`: `SessionLocal` / `get_db` / `session_scope` / asyncpg → 동기 URL 정규화)
+- News ingestion 도메인 (`app/domain/news_ingestion.py`)
+  - 네이버 뉴스 API + trafilatura 본문 추출
+  - Redis lock / cooldown / fail-closed
+  - 적재 정책 (fetch 상한 / row 상한 100 / content 상한 10 / TTL = `published_at + 30d`)
+  - 제목 Jaccard 유사도 그룹화 (6시간 gap)
+  - A/B relevance 필터 (그래픽/포토 차단, 제목 우선 + 본문 `name_kr` ≥ 2회)
+  - 일일 네이버 API 호출량 Redis 집계 (`naver-api-count:YYYY-MM-DD`, KST)
+- Watchlist API + BackgroundTasks 트리거 (`POST /api/watchlists` → `sync_watchlist_news`)
+- Phase 3 scheduler/cleanup sweep + sweep last-run + 일일 API 카운터
+- 운영 보강 (uc 추가 작업분):
+  - 공백 무시 매칭 (`SK하이닉스` ↔ `SK 하이닉스`)
+  - partial insert (P1) — 본문 없어도 metadata `name_kr` 매칭 통과 시 적재
+  - 초기 적재 정책 완화 (`INITIAL_FETCH_COUNT` 15→20, `MIN_CONTENT_LENGTH` 200→120)
+  - 본문 추출 실패 측정 정확화 (빈 본문도 `body_failed`)
+  - 그룹 내 본문 즉시 fallback (옵션 E, `BODY_ATTEMPTS_PER_GROUP=3`)
+  - storage filter 컷 fallback (옵션 E')
+  - 네이버 검색 정렬 `sort=date` → `sort=sim` (관련도 우선, 7일 컷은 유지)
+- 검증
+  - `validate_models.py` / `validate_enums.py` / `check_tz.py`
+  - `validate_news_ingestion.py` 15 PASS
+  - `validate_redis_integration.py` PASS
+  - `validate_watchlist_flow.py` 6 PASS
+  - `validate_watchlist_api.py` 8/8 PASS (TestClient endpoint smoke)
+  - `validate_news_cache_scheduler.py` 6 PASS (Phase 3)
+- 라이브 검증
+  - `005930` initial+commit (실 네이버 API / 실 본문 / 실 DB 적재)
+  - `000660` watchlist → background sync → news_cache 적재 (`sort=sim` 기준 inserted=19 / content_not_null=5)
+- 시드: `phase2-test-user@example.com`
+
+### 다음 단계
+남은 캐시 테이블 (`price_cache`, `financial_cache`, `technical_indicator_cache`, `filing_cache`) 적재는 별도 plan으로 진행. 토론 시점 현재가(intraday quote)는 `PriceCache`와 분리해 따로 다룬다.
