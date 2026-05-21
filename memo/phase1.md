@@ -55,7 +55,7 @@
 4. docker-compose.yml 작성
    - postgres:15-alpine (DB: tickertaka, user: dev, pw: devpass, port: 5432, healthcheck 포함)
    - redis:7-alpine (port: 6379, healthcheck 포함)
-   - chromadb/chroma:latest (port: 8000)
+   - chromadb/chroma:latest (port: 8080)
    - volumes로 pgdata, chromadata 분리
    - 컨테이너 이름은 tickertaka-postgres, tickertaka-redis, tickertaka-chroma
    - restart: unless-stopped

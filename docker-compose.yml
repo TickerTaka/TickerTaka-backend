@@ -1,3 +1,10 @@
+# Local development only.
+# Production: PostgreSQL is on NCP managed DB; Redis and ChromaDB are
+# self-hosted on a separate NCP server via Docker (auth + persistence
+# enabled). See memo/plans/debate-runtime-infrastructure-plan.md and
+# memo/plans/vector-db-and-evidence-retrieval-plan.md for production
+# compose examples.
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -35,8 +42,9 @@ services:
     image: chromadb/chroma:latest
     container_name: tickertaka-chroma
     restart: unless-stopped
+    command: ["run", "--host", "0.0.0.0", "--port", "8080"]
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - chromadata:/chroma/chroma
 
