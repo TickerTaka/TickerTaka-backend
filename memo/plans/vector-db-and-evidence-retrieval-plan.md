@@ -208,7 +208,8 @@ services:
       - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
       - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_TOKEN}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/heartbeat"]
+      # ChromaDB 0.6+ 부터 v1 API deprecated → v2 사용
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/heartbeat"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -242,7 +243,7 @@ services:
    - 또는 ChromaDB 자체 snapshot API 활용 (0.5+ 일부 버전)
    - 백업 대상: NCP Object Storage 등 외부 저장소
 6. **모니터링**
-   - `/api/v1/heartbeat` 엔드포인트 ping (healthcheck에 이미 포함)
+   - `/api/v2/heartbeat` 엔드포인트 ping (healthcheck에 이미 포함, v1은 0.6+ deprecated)
    - 디스크 사용량 추적 (성장 곡선)
    - 컬렉션별 document 수 (`collection.count()`)
    - 임베딩 호출 횟수 / 비용
