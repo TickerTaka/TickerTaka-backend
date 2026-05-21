@@ -1,34 +1,144 @@
 # TickerTaka — Day 2 작업
 
 ## 이전 상태
-- ~/projects/TickerTaka-backend
+- ~/TickerTaka-backend (실제 경로 기준)
 - Day 1 완료 (디렉터리, docker-compose, requirements)
-- .env 채워둠, Docker 컨테이너 healthy
+- .env 채워둠 (클라우드 DB 접속 정보 포함)
+- 브랜치: `uc` (main 직접 커밋 회피용 작업 브랜치, 완료 후 main으로 merge)
+
+## 현재 진행 상황
+- [x] venv 가상환경 생성
+- [x] `requirements.txt` 설치
+- [x] 클라우드 DB 구성 + 원격 접속 가능 (`.env`의 `DATABASE_URL` 사용)
+- [x] IDE extension으로 클라우드 DB 스키마 확인 가능
+- [ ] SQLAlchemy 모델 작성 (이번 세션의 핵심)
+
+## 방향 결정: Alembic은 보류
+팀 전체가 클라우드 DB **하나**를 공유하고 있어 마이그레이션 동기화가 필요 없다.
+스키마 변경이 필요하면 클라우드 DB에 직접 DDL을 적용하면 모두에게 반영된다.
+
+→ 이번 phase에서는 **SQLAlchemy 모델 작성만 진행**한다.
+→ Alembic은 다음 트리거가 발생하면 그때 도입한다 (아래 "Alembic 도입 시점" 참고).
+
+## 사전 정리 체크리스트 (이번 작업 전)
+Phase 1 검증에서 발견된 보완사항.
+
+- [ ] `docker-compose.yml`의 redis 볼륨 정책 결정
+  - 영속화 필요 → compose에 `redisdata` 볼륨 추가
+  - 불필요 → `.gitignore`에서 `redisdata/` 라인 제거
+- [ ] `scripts/.gitkeep` 제거 (`scripts/seed.py`가 이미 있어 중복)
+- [ ] `pyproject.toml`의 dependencies 정책 결정
+  - requirements.txt 단일 관리로 갈지, 양쪽 동기화할지
+- [ ] `README.md`의 디렉터리 트리에 `alembic/versions/` 반영
+- [ ] phase1/phase2 메모의 경로 표기 통일 (`~/TickerTaka-backend` 기준)
+- [ ] `requirements.txt`에 `trafilatura` 추가 (news-cache-plan에서 본문 추출에 사용)
 
 ## 이번 세션 작업
-첨부한 DDL SQL을 기반으로 SQLAlchemy 모델 + Alembic 마이그레이션을 작성한다.
-
-[여기에 위 SQL 통째로 첨부]
+클라우드 DB의 실제 스키마를 기준으로 SQLAlchemy 2.0 스타일 모델을 작성한다.
 
 ### 작업 순서
-1. python venv + requirements 설치
-2. app/config.py — Pydantic Settings (이미 정의된 .env 변수들)
-3. SQLAlchemy 2.0 스타일 모델 작성 (Mapped[], mapped_column)
-   - 첨부 SQL의 CREATE TABLE/CREATE TYPE/COMMENT를 정확히 매핑
+1. ~~python venv + requirements 설치~~ (완료)
+2. `app/config.py` 검토
+   - Day 1에서 이미 정의됨, DB 모델 작업에 추가 필드 있는지만 확인
+3. SQLAlchemy 2.0 스타일 모델 작성 (`Mapped[]`, `mapped_column`)
+   - 기준: **클라우드 DB의 실제 테이블 정의**
+   - IDE extension에서 각 테이블의 CREATE 문 또는 컬럼 정보 확인 후 1:1 매핑
    - COMMENT는 모델 클래스 docstring으로 변환
-   - app/models/base.py, user.py, ticker.py, watchlist.py, debate.py, cache.py로 분리
-   - app/models/__init__.py에 __all__ 정의
-4. Alembic 초기화 + env.py에서 .env 로드 + Base.metadata 연결
-5. alembic revision --autogenerate -m "initial schema: 13 tables"
-   - 생성된 파일 검토 후 보여주기
-6. alembic upgrade head
-7. 검증: \dt로 13개 테이블 확인, downgrade/upgrade 양방향 테스트
-8. git commit + push
+   - 도메인별 파일 분리: `app/models/base.py`, `user.py`, `ticker.py`, `watchlist.py`, `debate.py`, `cache.py`
+   - `app/models/__init__.py`에 `__all__` 정의
+4. 모델 정합성 검증
+   - 간단한 스크립트 또는 REPL로 각 테이블에 대해 `session.query(Model).first()` 실행
+   - 에러 없이 row를 가져오면 모델-DB 매핑 OK
+   - 컬럼 누락/타입 불일치는 여기서 잡힘
+5. git commit + push (uc 브랜치로)
 
-## 주의사항
-- 모든 PK는 uuid (default=uuid.uuid4)
-- timestamptz 사용
-- ENUM은 PostgreSQL ENUM 타입 사용 (sqlalchemy.Enum + name 명시)
-- FK는 DEFERRABLE INITIALLY IMMEDIATE 옵션 적용
-- 첨부 SQL의 인덱스/UNIQUE 제약 모두 포함
-- 첨부 SQL과 1:1 매핑되도록 (필드 추가/변경 금지, 의문점은 질문)
+## 모델 작성 주의사항
+- 모든 PK는 uuid
+  - 클라우드 DB가 `gen_random_uuid()`로 설정되어 있으면 모델도 `server_default=text("gen_random_uuid()")` 사용
+  - Python 측 `default=uuid.uuid4`는 DB default와 충돌 가능 → DB default 우선
+- `timestamptz` 사용
+- ENUM은 PostgreSQL ENUM 타입 사용 (`sqlalchemy.Enum` + `name` 명시)
+  - 모델만 작성하는 phase라 `create_type=False` 설정 (이미 DB에 존재)
+- FK는 클라우드 DB에 적용된 DEFERRABLE 옵션과 일치시킬 것
+  - `ForeignKey(..., deferrable=True, initially="IMMEDIATE")` 형태
+- 클라우드 DB 스키마와 1:1 매핑 (필드 추가/변경 금지, 의문점은 질문)
+- 인덱스/UNIQUE 제약은 모델에 표기는 하되, **마이그레이션을 돌리지 않으므로 실제 DB 적용 책임은 클라우드 DB 측에 있음**
+
+## Alembic 도입 시점
+다음 중 하나가 발생하면 그때 도입한다. 도입 시 `alembic stamp head`로 현재 DB 상태를 기준선으로 표기한 뒤 변경분부터 마이그레이션으로 관리.
+
+- [ ] 운영(prod) 환경이 dev와 별도로 분리될 때
+- [ ] 팀원이 로컬 DB로 작업하기 시작할 때
+- [ ] CI/CD 파이프라인에서 fresh DB 띄울 때
+- [ ] 스키마 변경 이력 추적이 필요해질 때
+
+도입 시 검토할 항목 (autogenerate 한계):
+- 테이블/컬럼 COMMENT
+- FK의 DEFERRABLE INITIALLY IMMEDIATE 옵션
+- ENUM 타입 생성/삭제 순서 (테이블보다 먼저 생성, 나중 삭제)
+- uuid default 표현 방식 (DDL과 동일한지)
+
+## 다음 단계: news-cache 적재 구현
+모델 작성이 끝나면 `memo/plans/news-cache-ingestion-plan.md`에 따라 news_cache 적재 도메인 로직 구현으로 넘어간다.
+
+선행 산출물 (이번 phase에서 만들어져야 함):
+- `app/models/cache.py`의 `NewsCache` 모델
+- `app/models/ticker.py`의 `TickerMetadata` 모델
+- `app/models/watchlist.py`의 `Watchlist` 모델
+
+## 마무리 (5번 단계 이후)
+- [x] uc 브랜치 푸시
+- [x] main으로 PR 생성 또는 merge 시점 결정 (선택)
+- [x] news-cache-plan 구현 phase로 전환
+
+---
+
+## Phase 2 완료 보고서 (2026-05-20)
+
+상세 결과는 `memo/results/2026-05-20-phase2-models-and-news-ingestion.md` 및 `memo/results/2026-05-20-news-cache-ingestion-implementation.md` 참고.
+
+### 머지 상태
+- `main` HEAD: `a1e7743 Merge branch 'uc' into main`
+
+### 사전 정리 체크리스트 처리 결과
+- `docker-compose.yml` redis 볼륨: 영속화 안 하기로 결정 → compose에 redis volume 추가하지 않음 + `.gitignore`의 `redisdata/` 라인 제거
+- `scripts/.gitkeep` 제거 (seed.py 등 실파일이 디렉터리 유지)
+- `pyproject.toml`의 `dependencies = []` 유지 → `requirements.txt` 단일 관리로 결정
+- `README.md` 디렉터리 트리에 `alembic/versions/` 명시 보강
+- `memo/phase1.md` 경로 표기를 `~/TickerTaka-backend` 기준으로 통일 (phase2.md와 일치)
+- `requirements.txt`에 `trafilatura==2.0.0` 추가 완료
+
+### 이번 phase에서 닫힌 핵심 결과물
+- SQLAlchemy 2.0 모델 (`app/models/`) 전 테이블 매핑 (`app_user`, `ticker_metadata`, `watchlist`, `price_cache`, `financial_cache`, `technical_indicator_cache`, `news_cache`, `filing_cache`, `event_timeline`, `data_refresh_job`, `debate_session` 외)
+- DB 세션 유틸 (`app/core/db.py`: `SessionLocal` / `get_db` / `session_scope` / asyncpg → 동기 URL 정규화)
+- News ingestion 도메인 (`app/domain/news_ingestion.py`)
+  - 네이버 뉴스 API + trafilatura 본문 추출
+  - Redis lock / cooldown / fail-closed
+  - 적재 정책 (fetch 상한 / row 상한 100 / content 상한 10 / TTL = `published_at + 30d`)
+  - 제목 Jaccard 유사도 그룹화 (6시간 gap)
+  - A/B relevance 필터 (그래픽/포토 차단, 제목 우선 + 본문 `name_kr` ≥ 2회)
+  - 일일 네이버 API 호출량 Redis 집계 (`naver-api-count:YYYY-MM-DD`, KST)
+- Watchlist API + BackgroundTasks 트리거 (`POST /api/watchlists` → `sync_watchlist_news`)
+- Phase 3 scheduler/cleanup sweep + sweep last-run + 일일 API 카운터
+- 운영 보강 (uc 추가 작업분):
+  - 공백 무시 매칭 (`SK하이닉스` ↔ `SK 하이닉스`)
+  - partial insert (P1) — 본문 없어도 metadata `name_kr` 매칭 통과 시 적재
+  - 초기 적재 정책 완화 (`INITIAL_FETCH_COUNT` 15→20, `MIN_CONTENT_LENGTH` 200→120)
+  - 본문 추출 실패 측정 정확화 (빈 본문도 `body_failed`)
+  - 그룹 내 본문 즉시 fallback (옵션 E, `BODY_ATTEMPTS_PER_GROUP=3`)
+  - storage filter 컷 fallback (옵션 E')
+  - 네이버 검색 정렬 `sort=date` → `sort=sim` (관련도 우선, 7일 컷은 유지)
+- 검증
+  - `validate_models.py` / `validate_enums.py` / `check_tz.py`
+  - `validate_news_ingestion.py` 15 PASS
+  - `validate_redis_integration.py` PASS
+  - `validate_watchlist_flow.py` 6 PASS
+  - `validate_watchlist_api.py` 8/8 PASS (TestClient endpoint smoke)
+  - `validate_news_cache_scheduler.py` 6 PASS (Phase 3)
+- 라이브 검증
+  - `005930` initial+commit (실 네이버 API / 실 본문 / 실 DB 적재)
+  - `000660` watchlist → background sync → news_cache 적재 (`sort=sim` 기준 inserted=19 / content_not_null=5)
+- 시드: `phase2-test-user@example.com`
+
+### 다음 단계
+남은 캐시 테이블 (`price_cache`, `financial_cache`, `technical_indicator_cache`, `filing_cache`) 적재는 별도 plan으로 진행. 토론 시점 현재가(intraday quote)는 `PriceCache`와 분리해 따로 다룬다.

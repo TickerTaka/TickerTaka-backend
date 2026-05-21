@@ -38,11 +38,9 @@ Thumbs.db
 
 pgdata/
 chromadata/
-redisdata/
 *.pid
 *.log
 *.rdb
 *.aof
 
 docs/_build/
-
