@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.db import session_scope
 from app.core.redis import build_redis_client, make_key
+from app.external.chroma_client import ChromaClient, NEWS_COLLECTION_NAME
 from app.domain.news_ingestion import NewsIngestionService, SyncNewsResult
 from app.repositories.news_cache_repository import NewsCacheRepository
 from app.repositories.watchlist_repository import WatchlistRepository
@@ -56,6 +57,7 @@ class NewsCacheSchedulerService:
         ingestion_factory: Callable[[Session], NewsIngestionService] | None = None,
         symbol_session_factory: Callable[[], Any] | None = None,
         max_cache_rows: int | None = None,
+        chroma_client: ChromaClient | None = None,
     ) -> None:
         self.session = session
         self.watchlist_repo = WatchlistRepository(session)
@@ -64,6 +66,7 @@ class NewsCacheSchedulerService:
         self.symbol_session_factory = symbol_session_factory or session_scope
         self.max_cache_rows = max_cache_rows or NewsIngestionService.MAX_CACHE_ROWS
         self.redis_client = build_redis_client(get_settings().redis_url)
+        self.chroma_client = chroma_client
 
     def run_watchlist_refresh(
         self,
@@ -119,11 +122,15 @@ class NewsCacheSchedulerService:
         started = datetime.now(UTC)
         result = CleanupSweepResult()
 
-        result.deleted_expired_rows = self.news_repo.delete_expired_rows(now=now)
+        deleted_ids = self.news_repo.delete_expired_rows_returning_ids(now=now)
+        result.deleted_expired_rows = len(deleted_ids)
+        self._delete_chroma_documents(deleted_ids)
 
         for symbol in self.news_repo.list_symbols_with_cache():
             result.processed_symbols += 1
-            result.trimmed_rows_count += self.news_repo.trim_rows_for_symbol(symbol, self.max_cache_rows)
+            trimmed_ids = self.news_repo.trim_rows_for_symbol_returning_ids(symbol, self.max_cache_rows)
+            result.trimmed_rows_count += len(trimmed_ids)
+            self._delete_chroma_documents(trimmed_ids)
 
         result.elapsed_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         self._set_sweep_last_run("cleanup", started)
@@ -166,6 +173,16 @@ class NewsCacheSchedulerService:
     @staticmethod
     def _sweep_last_run_key(mode: str) -> str:
         return make_key("news-sync", "sweep:last-run", mode)
+
+    def _delete_chroma_documents(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        try:
+            if self.chroma_client is None:
+                self.chroma_client = ChromaClient()
+            self.chroma_client.delete(NEWS_COLLECTION_NAME, ids=ids)
+        except Exception:
+            logger.exception("scheduled cleanup failed to delete %s chroma docs", len(ids))
 
 
 def run_scheduled_watchlist_refresh(*, force: bool = False, limit: int | None = None) -> RefreshSweepResult:

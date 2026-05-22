@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from sqlalchemy import Select, delete, distinct, select
 from sqlalchemy.orm import Session
@@ -50,17 +51,29 @@ class NewsCacheRepository:
         return list(self.session.scalars(stmt))
 
     def delete_expired_rows(self, now: datetime | None = None) -> int:
+        return len(self.delete_expired_rows_returning_ids(now=now))
+
+    def delete_expired_rows_returning_ids(self, now: datetime | None = None) -> list[str]:
         cutoff = now or datetime.now(UTC)
-        result = self.session.execute(
-            delete(NewsCache).where(
-                NewsCache.ttl_until.is_not(None),
-                NewsCache.ttl_until < cutoff,
+        rows = list(
+            self.session.scalars(
+                select(NewsCache).where(
+                    NewsCache.ttl_until.is_not(None),
+                    NewsCache.ttl_until < cutoff,
+                )
             )
         )
+        deleted_ids: list[str] = []
+        for row in rows:
+            deleted_ids.append(str(row.id))
+            self.session.delete(row)
         self.session.flush()
-        return int(result.rowcount or 0)
+        return deleted_ids
 
     def trim_rows_for_symbol(self, symbol: str, max_rows: int) -> int:
+        return len(self.trim_rows_for_symbol_returning_ids(symbol, max_rows))
+
+    def trim_rows_for_symbol_returning_ids(self, symbol: str, max_rows: int) -> list[str]:
         rows = list(
             self.session.scalars(
                 select(NewsCache)
@@ -70,8 +83,10 @@ class NewsCacheRepository:
         )
         overflow = len(rows) - max_rows
         if overflow <= 0:
-            return 0
+            return []
+        deleted_ids: list[str] = []
         for row in rows[-overflow:]:
+            deleted_ids.append(str(row.id))
             self.session.delete(row)
         self.session.flush()
-        return overflow
+        return deleted_ids

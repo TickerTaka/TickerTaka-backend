@@ -59,6 +59,11 @@ class FailingFakeIngestionService(FakeIngestionService):
         return super().sync_news_for_ticker(symbol, mode=mode, force=force, limit=limit)
 
 
+class NullChromaClient:
+    def delete(self, name, *, ids=None, where=None) -> None:
+        return None
+
+
 def expect(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -89,6 +94,7 @@ def run_refresh_flow() -> FlowResult:
                 session,
                 ingestion_factory=FakeIngestionService,
                 symbol_session_factory=lambda: nullcontext(session),
+                chroma_client=NullChromaClient(),
             )
             service.watchlist_repo.list_distinct_symbols = lambda: symbols
             result = service.run_watchlist_refresh(force=True, limit=4)
@@ -117,6 +123,7 @@ def run_empty_watchlist_flow() -> FlowResult:
                 session,
                 ingestion_factory=FakeIngestionService,
                 symbol_session_factory=lambda: nullcontext(session),
+                chroma_client=NullChromaClient(),
             )
             service.watchlist_repo.list_distinct_symbols = lambda: []
             result = service.run_watchlist_refresh(force=True, limit=4)
@@ -140,6 +147,7 @@ def run_refresh_failure_isolation_flow() -> FlowResult:
                 session,
                 ingestion_factory=FailingFakeIngestionService,
                 symbol_session_factory=lambda: nullcontext(session),
+                chroma_client=NullChromaClient(),
             )
             service.watchlist_repo.list_distinct_symbols = lambda: symbols
             result = service.run_watchlist_refresh(force=True, limit=4)
@@ -196,6 +204,7 @@ def run_cleanup_flow() -> FlowResult:
             service = NewsCacheSchedulerService(
                 session,
                 max_cache_rows=3,
+                chroma_client=NullChromaClient(),
             )
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
@@ -238,7 +247,7 @@ def run_cleanup_no_expired_flow() -> FlowResult:
             )
             session.flush()
 
-            service = NewsCacheSchedulerService(session, max_cache_rows=3)
+            service = NewsCacheSchedulerService(session, max_cache_rows=3, chroma_client=NullChromaClient())
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
 
@@ -269,7 +278,7 @@ def run_cleanup_under_limits_flow() -> FlowResult:
                 )
             session.flush()
 
-            service = NewsCacheSchedulerService(session, max_cache_rows=3)
+            service = NewsCacheSchedulerService(session, max_cache_rows=3, chroma_client=NullChromaClient())
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
 

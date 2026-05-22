@@ -152,13 +152,13 @@
 
 ### 단계 2: news-cache 옵션 B 전환 (2-3일)
 
-기존 동작 중인 시스템을 옵션 B로 전환. **2.a 수집 코드 변경**과 **2.b 로컬 RAG 인덱싱 스크립트**로 분리.
+기존 동작 중인 시스템을 옵션 B로 전환. **2.a 수집 코드 변경(즉시 Chroma upsert 포함)**과 **2.b 로컬 RAG 인덱싱 스크립트(복구/백필용)**로 분리.
 
 #### 단계 2.a: 수집 코드 (PG만)
 
 | 작업 | 출처 plan | 영향 |
 |---|---|---|
-| news-cache-policy-revision 구현 | 새 plan | `news_ingestion.py` 상수/P1 제거/content=NULL (ChromaDB 호출 없음) |
+| news-cache-policy-revision 구현 | 새 plan | `news_ingestion.py` 상수/P1 제거/content=NULL + direct Chroma upsert |
 | scheduler 갱신 | 같은 plan | `news_cache_scheduler.py`에서 `MAX_CONTENT_ROWS` 로직 제거 |
 | repository 갱신 | 같은 plan | `trim_content_for_symbol` 제거 |
 | 검증 시나리오 갱신 + 신규 4개 | 같은 plan | partial insert 회귀 + content NULL 강제 + 본문 추출 성공 row만 적재 |
@@ -170,7 +170,7 @@
 |---|---|---|
 | evidence_indexing 신설 | vector-db Phase 2 | `app/domain/evidence_indexing.py` (PG row → ChromaDB document 변환 헬퍼) |
 | reindex 스크립트 신설 | vector-db Phase 3 | `scripts/reindex_local_chroma.py` (`--symbol`, `--source`, `--reset`, `--force`, `--all-watchlist`) |
-| 첫 reindex 실행 | 같은 plan | PG news_cache row 기준 로컬 ChromaDB collection `news` 적재 확인 |
+| 첫 reindex 실행 | 같은 plan | direct upsert 이후 복구/백필 경로 검증 |
 
 **왜 두 번째?**
 - 이미 동작 중인 시스템 변경이라 먼저 안정화
@@ -178,8 +178,8 @@
 - 단계 1에서 만든 ChromaDB 인프라가 처음 사용되는 지점
 
 **닫힘 기준 (졸프 단계)**:
-- 단계 2.a: PG content NULL 강제 회귀 + 라이브 적재 검증
-- 단계 2.b: reindex 스크립트로 로컬 ChromaDB에 collection `news` 적재 + symbol metadata filter 검색 가능
+- 단계 2.a: PG content NULL 강제 회귀 + direct Chroma upsert + 라이브 적재 검증
+- 단계 2.b: reindex 스크립트로 로컬 ChromaDB 복구/백필 가능 + symbol metadata filter 검색 가능
 - (운영 진입 시 별도) ChromaDB 백업/복구 절차, fail-soft + reconcile — `production-deployment-plan.md`로 미룸
 
 **이 단계 완료 시 상태**:
@@ -191,7 +191,7 @@
   - `vector-db-and-evidence-retrieval-plan.md` — Phase 2, Phase 3 (로컬 Chroma reindex)
 - 📋 산출물:
   - `app/domain/evidence_indexing.py` (신설)
-  - `app/domain/news_ingestion.py` (수정 — 상수/P1/content NULL, ChromaDB 호출 없음)
+  - `app/domain/news_ingestion.py` (수정 — 상수/P1/content NULL + direct Chroma upsert)
   - `app/domain/news_cache_scheduler.py` (수정 — `MAX_CONTENT_ROWS` 제거)
   - `app/repositories/news_cache_repository.py` (수정 — `trim_content_for_symbol` 제거)
   - `scripts/reindex_local_chroma.py` (신설)

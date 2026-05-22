@@ -31,12 +31,14 @@ class EvidenceIndexingService:
         chroma_client: ChromaClient | None = None,
         embedding_client: EmbeddingClient | None = None,
         article_scraper: ArticleScraper | None = None,
+        collection_name: str = NEWS_COLLECTION_NAME,
     ) -> None:
         self.session = session
         self.repo = NewsCacheRepository(session)
         self.chroma_client = chroma_client or ChromaClient()
         self.embedding_client = embedding_client or get_embedding_client()
         self.article_scraper = article_scraper or ArticleScraper()
+        self.collection_name = collection_name
 
     def reindex_news_for_symbol(
         self,
@@ -46,7 +48,7 @@ class EvidenceIndexingService:
         force: bool = False,
     ) -> ReindexNewsResult:
         if reset:
-            self.chroma_client.delete(where={"symbol": symbol}, name=NEWS_COLLECTION_NAME)
+            self.chroma_client.delete(where={"symbol": symbol}, name=self.collection_name)
 
         rows = self.repo.list_by_symbol(symbol)
         result = ReindexNewsResult(symbol=symbol, scanned_rows=len(rows))
@@ -83,8 +85,29 @@ class EvidenceIndexingService:
 
         if documents:
             self.chroma_client.upsert(
-                NEWS_COLLECTION_NAME,
+                self.collection_name,
                 documents=documents,
                 embedding_client=self.embedding_client,
             )
         return result
+
+    @staticmethod
+    def build_news_document(
+        row: NewsCache,
+        *,
+        content: str,
+        force: bool = False,
+    ) -> ChromaDocument:
+        document_text = f"{row.title}\n\n{content.strip()}".strip()
+        return ChromaDocument(
+            id=str(row.id),
+            document=document_text,
+            metadata={
+                "symbol": row.symbol,
+                "source_id": str(row.id),
+                "source_type": "news",
+                "source_url": row.source_url,
+                "published_at": row.published_at.isoformat() if row.published_at else None,
+                "force": force,
+            },
+        )

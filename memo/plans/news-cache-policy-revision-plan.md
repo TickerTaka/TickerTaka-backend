@@ -31,11 +31,11 @@
 | `MAX_CACHE_ROWS` | 100 | **10** (= 본문 상한과 통합) |
 | `MAX_CONTENT_ROWS` | 10 | **사용 안 함** (content NULL) |
 | TTL | 30일 | 30일 (변경 없음) |
-| ChromaDB 동기화 | (없음) | **수동 reindex 스크립트** (sync 직후 동기 upsert는 후속 옵션) |
+| ChromaDB 동기화 | (없음) | **sync 시 direct upsert + 수동 reindex 스크립트(복구/백필용)** |
 | ChromaDB id 매핑 | — | `news_cache.id` (UUID) = ChromaDB document.id |
 | 클러스터링 / Filter A·B / 그룹 fallback | 그대로 | **그대로** |
 | 본문 크롤링(trafilatura) | 그대로 | **그대로** (PG 적재 시 본문 추출 시도) |
-| ChromaDB upsert 위치 | (계획되었음) | **`scripts/reindex_local_chroma.py`** (vector-db plan Phase 3) |
+| ChromaDB upsert 위치 | (계획되었음) | **`sync_news_for_ticker()` direct upsert + `scripts/reindex_local_chroma.py` 복구 경로** |
 
 ## 변하지 않는 흐름
 
@@ -57,12 +57,12 @@
 - ChromaDB 임베딩 대상 — 본문 있는 기사만 임베딩 대상
 - 재배포 그룹화
 
-## 옵션 B 흐름 (수집 단계 = PG 적재)
+## 옵션 B 흐름 (수집 단계 = PG 적재 + direct Chroma upsert)
 
 ```
 Filter B 통과한 후보 (본문 추출 성공 + 관련성 OK) — 최대 10건
   ↓
-[PostgreSQL]                       (ChromaDB는 별도 reindex 단계에서 처리)
+[PostgreSQL]                       [ChromaDB]
 news_cache INSERT
   - id (UUID)
   - symbol
@@ -74,9 +74,14 @@ news_cache INSERT
   - retrieved_at
   - ttl_until
   - content = NULL  ★ (본문은 PG에 저장 안 함)
+  ↓ same scraped body
+local Chroma `news` upsert
+  - id = news_cache.id
+  - document = title + 본문
+  - metadata = {symbol, source_id, source_url, published_at}
 ```
 
-본문 텍스트는 PG에 저장하지 않지만 *수집 단계에서 본문 추출은 시도*한다 — 추출 성공해야 PG에 row 적재 (해석 B). 본문 자체는 ChromaDB에 별도 reindex 단계에서 들어감.
+본문 텍스트는 PG에 저장하지 않지만 *수집 단계에서 본문 추출은 시도*한다 — 추출 성공해야 PG에 row 적재 (해석 B). 같은 본문으로 즉시 로컬 ChromaDB도 upsert한다.
 
 ## 옵션 B 흐름 (RAG 인덱싱 단계 = reindex 스크립트)
 
@@ -146,11 +151,14 @@ content = None  # 항상 NULL — 본문은 ChromaDB에 저장
 
 scraped.content는 ChromaDB upsert 페이로드로만 사용.
 
-### D. ChromaDB upsert는 sync 흐름에서 호출하지 않음
+### D. ChromaDB direct upsert + reindex 병행
 
-수집 단계는 PG만 다루고, ChromaDB upsert는 `scripts/reindex_local_chroma.py`(vector-db plan Phase 3)로 분리. sync 함수에 ChromaDB 호출 코드를 추가하지 않음 — 졸프 단계 정책.
+수집 단계는 PG 메타 row 적재 직후 같은 본문으로 로컬 ChromaDB `news` 컬렉션에 direct upsert한다.
 
-운영 진입 시점에 동기 upsert로 전환할 수 있는 hook은 `app/domain/evidence_indexing.py`에 두기 (현재는 reindex 스크립트만 호출).
+`scripts/reindex_local_chroma.py`는 다음 용도로 유지:
+- 로컬 Chroma 볼륨 유실 후 복구
+- direct upsert 실패분 백필
+- legacy PG row 기준 일괄 재생성
 
 ### E. cleanup은 PG만
 
@@ -350,7 +358,7 @@ ORDER BY published_at DESC LIMIT 10
 1. 코드 변경 (상수/P1 제거/content=NULL)
 2. 검증 시나리오 갱신 + 신규 시나리오 PASS
 3. **content NULL 강제 회귀 테스트** — `news_cache.content`가 어떤 경로로도 채워지지 않음을 보장 (스키마상 컬럼은 남기 때문에 우발적 채움 위험)
-4. `scripts/reindex_local_chroma.py` (vector-db plan Phase 3)로 PG news_cache row 기준 로컬 ChromaDB 1회 인덱싱 성공
+4. direct upsert 라이브 경로 1회 성공 + `scripts/reindex_local_chroma.py`로 복구/백필 경로 1회 성공
 5. 라이브 검증: SK하이닉스 watchlist 등록 → `content_not_null = 0` + reindex 후 로컬 ChromaDB collection 적재 확인 + **적재 10건 중 실제 유의미 기사 비율 측정** (대표 종목 3~5개 라이브 샘플로 relevance precision 재확인)
 
 운영 진입 시 별도 추가 검증 (본 plan 범위 밖):

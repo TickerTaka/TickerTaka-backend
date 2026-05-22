@@ -10,9 +10,11 @@ from sqlalchemy import func, select
 from app.core.db import SessionLocal
 from app.domain.evidence_indexing import EvidenceIndexingService
 from app.external.article_scraper import ScrapedArticle
-from app.external.chroma_client import ChromaClient, NEWS_COLLECTION_NAME
+from app.external.chroma_client import ChromaClient
 from app.external.embedding import DeterministicEmbeddingClient
 from app.models import NewsCache, TickerMetadata
+
+NEWS_VALIDATE_COLLECTION = "news_validate_reindex"
 
 
 @dataclass(slots=True)
@@ -78,12 +80,13 @@ def main() -> None:
         row_published_at = row.published_at
 
     try:
-        chroma.delete(NEWS_COLLECTION_NAME, ids=[row_id])
+        chroma.delete_collection(NEWS_VALIDATE_COLLECTION)
         with SessionLocal() as session:
             service = EvidenceIndexingService(
                 session,
                 chroma_client=chroma,
                 embedding_client=embeddings,
+                collection_name=NEWS_VALIDATE_COLLECTION,
                 article_scraper=FakeArticleScraper(
                     {
                         row_url: ScrapedArticle(
@@ -98,7 +101,7 @@ def main() -> None:
             )
             result = service.reindex_news_for_symbol(symbol)
 
-        payload = chroma.get(NEWS_COLLECTION_NAME, ids=[row_id])
+        payload = chroma.get(NEWS_VALIDATE_COLLECTION, ids=[row_id])
         fetched_id = payload["ids"][0] if payload.get("ids") else None
         print(
             json.dumps(
@@ -109,7 +112,7 @@ def main() -> None:
                         indexed_rows=result.indexed_rows,
                         skipped_rows=result.skipped_rows,
                         failed_rows=result.failed_rows,
-                        collection_count=chroma.count(NEWS_COLLECTION_NAME),
+                        collection_count=chroma.count(NEWS_VALIDATE_COLLECTION),
                         fetched_id=fetched_id,
                     )
                 ),
@@ -117,7 +120,7 @@ def main() -> None:
             )
         )
     finally:
-        chroma.delete(NEWS_COLLECTION_NAME, ids=[row_id])
+        chroma.delete_collection(NEWS_VALIDATE_COLLECTION)
         with SessionLocal() as session:
             db_row = session.get(NewsCache, row_uuid)
             if db_row is not None:
