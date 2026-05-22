@@ -58,10 +58,10 @@ corp_code 매핑:
 - `https://opendart.fss.or.kr/api/corpCode.xml` 다운로드 → ZIP 풀기 → XML 파싱
 - 매핑: `stock_code(6자리)` → `corp_code(8자리)`
 - 매년 1회 정도 갱신 (신규 상장/상폐 반영)
+- **로딩 정책 (구체화)**: 부팅 시 로컬 캐시 파일(`seeds/corp_code_map.json`) 우선 → 없거나 만료(1년 초과) 시 DART에서 다운로드 → 파일 저장 + in-memory dict
 - 저장 위치 옵션:
-  - **A. in-memory dict** (앱 부팅 시 로드, 단순) — 1순위
-  - B. 별도 lookup 파일 (`seeds/corp_code_map.json`)
-  - C. `ticker_metadata`에 `corp_code` 컬럼 추가 — DB DDL 필요 (Alembic 미사용 정책상 보류)
+  - **A. in-memory dict + 로컬 파일 캐시** (앱 부팅 시 로드, 단순) — 1순위
+  - B. `ticker_metadata`에 `corp_code` 컬럼 추가 — DB DDL 필요 (Alembic 미사용 정책상 보류)
 
 ## 환경 변수 / 외부 의존성
 
@@ -73,10 +73,14 @@ corp_code 매핑:
 
 ### 1. 적재 건수와 백필 범위
 
-기본값:
-- 초기 백필: 최근 `5년` × `4분기` + 연간 `5년` = 최대 `25 row`
-- 운영 정책: 분기당 1행 (4Q) + 연간 1행 (NULL quarter)
-- 종목당 row 상한: `60` (15년치) — 그 이상은 archive 또는 삭제
+**초기 구현 범위 (분기 row만)**:
+- 최근 `5년` × `4분기` = 최대 `20 row` (연간 NULL row는 미도입)
+- 운영 정책: 분기당 1행 (Q1~Q4)
+
+**후속 확장 범위 (연간 NULL row 도입 시)**:
+- 5년 × (4분기 + 1 연간) = 최대 `25 row`
+
+종목당 row 상한: `60` (15년치) — 초기 구현 기준에서는 5년 = 20 row, 상한은 여유분 확보.
 
 운영 원칙:
 - 토론에서 5년 추세 + 직전 분기 비교 가능
@@ -147,17 +151,33 @@ cleanup:
 - PER/PBR은 `price_cache` 의존 → 초기 구현에서는 NULL로 두고, 후속 phase에서 `compute_financial_ratios(symbol)` 별도 호출
 - ROE/debt_ratio는 재무제표만으로 계산 가능 → 초기 적재 시 함께 계산
 
+**Valuation date 기준 (PER/PBR 후속 phase 결정 사항)**:
+- 같은 분기 재무 row에 PER/PBR을 어떤 가격 기준으로 계산할지 명시 필요
+- 후보:
+  - **a. 분기말 종가** — `fiscal_quarter` 종료일(3/31, 6/30, 9/30, 12/31) 직전 거래일 종가
+  - b. 공시일 종가 — DART 공시 시점의 종가 (보통 결산일 + 45~90일)
+  - c. 최신 종가 — 토론 시점의 가장 최근 종가 (시점에 따라 변동)
+- 같은 row에 대해 계산값이 흔들리지 않도록 후속 phase에서 단일 기준으로 고정 (현재는 a. 분기말 종가 권장 — 분기 데이터의 "당시 가치" 의미가 가장 명확)
+- 최신 종가 기준 PER/PBR은 별도 컬럼/뷰로 두는 것도 가능 (현재 스키마에는 없음)
+
 DART API 응답 매핑:
 - 단일회사 주요계정 응답의 `account_nm`을 키로 매출액/영업이익/당기순이익 등을 추출
 - DART 계정명 한글 매핑이 표준화되어 있으므로 dict 매핑 테이블로 처리
 - 매핑 dict는 `app/external/dart/financial_account_map.py`에 정의
+
+연결/별도 재무 정책:
+- **초기 구현은 연결재무제표(`CFS` — Consolidated Financial Statements) 우선**
+- 연결 응답이 없는 종목(작은 기업)은 별도재무제표(`OFS` — Own Financial Statements)로 fallback
+- DART API 호출 시 `fs_div` 파라미터로 명시 (`CFS` 또는 `OFS`)
+- 같은 종목이라도 분기마다 연결/별도 혼재 가능 → 적재 시 `fs_div` 별도 기록 검토 (현재 스키마에는 없음, 후속 확장 후보)
+- IFRS 한정 (대부분 상장사) — K-GAAP은 후속
 
 ## Redis 키 컨벤션
 
 - `financial-sync:lock:{symbol}` — 동시 실행 방지 (`SET NX EX=300`)
 - `financial-sync:last-sync:{symbol}` — 최근 실행 시각 (6시간 cooldown 판정)
 - `financial-sync:sweep:last-run:{mode}` — 전체 sweep 최근 실행 시각
-- `dart-api-count:{date}` — 일일 DART API 호출량 (FilingCache와 공유 — DART 한도는 API 키 단위)
+- `dart-api-count:{date}` — 일일 DART API 호출량 (FilingCache와 공유 — DART 한도는 API 키 단위, **`date`는 KST 기준 `YYYY-MM-DD` 일관 적용** — news의 `naver-api-count` 정책과 통일)
 
 운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
 
@@ -258,6 +278,15 @@ PER/PBR 계산 시점:
 4. `scripts/run_financial_cache_scheduler.py` — cron 진입점
 
 ### Phase 4. PER/PBR 보강
+
+## 검증/보완 메모 (2026-05-22)
+
+1. `corp_code`를 in-memory dict로 두는 선택은 초기엔 적절하지만, 앱 프로세스 재기동마다 다운로드할지 파일 캐시를 둘지 명시가 아직 약하다. 운영에서는 "부팅 시 로컬 캐시 우선, 없으면 다운로드" 정도로 한 단계 더 구체화하는 편이 안전하다.
+2. `fiscal_quarter = NULL` 연간 row를 후속으로 미루면서도 초기 백필 건수 예시는 `연간 5년`을 포함하고 있다. 현재 구현 범위 기준 건수와 후속 범위 기준 건수가 섞여 있으니, 초기 구현 기준 최대 row 수를 별도로 적는 편이 명확하다.
+3. PER/PBR은 price cache 의존인데, 어떤 가격 기준일(분기말, 공시일, 최신 종가)을 쓸지 아직 결정이 없다. 이 기준이 없으면 같은 재무 row에 대해 계산값이 흔들릴 수 있으므로, 후속 phase 전에 valuation date 기준을 먼저 정해야 한다.
+4. DART 주요계정 API는 계정명이 표준적이지만 기업/연결/별도 재무 기준 차이가 있다. 초기 구현에서 `연결(consolidated) 우선`인지 `별도(separate) fallback`인지 명시가 필요하다.
+5. `row 상한 60`은 충분히 여유 있지만, 실제로는 재무 데이터가 매우 작다. cleanup 구현은 가능하되 우선순위는 낮고, 초기 단계에선 upsert/정합성/계정 매핑 정확도 검증이 훨씬 중요하다.
+6. `dart-api-count:{date}`를 Financial/Filing이 공유한다고 했으므로, 일일 카운터 기준 날짜(KST/UTC)는 두 plan과 `news-cache`의 KST 정책에 맞춰 통일하는 게 좋다.
 
 목표: 가격 캐시와 조합하여 PER/PBR 계산
 

@@ -118,11 +118,11 @@
 - `force=True`는 1시간 최소 간격만 무시하며 Redis lock은 우회하지 않음
 - watchlist에서 종목 삭제 시 해당 종목 정기 갱신 중단
 
-### 4. 삭제 정책 / TTL
+### 4. 삭제 정책 / TTL (장기 보존 + row 상한 trim)
 
 기본:
-- 가격 데이터는 *영구성*. TTL 없음.
-- row 상한 `1260`(5년) 초과 시 오래된 row부터 삭제
+- 가격 데이터는 **장기 보존** — TTL은 없고 row 상한으로만 정리 (실질적으로는 "최근 5년 보존")
+- row 상한 `1260`(5년 영업일 기준) 초과 시 오래된 row부터 삭제
 - 기술지표도 동일 정책 (`1260` row 상한)
 
 cleanup:
@@ -139,8 +139,8 @@ cleanup:
 - `low_price`
 - `close_price` (필수)
 - `volume`
-- `change_rate` — pykrx 응답에서 직접 받거나 (전일 종가 대비) 계산
-- `adjusted_close` — pykrx 기본은 비조정가. 별도 조정가 호출 필요. 초기 구현은 `close_price`와 동일하게 저장하거나 NULL.
+- `change_rate` — **전일 종가 대비 직접 계산으로 고정** (외부 응답값/계산 혼재 시 정의가 흔들리므로 재현성/검증성 위해 직접 계산만 사용)
+- `adjusted_close` — **초기 구현은 NULL 고정**. 조정가 정책이 정해질 때 별도 phase에서 pykrx의 수정주가 API로 채움. `close_price`와 동일하게 저장은 금지(나중에 PER/PBR 계산에서 혼재 위험)
 - `retrieved_at`
 
 `technical_indicator_cache` 저장 필드:
@@ -194,15 +194,20 @@ def sync_technical_indicators_for_ticker(
   2. Redis lock 획득
   3. 마지막 `price_date` 조회
   4. pykrx로 누락 구간 + 최근 5일 가져오기
-  5. `(symbol, price_date)` upsert
-  6. `change_rate` 보정 계산
+  5. `(symbol, price_date)` upsert + **여기서 가격 트랜잭션 commit**
+  6. `change_rate` 직접 계산 (전일 종가 대비)
   7. row 상한 초과분 정리
-  8. 같은 호출 마지막에 `sync_technical_indicators_for_ticker` 트리거
+  8. **별도 트랜잭션**으로 `sync_technical_indicators_for_ticker` 트리거 — 지표 계산 실패가 가격 적재까지 롤백시키지 않도록 분리
 - `sync_technical_indicators_for_ticker`:
-  1. `price_cache`의 최근 N일치 종가/거래량 로딩
+  1. `price_cache`의 최근 N일치 종가/거래량 로딩 (직전 트랜잭션 commit 완료 후)
   2. pandas로 지표 계산
   3. `(symbol, indicator_date)` upsert
   4. row 상한 초과분 정리
+
+트랜잭션 경계 정책:
+- 가격 적재와 지표 계산을 같은 세션/트랜잭션에 묶지 않음
+- 지표 계산이 실패해도 가격 row는 보존 → 다음 sync에서 지표만 재계산
+- 운영 안정성 측면에서 분리가 표준
 
 반환 예시:
 - 신규 적재 가격 row 수
@@ -218,9 +223,15 @@ NewsCache와 동일 구조:
 2. `watchlist` 저장 + DB commit
 3. `BackgroundTasks.add_task(sync_watchlist_prices, symbol)` enqueue
 4. `sync_watchlist_prices(symbol)`:
-   1. `sync_prices_for_ticker(symbol, mode="initial", force=True)`
-   2. 성공 시 자동으로 지표 계산
+   1. `sync_prices_for_ticker(symbol, mode="initial", force=True)` — 1년치 백필
+   2. 가격 commit 후 별도 트랜잭션으로 지표 계산
 5. 정기 갱신은 별도 scheduler (NewsCache의 `NewsCacheSchedulerService`와 같은 패턴으로 `PriceCacheSchedulerService` 신설)
+
+Background task 시간 / worker 분리 메모:
+- watchlist 등록 직후 1년치 백필 + 지표 계산은 종목당 수~수십 초 소요
+- News/Filing/Financial과 병렬 실행되면 FastAPI 프로세스 background task 점유 시간 증가
+- 종목 수 증가 또는 task 시간 p95 > 60초 시 worker 분리 (RQ/Celery/Arq) 검토
+- 초기는 BackgroundTasks 유지, 신호 보고 이전 결정
 
 스케줄러 실행:
 - 외부 cron으로 매일 16:00 KST에 `scripts/run_price_cache_scheduler.py --mode refresh` 호출
@@ -237,6 +248,7 @@ NewsCache와 동일 구조:
 2. `app/repositories/price_cache_repository.py` — bulk upsert + 최근 N일 조회 + row 상한 정리
 3. `app/domain/price_ingestion.py` — `sync_prices_for_ticker` + Redis lock
 4. `scripts/validate_price_ingestion.py` — 적재/upsert/cooldown/lock/row 상한 시나리오
+5. **라이브 검증** — 대표 종목(예: 005930, 000660)로 16:00 KST sweep 시점에 당일 row가 안정적으로 생성되는지 확인. pykrx의 장중/장후 시차와 휴장일 동작을 실측으로 검증.
 
 ### Phase 2. 기술지표 계산
 
@@ -258,6 +270,15 @@ NewsCache와 동일 구조:
 3. NewsCache 트리거와 병렬로 실행 (둘 다 별도 background task)
 
 ### Phase 4. 정기 갱신 / cleanup
+
+## 검증/보완 메모 (2026-05-22)
+
+1. `PriceCache`는 영구성 데이터로 두면서 row 상한 1260을 둔 상태다. 이 경우 "영구성"의 의미가 실질적으로는 "최근 5년 보존"이므로, 문서 표현은 영구 보존보다 "장기 보존 + 상한 trim" 쪽이 더 정확하다.
+2. `adjusted_close`를 초기에는 `close_price와 동일 또는 NULL`로 적었는데, 이후 PER/PBR 등 후속 계산에서 조정가 사용 여부가 혼재될 수 있다. 초기 구현에서는 `adjusted_close = NULL`로 고정하고, 조정가 정책이 정해질 때만 채우는 편이 안전하다.
+3. `change_rate`는 외부 응답값 사용 또는 계산으로 적혀 있는데, 소스가 섞이면 값 정의가 달라질 수 있다. 구현 시에는 "전일 종가 대비 직접 계산"으로 고정하는 것이 재현성과 검증성 면에서 낫다.
+4. `sync_prices_for_ticker` 마지막에 지표 계산을 자동 트리거하는 구조는 자연스럽지만, 가격 upsert와 지표 계산을 같은 세션/트랜잭션에 묶을지 분리할지 먼저 정해야 한다. 지표 계산 실패가 가격 적재까지 롤백시키는 구조는 운영상 비효율적일 수 있다.
+5. `pykrx`를 1순위로 두는 결정은 타당하지만, 장중/장후 시차와 휴장일 동작을 실 라이브로 한 번 검증해야 한다. 특히 16:00 KST sweep 기준에 실제 당일 row가 안정적으로 생성되는지 확인이 필요하다.
+6. `watchlist` 등록 직후 1년치 백필은 종목 수가 늘면 background task가 길어질 수 있다. News/Filing과 병렬 실행될 때 API 서버 프로세스에서 감당 가능한지, 또는 추후 worker 분리 전제가 필요한지 메모해두는 편이 좋다.
 
 목표: 매일 가격 + 지표 갱신, row 상한 정리
 

@@ -74,31 +74,38 @@
 
 ## 확정 정책
 
-### 1. 적재 건수와 백필 범위
+### 1. 적재 건수와 백필 범위 (옵션 B 정책 일관 적용)
 
 기본값:
 - 초기 백필: 최근 `6개월` 또는 최근 `30건` 중 적은 쪽
 - 정기 갱신 시 조회 건수: 최근 `10건`
-- 1회 본문 추출 상한: `3건` (News cache의 5건보다 보수적 — 본문 호출이 추가 API 사용)
-- 종목당 최대 캐시 row 수: `50건`
-- 종목당 `content IS NOT NULL` 상한: `10건`
+- 1회 본문 추출 상한: `3건` (초기값 — DART API 2단 호출 비용 고려한 보수적 시작, 운영 후 종목당 시간당 신규 공시 수 관찰 후 조정)
+- 종목당 본문 row 적재 상한: `10건` (= 본문 추출된 row만 적재)
+- 본문 추출 실패 시 **partial insert 없음** — 메타만 적재하지 않음 (옵션 B 일관)
+
+`news-cache-policy-revision-plan.md`의 옵션 B 결정을 일관 적용:
+- **PostgreSQL `filing_cache.content`는 항상 NULL** — 본문은 ChromaDB document에 저장
+- 본문 추출 성공한 row만 PG INSERT + ChromaDB upsert
+- partial insert 정책 없음 (timeout/parsing 실패 row는 적재 자체를 안 함)
+- UI는 `filing_title` + DART viewer URL로 redirection
 
 운영 원칙:
 - 토론 evidence로 사용되므로 본문 확보 우선순위가 높음
 - 본문 추출이 News보다 더 신뢰성 있음 (DART 직접 — 403 차단 없음)
-- 정기공시(A)는 제외 필터
+- 정기공시(A)는 제외 필터 — FinancialCache가 처리
+- `pblntf_ty` 분포를 sync 로그에 남겨 누락 유형(E 등) 감지
 
 ### 2. 중복 제거
 
 저장 단계:
 - `dart_receipt_no` unique를 1차 dedupe 기준
 - 동일 receipt 재수집 시 새 row 만들지 않음
-- 기존 row의 `content`가 비어 있으면 본문 보강 대상
+- 본문 추출 실패한 receipt는 PG에도 ChromaDB에도 없음 → 다음 sync에서 동일 receipt 재시도 가능
 
 본문 보강 정책:
-- News cache와 동일 패턴
-- 기존 `content IS NULL` row는 남는 quota에서만 보강
-- 신규 row 우선
+- 옵션 B에서 partial insert가 없으므로 "본문 없는 기존 row 보강" 케이스 없음
+- 새 sync에서 본문 추출 성공해야 비로소 적재됨
+- DART 차단/timeout 발생 시 같은 receipt는 다음 sync에서 재시도
 
 ### 3. 갱신 주기
 
@@ -123,28 +130,34 @@
 정리 작업:
 - 매일 1회 cleanup
 - `ttl_until < now()`이면 삭제
-- `symbol`별 row 수 `50`건 초과 시 오래된 공시부터 삭제
-- `symbol`별 `content IS NOT NULL` row 수 `10`건 초과 시 오래된 본문부터 `NULL` 처리
+- `symbol`별 row 수 `10`건 초과 시 오래된 공시부터 삭제 (옵션 B: row = 본문 적재이므로 본문 상한과 동일)
+- 본문 NULL trim 로직은 옵션 B에서 의미 없음 (애초에 NULL 적재) — 제거
 - "오래된" 기준은 `disclosed_at ASC NULLS LAST`, NULL끼리는 `retrieved_at ASC`
+- **삭제된 ID는 ChromaDB delete로 동기화**: repository에 `delete_expired_rows_returning_ids` / `trim_rows_for_symbol_returning_ids` 인터페이스 필수
 
 ## 저장 전략
 
-최소 저장 필드:
+PG `filing_cache` 최소 저장 필드 (옵션 B):
 - `symbol`
 - `filing_title` — DART `report_nm`
 - `filing_type` — DART `pblntf_detail_ty` 또는 `pblntf_ty`
 - `dart_receipt_no` — DART `rcept_no` (14자리 숫자, dedupe 핵심)
 - `source_url` — DART 공시 viewer URL (`https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}`)
 - `disclosed_at` — DART `rcept_dt` (YYYYMMDD) + 시각 매핑
-- `content` — XML 본문 텍스트 (선택적, quota 보호)
+- `content` — **항상 NULL** (본문은 ChromaDB에 저장)
 - `summary` — 초기 구현은 NULL. 후속 phase에서 LLM 요약 추가 가능
 - `retrieved_at`
 - `ttl_until`
 
-본문 보유 상한 정책:
-- 종목당 `content IS NOT NULL` 최대 `10건`
-- 상한 초과 시 오래된 본문부터 `content = NULL` 처리
-- row 자체는 유지하여 메타데이터 활용 가능
+ChromaDB collection `filing`:
+- `id = filing_cache.id` (UUID) — 1:1 매핑
+- `document = 추출된 본문 텍스트`
+- `embedding = 1536차원 벡터`
+- `metadata = {symbol, source_id, disclosed_at, source_url, filing_type}`
+
+본문 적재 상한 정책:
+- 종목당 PG row 수 = ChromaDB document 수 = 최대 `10건`
+- 상한 초과 시 PG row + ChromaDB document 동시 삭제 (오래된 것부터)
 
 ## Redis 키 컨벤션
 
@@ -172,12 +185,14 @@ def sync_filings_for_ticker(
   2. Redis lock 획득 + cooldown 확인
   3. DART 공시검색 API 호출 (`list.json`, corp_code + 기간 + pblntf_ty 필터)
   4. `rcept_no` 기준 dedupe (DB 기존 row 조회)
-  5. 신규 후보 + 본문 없는 기존 후보 우선순위 정렬
+  5. 신규 후보 우선순위 정렬 (옵션 B: 본문 없는 기존 row 보강 케이스 없음)
   6. 본문 추출 상한 `3건`까지 `document.xml` 호출
-  7. XML 파싱 → text 추출 → 길이 제한 적용
-  8. `filing_cache` insert/upsert
-  9. `ttl_until` 계산
-  10. row 상한 / content 상한 정리
+  7. **XML 파서 모듈(`app/external/dart/document_parser.py`)을 ingestion 로직과 분리** — 단위 검증 가능 형태 (표/주석/첨부서류 처리 품질 차이가 크므로 분리 필수)
+  8. XML 파싱 → text 추출 → 길이 제한 적용 (10,000자 cap)
+  9. 본문 추출 성공한 row만 `filing_cache` INSERT (content=NULL) + ChromaDB upsert
+  10. 본문 추출 실패 row는 적재 자체를 skip (다음 sync에서 재시도 가능)
+  11. `ttl_until` 계산
+  12. row 상한 초과분 정리 (PG row + ChromaDB document 동시 삭제)
 
 반환 예시:
 - 조회 건수 (DART API list 응답)
@@ -257,6 +272,15 @@ NewsCache와 동일:
 
 ### Phase 3. 정기 갱신 / cleanup
 
+## 검증/보완 메모 (2026-05-22)
+
+1. 본문 정책이 `news-cache-policy-revision-plan.md`의 옵션 B와 완전히 일치하도록 갱신이 필요하다. 현재 문서에는 아직 `content` 저장과 `content IS NOT NULL` 상한 서술이 남아 있어, 구현 직전엔 `content 항상 NULL + ChromaDB SOT`로 통일해야 한다.
+2. `timeout, parsing 실패 시 partial insert`는 옵션 B 결정과 충돌한다. 본문 없는 메타만 적재하지 않기로 했다면, filing도 동일하게 "본문 추출 성공한 row만 적재"로 바뀌어야 한다.
+3. 공시는 News보다 희소하고 권위가 높기 때문에 `본문 추출 상한 3건`은 다소 보수적일 수 있다. 다만 DART API 2단 호출 비용을 고려하면 초기값으론 타당하고, 실제 종목당 시간당 신규 공시 수를 관찰한 뒤 조정하는 편이 맞다.
+4. `B`, `I` 유형 우선 결정은 합리적이지만, 실제 토론 품질에 영향을 주는 `E(기타공시)`가 일부 빠질 수 있다. 초기 구현 후 타입별 누락 체감을 보고 whitelist를 넓힐 수 있게 로그에 `pblntf_ty` 분포를 남기는 편이 좋다.
+5. `document.xml` 파싱은 HTML 기사보다 구조가 안정적이지만, 표/주석/첨부서류가 많은 문서에서 텍스트 정제가 생각보다 품질 차이를 크게 낸다. 구현 시 파서 모듈을 ingestion 로직과 분리해 단위 검증 가능한 형태로 두는 것이 중요하다.
+6. cleanup 시 `dart_receipt_no` unique row 삭제와 Chroma delete를 함께 해야 하므로, 옵션 B 적용 후에는 `delete_expired_rows_returning_ids`류 인터페이스가 사실상 필수다.
+
 목표: 매시 filing 갱신, TTL/상한 정리
 
 처리 순서:
@@ -283,10 +307,11 @@ NewsCache와 동일:
 - 소요 시간(ms)
 
 추가 운영 지표:
-- 일일 DART API 호출량 (FinancialCache 합산)
-- 공시 유형별 분포
+- 일일 DART API 호출량 (FinancialCache 합산, KST 기준 날짜)
+- 공시 유형별 분포 (`pblntf_ty` 카운트 — `B`/`I` 외 누락 유형 감지용)
 - 종목별 마지막 `disclosed_at`
 - 본문 추출 실패율
+- ChromaDB upsert 성공/실패 (fail-soft 후 reconcile 대상)
 
 ## 향후 확장 후보
 
@@ -298,14 +323,18 @@ NewsCache와 동일:
 
 ## 결론
 
-확정 내용:
+확정 내용 (옵션 B 일관 적용):
 - 데이터 소스 OpenDART `list.json` + `document.xml`
 - 본문 추출은 XML 텍스트 노드 기준, 표/이미지는 후속 확장
-- 초기 백필 6개월 또는 30건, row 상한 50, 본문 상한 10
+- 본문 SOT는 ChromaDB collection `filing`, **PG `filing_cache.content`는 항상 NULL**
+- partial insert 없음 — 본문 추출 성공한 row만 적재
+- 초기 백필 6개월 또는 30건, row 상한 = 본문 적재 상한 = 10건
 - 정기 갱신 1시간, 강제 재수집 최소 15분
-- TTL 180일, 기사 시각 기준 만료
-- 본문 추출 상한 3건 (News 5건보다 보수적)
+- TTL 180일, 공시 시각 기준 만료
+- 본문 추출 상한 3건 (초기값, 운영 신호 보고 조정)
 - 정기공시(`A`)는 FinancialCache가 처리 — 본 plan에서 제외 필터
-- corp_code 매핑은 FinancialCache와 공유
+- corp_code 매핑은 FinancialCache와 공유 (부팅 시 로컬 캐시 우선, 없으면 다운로드)
+- XML 파서 모듈은 ingestion과 분리해 단위 검증 가능
+- cleanup 시 PG delete + ChromaDB delete 동기화 (fail-soft + reconcile)
 - watchlist 트리거 NewsCache 동일 패턴
 - Phase 0~4 순차 구현 (Phase 0/4는 다른 plan과 공유 또는 선택)

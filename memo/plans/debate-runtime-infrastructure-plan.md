@@ -39,6 +39,12 @@
 - 1순위: `langgraph-checkpoint-redis` (공식)
 - fallback: 직접 dict 직렬화 + Redis SET/GET
 
+**복구 실패 UX 정책** (서버 재배포/Redis flush 시):
+- 토론 진행 중 checkpoint가 사라지면 LangGraph 재개 불가
+- UX: 사용자에게 "토론이 중단되었습니다. 다시 시작해주세요." 표시 + 해당 `debate_session.status=FAILED` 기록
+- 완전한 복구를 시도하지 않음 (비용 대비 가치 작음) — 단 부분 결과(완료된 라운드)는 PG에 영구화되어 있다면 그대로 보존
+- 토론 길이 ~수분 가정 시 재시작 비용도 작음 — pragmatic 한 선택
+
 ## 2. LLM Response Cache
 
 배경:
@@ -47,8 +53,9 @@
 - 토론 시점 비용 절감보다 *개발 비용 절감*이 1차 가치
 
 설계:
-- 캐시 키: `llm-cache:{model}:{sha256(prompt)}:{temperature}` 
-- 값: `{response_text, usage, ts}`
+- 캐시 키: `llm-cache:{model}:{prompt_version}:{sha256(prompt)}:{temperature}`
+- `prompt_version`을 키에 포함 — Judge 같이 운영 ON 시 prompt 변경 시 캐시 회귀 위험 차단
+- 값: `{response_text, usage, ts, prompt_version}`
 - TTL: `24시간` (개발 디버깅 사이클 가정)
 - 운영 환경에서는 `LLM_CACHE_ENABLED=false`로 끄기 (사용자에게 동일 답변 반복 방지)
 
@@ -56,6 +63,7 @@
 - 개발: 기본 ON
 - prod: 기본 OFF
 - 카테고리/에이전트별 명시적 opt-in 가능 (예: Judge는 일관성을 위해 ON)
+- Judge처럼 운영 ON을 허용하는 경우 `prompt_version`을 키에 포함시켜 prompt 변경 시 cache invalidation 자동화
 
 ## 3. Intraday Quote (가장 우선순위 큰 신규 모듈)
 
@@ -66,10 +74,11 @@
 
 설계:
 - 데이터 소스 1순위: **pykrx** (KRX 실시간/지연시세, KOSPI/KOSDAQ)
-  - 장중에는 15분 지연 시세 가능
+  - 장중에는 **15분 지연 시세** — 실시간 아님
 - 데이터 소스 2순위: **yfinance** (해외 종목, KOSPI도 가능하지만 지연 큼)
-- Redis key: `quote:latest:{symbol}` → JSON `{price, prev_close, change, change_rate, volume, ts, source}`
+- Redis key: `quote:latest:{symbol}` → JSON `{price, prev_close, change, change_rate, volume, ts, source, is_delayed}`
 - TTL: 장중 `5분`, 장 마감 후 `30분`, 주말 `24시간`
+- **UI 표기 정책**: 사용자 노출 시 "지연 시세 (15분)" 또는 "실시간 아님" 명시 — "현재가" 단독 표기 금지 (오해 방지)
 
 조회 정책:
 - **옵션 A (lazy)** — 토론 시작 직전 1회 fetch, Redis TTL 내면 재사용
@@ -103,8 +112,8 @@ def get_latest_quote(symbol: str, max_age_seconds: int = 300) -> Quote: ...
 - 사용자 우회 방지 (한도 도달 후 재시도) — Redis로 강제
 
 설계:
-- 사용자별 일일 토큰: `rate:user:{user_id}:tokens:{YYYY-MM-DD}` (INCR + EX=48h)
-- 사용자별 일일 토론 수: `rate:user:{user_id}:debates:{YYYY-MM-DD}` (INCR + EX=48h)
+- 사용자별 일일 토큰: `rate:user:{user_id}:tokens:{YYYY-MM-DD}` (INCR + EX=48h) — **`YYYY-MM-DD`는 KST 기준** (news/dart 카운터와 동일 정책)
+- 사용자별 일일 토론 수: `rate:user:{user_id}:debates:{YYYY-MM-DD}` (INCR + EX=48h) — KST 기준
 - 세션별 누적: `cost:debate:{session_id}` (HSET `input_tokens` / `output_tokens`)
 - 한도 임계치는 환경 변수 또는 config로 (`MAX_TOKENS_PER_USER_PER_DAY=1000000`)
 
@@ -278,6 +287,15 @@ REDIS_URL=rediss://:STRONG_PASSWORD@10.0.x.x:6379/0?ssl_cert_reqs=none
 | Redis | ChromaDB |
 |---|---|
 | 휘발성 상태 | 영구성 |
+
+## 검증/보완 메모 (2026-05-22)
+
+1. 이 문서는 Redis를 상태 저장/가드 용도로 잘 분리했지만, 실제 선행 구현 순서는 `Intraday Quote`보다 `debate:active`, `rate limiting`, `checkpoint`가 더 앞설 가능성이 높다. 토론 런타임을 먼저 붙인다면 우선순위 표기를 한 번 더 정리하는 편이 좋다.
+2. `quote:latest:{symbol}`를 pykrx 1순위로 둔 것은 한국 종목 기준 타당하지만, pykrx의 장중 지연 시세 의미와 `현재가`라는 UI 문구가 어긋날 수 있다. 사용자 노출 시에는 "지연 시세" 표기가 필요할 수 있다.
+3. `LLM_CACHE_ENABLED`는 개발 기본 ON, 운영 OFF 정책이 합리적이지만, Judge처럼 deterministic한 일부 역할만 운영 ON을 허용할 경우 prompt versioning을 키에 포함해야 회귀 위험을 줄일 수 있다.
+4. `debate:checkpoint:{session_id}`를 Redis 단독으로 둘 때, 토론 중 서버 재배포/Redis flush 상황의 복구 전략이 없다. 완전한 복구가 필수는 아니더라도, 실패 시 세션 상태를 어떻게 사용자에게 보여줄지 UX 메모가 있으면 좋다.
+5. `rate:user:{user_id}:tokens:{date}` 등 일일 키는 news/dart 카운터와 마찬가지로 KST 기준 날짜인지 명시하는 편이 운영 일관성에 좋다.
+6. Redis 운영 compose 예시는 충분하지만, 현재 프로젝트는 이미 Redis를 news sync lock에 쓰고 있으므로 실제 구현 시 `app/core/redis.py` 같은 공용 클라이언트/키 헬퍼 모듈이 필요해질 가능성이 높다. 이건 worker/quote/checkpoint가 붙기 전에 한 번 정리하는 게 유리하다.
 | key-value 조회 | 의미 검색 |
 | 짧은 TTL | TTL은 cache cleanup과 동기화 |
 | lock / cache / quote / rate | evidence retrieval |
@@ -293,9 +311,20 @@ REDIS_URL=rediss://:STRONG_PASSWORD@10.0.x.x:6379/0?ssl_cert_reqs=none
 
 ## 구현 단계
 
+### Phase 0. 공용 Redis 헬퍼 모듈 (선행 필수)
+
+현재 NewsCache가 `app/domain/news_ingestion.py` 안에서 Redis 클라이언트를 직접 다루고 있음. 본 plan의 7가지 용도(checkpoint, llm-cache, quote, rate, active guard, sweep last-run, lock)를 추가하면 각 모듈에서 클라이언트/키 헬퍼가 중복 정의될 가능성.
+
+목표:
+- `app/core/redis.py` — 단일 Redis 클라이언트 팩토리 (`get_redis()`) + 키 헬퍼 (`make_key(domain, purpose, *parts)`)
+- 기존 NewsCache의 Redis 호출을 점진적으로 이전 (호환성 유지하면서)
+- 본 plan의 모든 신규 모듈은 이 헬퍼 사용
+
+이 단계가 Phase 1 이후 모듈들 (intraday_quote / rate_limiter / llm_cache / checkpoint)이 붙기 전에 정리되어야 운영 시 일관성 확보.
+
 ### Phase 1. Intraday Quote 모듈
 
-가장 단순하고 우선 가치 큼. PriceCache plan과 별도로 진행 가능.
+PriceCache plan과 별도로 진행 가능. 토론 도메인 이전에 가장 단순한 가치.
 
 목표:
 - `app/external/quote_client.py` — pykrx 호출 + 폴백
@@ -304,6 +333,18 @@ REDIS_URL=rediss://:STRONG_PASSWORD@10.0.x.x:6379/0?ssl_cert_reqs=none
 
 산출물:
 - `scripts/validate_intraday_quote.py` — 시드 종목 quote 조회 + TTL 동작 확인
+
+### Phase 우선순위 재정렬 안내
+
+본 plan에 정리된 Phase는 *구현 가능 순서*이지 *실행 순서*가 아니다. 토론 도메인을 먼저 붙이는 시나리오라면 다음 순서가 더 합리적:
+
+- Phase 0 (공용 Redis 헬퍼) — 가장 먼저
+- Phase 5 (debate active guard) + Phase 3 (rate limit) — 토론 endpoint 추가 시 동시에
+- Phase 4 (LangGraph checkpoint) — 토론 도메인 LangGraph 도입과 동시
+- Phase 2 (LLM cache) — LLM 호출 모듈 도입 후
+- Phase 1 (Intraday quote) — UI/토론에서 현재가가 필요해질 때
+
+Intraday quote가 가장 단순하지만 *반드시 가장 먼저일 필요는 없음* — 토론 흐름 구축 후 컨텍스트 주입 시점에 도입해도 충분.
 
 ### Phase 2. LLM Response Cache
 
@@ -367,10 +408,11 @@ LLM 호출 단계 도입 시. 토론 도메인 구현 phase와 연계.
 
 확정 내용:
 - 단일 Redis 인스턴스, 키 컨벤션 일관 (`<domain>:<purpose>:<identifier>`)
+- **공용 Redis 헬퍼(`app/core/redis.py`)를 Phase 0로 선행** — 신규 모듈 4종이 붙기 전 클라이언트/키 헬퍼 일원화
 - LangGraph checkpoint + LLM cache + intraday quote + rate limit + 토론 active guard 일괄 정리
-- 영구 데이터는 PostgreSQL, 의미 검색은 ChromaDB, 휘발성/저지연은 Redis로 분담
-- intraday quote는 pykrx 1순위 + Redis 5분 TTL, 토론 시작 직전 lazy fetch
-- LLM cache는 개발 ON / prod OFF 기본
-- rate limit은 사용자 일일 토큰/토론 수로 강제
-- LangGraph checkpoint는 토론 도메인 phase에 종속
-- Phase 1(intraday quote)부터 가장 우선, 이후 phase는 토론 도메인 진행에 맞춰
+- 영구 데이터는 PostgreSQL, 의미 검색 + 본문 SOT는 ChromaDB, 휘발성/저지연은 Redis로 분담
+- intraday quote는 pykrx 1순위 + Redis 5분 TTL, 토론 시작 직전 lazy fetch — UI 표기는 "지연 시세" 명시
+- LLM cache는 개발 ON / prod OFF 기본, 운영 ON 시 `prompt_version` 키 포함
+- rate limit은 사용자 일일 토큰/토론 수로 강제, 카운터 키 KST 일관
+- LangGraph checkpoint는 토론 도메인 phase에 종속, Redis flush 시 복구 시도 없이 사용자에 재시작 안내
+- Phase 실행 순서는 토론 도메인 진행에 맞춰 재정렬 (위 "Phase 우선순위 재정렬 안내" 참고)
