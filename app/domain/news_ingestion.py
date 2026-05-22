@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.redis import build_redis_client, make_key
 from app.external.article_scraper import ArticleScraper, ScrapedArticle
 from app.external.naver_news import NaverNewsClient, NaverNewsItem
 from app.models import NewsCache, TickerMetadata
@@ -62,12 +63,11 @@ class NewsCandidate:
 class NewsIngestionService:
     """Implements the news_cache ingestion policy."""
 
-    INITIAL_FETCH_COUNT = 20
+    INITIAL_FETCH_COUNT = 30
     REFRESH_FETCH_COUNT = 5
-    BODY_CRAWL_LIMIT = 5
+    BODY_CRAWL_LIMIT = 10
     BODY_ATTEMPTS_PER_GROUP = 3
-    MAX_CACHE_ROWS = 100
-    MAX_CONTENT_ROWS = 10
+    MAX_CACHE_ROWS = 10
     MAX_ARTICLE_AGE_DAYS = 7
     MIN_TITLE_LENGTH = 8
     MIN_CONTENT_LENGTH = 120
@@ -89,7 +89,7 @@ class NewsIngestionService:
         self.repo = NewsCacheRepository(session)
         self.news_client = news_client or NaverNewsClient()
         self.article_scraper = article_scraper or ArticleScraper()
-        self.redis_client = redis_client or self._build_redis_client(settings.redis_url)
+        self.redis_client = redis_client or build_redis_client(settings.redis_url)
 
     def sync_news_for_ticker(
         self,
@@ -153,20 +153,22 @@ class NewsIngestionService:
                     row = self._build_news_row(symbol, candidate, scraped)
                     self.repo.save(row)
                     result.inserted_count += 1
-                    if row.content:
-                        result.body_saved_count += 1
+                    result.body_saved_count += 1
                 else:
-                    if candidate.existing.content is None and scraped and scraped.content:
-                        candidate.existing.content = scraped.content
+                    if scraped and scraped.content:
                         candidate.existing.summary = scraped.summary or candidate.existing.summary
                         candidate.existing.source_name = scraped.source_name or candidate.existing.source_name
+                        candidate.existing.published_at = scraped.published_at or candidate.existing.published_at
+                        candidate.existing.ttl_until = (
+                            (scraped.published_at or candidate.existing.published_at or datetime.now(UTC))
+                            + timedelta(days=30)
+                        )
                         result.updated_count += 1
                         result.body_saved_count += 1
                     else:
                         result.skipped_count += 1
 
             result.trimmed_rows_count = self.repo.trim_rows_for_symbol(symbol, self.MAX_CACHE_ROWS)
-            result.trimmed_content_count = self.repo.trim_content_for_symbol(symbol, self.MAX_CONTENT_ROWS)
             self._set_last_run(symbol, started)
             self.session.flush()
         finally:
@@ -290,22 +292,6 @@ class NewsIngestionService:
                 if len(selected_groups[matched]) < self.BODY_ATTEMPTS_PER_GROUP:
                     selected_groups[matched].append(candidate)
 
-        null_candidates = [c for c in candidates if c.existing is not None and c.existing.content is None]
-        null_candidates.sort(
-            key=lambda c: c.existing.published_at or epoch_floor,
-            reverse=True,
-        )
-        for candidate in null_candidates:
-            candidate_published_at = (
-                candidate.existing.published_at if candidate.existing else candidate.item.published_at
-            )
-            if find_matching_group(candidate.title_tokens, candidate_published_at) is not None:
-                continue
-            if len(selected_groups) >= self.BODY_CRAWL_LIMIT:
-                continue
-            selected_groups.append([candidate])
-            group_keys.append((candidate.title_tokens, candidate_published_at))
-
         return selected_groups
 
     def _build_news_row(
@@ -320,7 +306,7 @@ class NewsIngestionService:
         return NewsCache(
             symbol=symbol,
             title=candidate.item.title,
-            content=scraped.content if scraped else None,
+            content=None,
             summary=(scraped.summary if scraped and scraped.summary else candidate.item.description) or None,
             source_name=(scraped.source_name if scraped and scraped.source_name else candidate.item.source_name),
             source_url=candidate.normalized_url,
@@ -461,9 +447,6 @@ class NewsIngestionService:
         if cls._contains_symbol_reference(combined_text, ticker.symbol):
             return True
 
-        if not body_text and cls._contains_exact_name_reference(metadata_text, ticker.name_kr):
-            return True
-
         body_match_count = cls._count_exact_name_reference(body_text, ticker.name_kr)
         if body_match_count >= 2:
             return True
@@ -504,16 +487,6 @@ class NewsIngestionService:
             if abs(first_published_at - second_published_at) > timedelta(hours=6):
                 return False
         return True
-
-    @staticmethod
-    def _build_redis_client(redis_url: str) -> redis.Redis | None:
-        if redis is None:
-            return None
-        try:
-            return redis.Redis.from_url(redis_url, decode_responses=True)
-        except Exception:
-            logger.exception("failed to create redis client")
-            return None
 
     def _acquire_lock(self, symbol: str) -> str | None:
         # fail-closed: Redis lock is required by the ingestion policy.
@@ -574,12 +547,12 @@ class NewsIngestionService:
 
     @staticmethod
     def _lock_key(symbol: str) -> str:
-        return f"news-sync:lock:{symbol}"
+        return make_key("news-sync", "lock", symbol)
 
     @staticmethod
     def _last_run_key(symbol: str) -> str:
-        return f"news-sync:last-run:{symbol}"
+        return make_key("news-sync", "last-run", symbol)
 
     @staticmethod
     def _daily_api_count_key(now: datetime) -> str:
-        return f"naver-api-count:{now.astimezone(KST).date().isoformat()}"
+        return make_key("naver-api-count", now.astimezone(KST).date().isoformat())

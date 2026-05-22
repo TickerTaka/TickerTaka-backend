@@ -41,6 +41,14 @@ class NewsCacheRepository:
         stmt = select(distinct(NewsCache.symbol)).order_by(NewsCache.symbol)
         return list(self.session.scalars(stmt))
 
+    def list_by_symbol(self, symbol: str) -> list[NewsCache]:
+        stmt: Select[tuple[NewsCache]] = (
+            select(NewsCache)
+            .where(NewsCache.symbol == symbol)
+            .order_by(NewsCache.published_at.desc().nullslast(), NewsCache.retrieved_at.desc())
+        )
+        return list(self.session.scalars(stmt))
+
     def delete_expired_rows(self, now: datetime | None = None) -> int:
         cutoff = now or datetime.now(UTC)
         result = self.session.execute(
@@ -65,21 +73,5 @@ class NewsCacheRepository:
             return 0
         for row in rows[-overflow:]:
             self.session.delete(row)
-        self.session.flush()
-        return overflow
-
-    def trim_content_for_symbol(self, symbol: str, max_content_rows: int) -> int:
-        rows = list(
-            self.session.scalars(
-                select(NewsCache)
-                .where(NewsCache.symbol == symbol, NewsCache.content.is_not(None))
-                .order_by(NewsCache.published_at.asc().nullslast(), NewsCache.retrieved_at.asc())
-            )
-        )
-        overflow = len(rows) - max_content_rows
-        if overflow <= 0:
-            return 0
-        for row in rows[:overflow]:
-            row.content = None
         self.session.flush()
         return overflow

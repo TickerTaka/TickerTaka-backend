@@ -41,7 +41,6 @@ class FakeIngestionService:
             filtered_count=1,
             body_saved_count=1,
             trimmed_rows_count=0,
-            trimmed_content_count=0,
         )
 
 
@@ -197,7 +196,6 @@ def run_cleanup_flow() -> FlowResult:
             service = NewsCacheSchedulerService(
                 session,
                 max_cache_rows=3,
-                max_content_rows=2,
             )
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
@@ -205,24 +203,15 @@ def run_cleanup_flow() -> FlowResult:
             total_rows = session.scalar(
                 select(func.count()).select_from(NewsCache).where(NewsCache.symbol == symbol)
             ) or 0
-            content_rows = session.scalar(
-                select(func.count()).select_from(NewsCache).where(
-                    NewsCache.symbol == symbol,
-                    NewsCache.content.is_not(None),
-                )
-            ) or 0
-
             expect(result.deleted_expired_rows >= 1, "cleanup should delete at least 1 expired row")
             expect(result.trimmed_rows_count == 2, "cleanup should trim 2 rows for the target symbol")
-            expect(result.trimmed_content_count == 1, "cleanup should trim 1 content row for the target symbol")
             expect(total_rows == 3, "cleanup final row count mismatch")
-            expect(content_rows == 2, "cleanup final content count mismatch")
 
             return FlowResult(
                 name="cleanup_sweep",
                 details=(
                     f"symbol={symbol} deleted={result.deleted_expired_rows} "
-                    f"trimmed_rows={result.trimmed_rows_count} trimmed_content={result.trimmed_content_count}"
+                    f"trimmed_rows={result.trimmed_rows_count}"
                 ),
             )
         finally:
@@ -249,7 +238,7 @@ def run_cleanup_no_expired_flow() -> FlowResult:
             )
             session.flush()
 
-            service = NewsCacheSchedulerService(session, max_cache_rows=3, max_content_rows=2)
+            service = NewsCacheSchedulerService(session, max_cache_rows=3)
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
 
@@ -280,13 +269,12 @@ def run_cleanup_under_limits_flow() -> FlowResult:
                 )
             session.flush()
 
-            service = NewsCacheSchedulerService(session, max_cache_rows=3, max_content_rows=2)
+            service = NewsCacheSchedulerService(session, max_cache_rows=3)
             service.news_repo.list_symbols_with_cache = lambda: [symbol]
             result = service.run_news_cleanup(now=base)
 
             expect(result.trimmed_rows_count == 0, "cleanup_under_limits should trim 0 rows")
-            expect(result.trimmed_content_count == 0, "cleanup_under_limits should trim 0 content rows")
-            return FlowResult(name="cleanup_under_limits", details="trimmed_rows=0 trimmed_content=0")
+            return FlowResult(name="cleanup_under_limits", details="trimmed_rows=0")
         finally:
             session.rollback()
 

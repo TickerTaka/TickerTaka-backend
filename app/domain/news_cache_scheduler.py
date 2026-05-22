@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.db import session_scope
+from app.core.redis import build_redis_client, make_key
 from app.domain.news_ingestion import NewsIngestionService, SyncNewsResult
 from app.repositories.news_cache_repository import NewsCacheRepository
 from app.repositories.watchlist_repository import WatchlistRepository
@@ -34,7 +35,6 @@ class RefreshSweepResult:
     body_attempts_count: int = 0
     body_saved_count: int = 0
     trimmed_rows_count: int = 0
-    trimmed_content_count: int = 0
     elapsed_ms: int = 0
 
 
@@ -42,7 +42,6 @@ class RefreshSweepResult:
 class CleanupSweepResult:
     deleted_expired_rows: int = 0
     trimmed_rows_count: int = 0
-    trimmed_content_count: int = 0
     processed_symbols: int = 0
     elapsed_ms: int = 0
 
@@ -57,7 +56,6 @@ class NewsCacheSchedulerService:
         ingestion_factory: Callable[[Session], NewsIngestionService] | None = None,
         symbol_session_factory: Callable[[], Any] | None = None,
         max_cache_rows: int | None = None,
-        max_content_rows: int | None = None,
     ) -> None:
         self.session = session
         self.watchlist_repo = WatchlistRepository(session)
@@ -65,8 +63,7 @@ class NewsCacheSchedulerService:
         self.ingestion_factory = ingestion_factory or NewsIngestionService
         self.symbol_session_factory = symbol_session_factory or session_scope
         self.max_cache_rows = max_cache_rows or NewsIngestionService.MAX_CACHE_ROWS
-        self.max_content_rows = max_content_rows or NewsIngestionService.MAX_CONTENT_ROWS
-        self.redis_client = NewsIngestionService._build_redis_client(get_settings().redis_url)
+        self.redis_client = build_redis_client(get_settings().redis_url)
 
     def run_watchlist_refresh(
         self,
@@ -113,7 +110,6 @@ class NewsCacheSchedulerService:
                 "body_attempts": result.body_attempts_count,
                 "body_saved": result.body_saved_count,
                 "trimmed_rows": result.trimmed_rows_count,
-                "trimmed_content": result.trimmed_content_count,
                 "elapsed_ms": result.elapsed_ms,
             },
         )
@@ -128,10 +124,6 @@ class NewsCacheSchedulerService:
         for symbol in self.news_repo.list_symbols_with_cache():
             result.processed_symbols += 1
             result.trimmed_rows_count += self.news_repo.trim_rows_for_symbol(symbol, self.max_cache_rows)
-            result.trimmed_content_count += self.news_repo.trim_content_for_symbol(
-                symbol,
-                self.max_content_rows,
-            )
 
         result.elapsed_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         self._set_sweep_last_run("cleanup", started)
@@ -141,7 +133,6 @@ class NewsCacheSchedulerService:
                 "deleted_expired_rows": result.deleted_expired_rows,
                 "processed_symbols": result.processed_symbols,
                 "trimmed_rows": result.trimmed_rows_count,
-                "trimmed_content": result.trimmed_content_count,
                 "elapsed_ms": result.elapsed_ms,
             },
         )
@@ -159,7 +150,6 @@ class NewsCacheSchedulerService:
         sweep_result.body_attempts_count += sync_result.body_attempts_count
         sweep_result.body_saved_count += sync_result.body_saved_count
         sweep_result.trimmed_rows_count += sync_result.trimmed_rows_count
-        sweep_result.trimmed_content_count += sync_result.trimmed_content_count
 
     def _set_sweep_last_run(self, mode: str, started_at: datetime) -> None:
         if self.redis_client is None:
@@ -175,7 +165,7 @@ class NewsCacheSchedulerService:
 
     @staticmethod
     def _sweep_last_run_key(mode: str) -> str:
-        return f"news-sync:sweep:last-run:{mode}"
+        return make_key("news-sync", "sweep:last-run", mode)
 
 
 def run_scheduled_watchlist_refresh(*, force: bool = False, limit: int | None = None) -> RefreshSweepResult:
