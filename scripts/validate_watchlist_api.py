@@ -7,7 +7,7 @@
 검증 범위:
 - /health 부트 확인
 - POST /api/watchlists happy path (201, response body shape, ticker_name_kr 채워짐, sync_enqueued=True)
-- 등록 시 BackgroundTasks가 sync_watchlist_news(symbol)을 호출하는지(mock으로 가로채 검증)
+- 등록 시 BackgroundTasks가 sync_watchlist_news(symbol), sync_watchlist_filings(symbol)을 호출하는지(mock으로 가로채 검증)
 - GET /api/watchlists/{user_id} happy path (200, 방금 등록한 종목이 보임)
 - 중복 등록 시 409
 - 없는 사용자 등록 시 404
@@ -76,7 +76,10 @@ def main() -> None:
         expect(r.json() == {"status": "ok"}, f"health body unexpected: {r.json()}")
         print(f"[PASS] health: {r.status_code} {r.json()}")
 
-        with patch("app.api.watchlist.sync_watchlist_news") as mock_sync:
+        with (
+            patch("app.api.watchlist.sync_watchlist_news") as mock_news_sync,
+            patch("app.api.watchlist.sync_watchlist_filings") as mock_filing_sync,
+        ):
             r = client.post(
                 "/api/watchlists",
                 json={"user_id": str(user_id), "symbol": symbol, "memo": "smoke test"},
@@ -87,7 +90,8 @@ def main() -> None:
             expect(body["watchlist"]["memo"] == "smoke test", "memo mismatch")
             expect(body["watchlist"]["ticker_name_kr"] is not None, "ticker_name_kr should be filled")
             expect(body["sync_enqueued"] is True, "sync_enqueued should be True")
-            mock_sync.assert_called_once_with(symbol)
+            mock_news_sync.assert_called_once_with(symbol)
+            mock_filing_sync.assert_called_once_with(symbol)
             print(
                 f"[PASS] POST create: 201, "
                 f"ticker_name_kr={body['watchlist']['ticker_name_kr']}, "
@@ -102,32 +106,44 @@ def main() -> None:
         expect(found["ticker_name_kr"] is not None, "list ticker_name_kr should be filled")
         print(f"[PASS] GET list: 200, items={len(body['items'])}, found={symbol}")
 
-        with patch("app.api.watchlist.sync_watchlist_news") as mock_sync:
+        with (
+            patch("app.api.watchlist.sync_watchlist_news") as mock_news_sync,
+            patch("app.api.watchlist.sync_watchlist_filings") as mock_filing_sync,
+        ):
             r = client.post(
                 "/api/watchlists",
                 json={"user_id": str(user_id), "symbol": symbol, "memo": "duplicate"},
             )
             expect(r.status_code == 409, f"duplicate expected 409, got {r.status_code}: {r.text}")
-            mock_sync.assert_not_called()
+            mock_news_sync.assert_not_called()
+            mock_filing_sync.assert_not_called()
             print("[PASS] POST duplicate: 409 (background sync not invoked)")
 
         unknown_user = uuid4()
-        with patch("app.api.watchlist.sync_watchlist_news") as mock_sync:
+        with (
+            patch("app.api.watchlist.sync_watchlist_news") as mock_news_sync,
+            patch("app.api.watchlist.sync_watchlist_filings") as mock_filing_sync,
+        ):
             r = client.post(
                 "/api/watchlists",
                 json={"user_id": str(unknown_user), "symbol": symbol, "memo": "ghost"},
             )
             expect(r.status_code == 404, f"unknown user expected 404, got {r.status_code}: {r.text}")
-            mock_sync.assert_not_called()
+            mock_news_sync.assert_not_called()
+            mock_filing_sync.assert_not_called()
             print("[PASS] POST unknown user: 404")
 
-        with patch("app.api.watchlist.sync_watchlist_news") as mock_sync:
+        with (
+            patch("app.api.watchlist.sync_watchlist_news") as mock_news_sync,
+            patch("app.api.watchlist.sync_watchlist_filings") as mock_filing_sync,
+        ):
             r = client.post(
                 "/api/watchlists",
                 json={"user_id": str(user_id), "symbol": "ZZZ999999", "memo": "ghost"},
             )
             expect(r.status_code == 404, f"unknown symbol expected 404, got {r.status_code}: {r.text}")
-            mock_sync.assert_not_called()
+            mock_news_sync.assert_not_called()
+            mock_filing_sync.assert_not_called()
             print("[PASS] POST unknown symbol: 404")
 
         r = client.get(f"/api/watchlists/{unknown_user}")

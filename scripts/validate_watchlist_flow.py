@@ -13,6 +13,7 @@ from app.domain.watchlist_service import (
     UserNotFoundError,
     WatchlistAlreadyExistsError,
     WatchlistService,
+    sync_watchlist_filings,
     sync_watchlist_news,
 )
 from app.models import AppUser, TickerMetadata, Watchlist
@@ -198,6 +199,33 @@ def run_background_failure_flow(symbol: str) -> FlowResult:
     return FlowResult(name="background_failure", details=f"symbol={symbol} exception_logged=True")
 
 
+def run_filing_background_trigger_flow(symbol: str) -> FlowResult:
+    captured: dict[str, object] = {}
+
+    class FakeFilingIngestionService:
+        def __init__(self, session) -> None:
+            captured["session_bound"] = session is not None
+
+        def sync_filings_for_ticker(self, symbol: str):
+            captured["symbol"] = symbol
+
+            class Result:
+                fetched_count = 1
+                inserted_count = 1
+                updated_count = 0
+                skipped_count = 0
+
+            return Result()
+
+    with patch("app.domain.watchlist_service.FilingIngestionService", FakeFilingIngestionService):
+        sync_watchlist_filings(symbol)
+
+    expect(captured.get("session_bound") is True, "filing background trigger should open DB session")
+    expect(captured.get("symbol") == symbol, "filing background trigger should pass symbol")
+
+    return FlowResult(name="filing_background_trigger", details=f"symbol={captured['symbol']}")
+
+
 def main() -> None:
     symbol = get_test_symbol()
     results = [
@@ -207,6 +235,7 @@ def main() -> None:
         run_missing_ticker_flow(),
         run_background_trigger_flow(symbol),
         run_background_failure_flow(symbol),
+        run_filing_background_trigger_flow(symbol),
     ]
     for result in results:
         print(f"[PASS] {result.name}")
