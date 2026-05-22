@@ -9,6 +9,7 @@ class Settings(BaseSettings):
         env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
         case_sensitive=True,
+        extra="ignore",
     )
 
     app_env: str = Field(default="development", alias="APP_ENV")
@@ -40,6 +41,9 @@ class Settings(BaseSettings):
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")
     naver_news_client_id:     str = Field(default="", alias="NAVER_NEWS_CLIENT_ID")
     naver_news_client_secret: str = Field(default="", alias="NAVER_NEWS_CLIENT_SECRET")
+    openai_api_key:           str = Field(default="", alias="OPENAI_API_KEY")
+    embedding_provider:       str = Field(default="huggingface", alias="EMBEDDING_PROVIDER")
+    embedding_model:          str = Field(default="jhgan/ko-sroberta-multitask", alias="EMBEDDING_MODEL")
 
     # 인증
     jwt_secret:       str = Field(default="dev-secret-key-min-32-characters!!", alias="JWT_SECRET")

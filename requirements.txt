@@ -24,7 +24,7 @@ langchain
 
 # RAG
 sentence-transformers
-chromadb
+chromadb==0.5.23
 rank-bm25
 
 # 캐시/큐
