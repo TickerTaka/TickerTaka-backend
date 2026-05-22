@@ -298,6 +298,25 @@ FilingCache는 아직 구현 전이므로 별도 마이그레이션 불필요 �
 8. (선택) `scripts/backfill_chroma_from_news_cache.py` 1회 실행 — 기존 content 있는 row의 ChromaDB backfill
 9. 라이브 검증 — `scripts/live_test_watchlist_sync.py` 결과에 `content_not_null = 0` + ChromaDB collection 적재 확인
 
+## 토론 코드 연계 (a543ff1 커밋 기준)
+
+토론 에이전트의 `data_agent` 노드가 본 cache 데이터를 `debate_repo.fetch_news_context(symbol)`로 SELECT:
+
+```sql
+SELECT id, title, summary, source_url, source_name, published_at
+FROM news_cache WHERE symbol=$1 AND ttl_until > now()
+ORDER BY published_at DESC LIMIT 10
+```
+
+영향 (옵션 B 정합):
+- `content`는 SELECT 안 됨 — 옵션 B 정책(PG content NULL)과 정합
+- 토론 컨텍스트는 `title + " " + summary`로 구성 — `summary`가 비어 있으면 title만 사용됨
+- LLM이 본문 자체가 필요할 때는 `evidence_tools.search_evidence`(ChromaDB)에서 retrieval — 본 plan과 별개로 vector-db Phase 4 도입 후 동작
+- evidence 영구화 시 `evidence.news_cache_id` 외래 키로 cache row 참조 + ChromaDB metadata `source_id`로 본문 retrieval
+- `ttl_until > now()` 필터 — 본 plan의 TTL 30일과 정합
+
+토론 코드는 *이미 옵션 B 패턴에 정합되어 있음* (content를 SELECT 안 함). 옵션 B 전환 시 토론 측 코드 변경 불필요.
+
 ## ChromaDB 실패 정책 (fail-soft + reconcile)
 
 옵션 B 채택으로 ChromaDB가 본문 SOT가 되므로 호출 실패 처리 정책을 명시한다.

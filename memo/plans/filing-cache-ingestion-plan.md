@@ -168,6 +168,23 @@ ChromaDB collection `filing`:
 
 운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
 
+## 토론 코드 연계 (a543ff1 커밋 기준)
+
+토론 에이전트의 `data_agent` 노드가 본 cache 데이터를 `debate_repo.fetch_filing_context(symbol)`로 SELECT:
+
+```sql
+SELECT id, filing_title, filing_type, summary, source_url, disclosed_at
+FROM filing_cache WHERE symbol=$1 AND ttl_until > now()
+ORDER BY disclosed_at DESC LIMIT 5
+```
+
+영향:
+- 본 plan 적재 컬럼이 위 SELECT와 일치 (`filing_title`/`filing_type`/`summary`/`source_url`/`disclosed_at`)
+- `content`는 SELECT 안 됨 — 옵션 B 정책(PG content NULL)과 정합
+- `summary`는 본 plan 초기 NULL → 토론에서 `filing_title + ""`로 표시되니, LLM 요약(Phase 4)이 토론 품질에 큰 영향
+- `ttl_until > now()` 필터 — 본 plan의 TTL 180일과 정합
+- evidence 영구화 시 `evidence.filing_cache_id` 외래 키로 cache row 참조 + ChromaDB metadata `source_id`로 본문 retrieval
+
 ## 수집 함수 시그니처
 
 ```python

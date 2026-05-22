@@ -344,9 +344,32 @@ Phase 2와 동일 구조, collection만 `filing`.
 
 ### Phase 4. Retrieval API
 
+**호출자는 a543ff1 커밋에서 이미 준비됨** — `app/agents/tools/evidence_tools.py`의 `search_evidence(query, symbol, top_k)` 함수가 현재 더미(`return []`). 본 Phase는 그 더미를 실제 ChromaDB 검색으로 대체하는 작업.
+
 목표:
 - 토론 도메인이 호출하는 `retrieve_evidence(symbol, category, k)` 함수
-- LangGraph node에서 사용
+- 또는 기존 `evidence_tools.search_evidence`의 더미 자리에 직접 채워 넣기 (시그니처 호환 유지)
+- LangGraph bull/bear 노드에서 사용 (현재 노드 코드 무수정으로 적용 가능)
+
+기존 구현 활용:
+- `evidence_tools.search_evidence`의 시그니처(`query, symbol, top_k=3`)는 그대로 유지
+- 반환 형태는 `list[dict]` — `{source_type, excerpt, source_url, news_cache_id, filing_cache_id, ...}` 등 evidence 영구화 페이로드와 호환
+- `app/repositories/debate_repo.py`의 `save_evidence`가 다음 외래 키들을 받음:
+  - `news_cache_id`, `filing_cache_id`, `price_cache_id`, `financial_cache_id`, `technical_indicator_cache_id`
+  - 즉 retrieval 결과의 metadata에 cache row id를 담아주면 evidence 영구화가 자동 동작
+
+retrieval 결과 형식 (debate_repo와 호환):
+```python
+{
+    "source_type": "NEWS",                  # SourceType ENUM
+    "excerpt": "본문 청크 (ChromaDB document)",
+    "source_url": "https://...",
+    "source_title": "기사 제목",
+    "source_label": "언론사명",
+    "news_cache_id": "uuid",                # ChromaDB metadata.source_id
+    # filing의 경우 filing_cache_id 등
+}
+```
 
 ## 검증/보완 메모 (2026-05-22)
 
@@ -419,3 +442,7 @@ Phase 2와 동일 구조, collection만 `filing`.
    - `/var/lib/tickertaka/chroma` 디렉토리를 NCP Object Storage에 백업
    - 별도 환경에서 복구 → 컬렉션 document 수/검색 결과 동일성 확인
 6. 라이브 시나리오: SK하이닉스 등 watchlist 등록 → ChromaDB upsert 확인 → 검색 결과 의미 일관성 점검
+7. **`evidence_tools.search_evidence` 더미 제거 + 토론 라이브에서 evidence 흐름 검증**:
+   - bull/bear 노드가 evidence를 받아 발언
+   - moderator_check가 evidence 부재로 환각 판정하지 않음
+   - moderator_summary가 `debate_repo.save_evidence`로 영구화 (`news_cache_id` 등 외래 키 포함)

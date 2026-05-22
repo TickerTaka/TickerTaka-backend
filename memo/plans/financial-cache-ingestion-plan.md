@@ -181,6 +181,23 @@ DART API 응답 매핑:
 
 운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
 
+## 토론 코드 연계 (a543ff1 커밋 기준)
+
+토론 에이전트의 `data_agent` 노드가 본 cache 데이터를 `debate_repo.fetch_financial_context(symbol)`로 SELECT:
+
+```sql
+SELECT fiscal_year, fiscal_quarter, revenue, operating_profit,
+       net_income, per, pbr, roe, debt_ratio
+FROM financial_cache WHERE symbol=$1
+ORDER BY fiscal_year DESC, fiscal_quarter DESC NULLS LAST LIMIT 4
+```
+
+영향:
+- 본 plan 적재 컬럼이 위 SELECT와 일치 (분기 4개 = 최근 1년치)
+- PER/PBR/ROE/debt_ratio 모두 SELECT 대상 — 본 plan Phase 4 (PER/PBR 보강)가 토론 품질에 직접 영향
+- 초기 적재 시 PER/PBR이 NULL이면 토론에서 "N/A"로 표시됨 — 빨리 채우는 게 유리
+- evidence 영구화 시 `evidence.financial_cache_id` 외래 키로 cache row 참조
+
 ## 수집 함수 시그니처
 
 ```python

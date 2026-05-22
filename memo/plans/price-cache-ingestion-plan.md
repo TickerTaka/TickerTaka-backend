@@ -172,6 +172,23 @@ News cache 패턴 일관성:
 
 운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
 
+## 토론 코드 연계 (a543ff1 커밋 기준)
+
+토론 에이전트의 `data_agent` 노드(`app/agents/nodes/data_node.py`)가 본 cache의 데이터를 `debate_repo.fetch_price_context(symbol)`로 SELECT:
+
+```sql
+SELECT close_price, change_rate, volume, open_price, high_price, low_price
+FROM price_cache WHERE symbol=$1 ORDER BY price_date DESC LIMIT 1
+
+SELECT ma20, ma60, ma120, rsi14, macd, macd_signal, macd_hist, volume_ma20
+FROM technical_indicator_cache WHERE symbol=$1 ORDER BY indicator_date DESC LIMIT 1
+```
+
+영향:
+- 본 plan 적재 컬럼이 위 SELECT와 일치 (`close_price`/`change_rate`/`volume`/`open/high/low_price` + 지표 8개)
+- 본 plan 단계 3.1 완료 시 토론 `data_agent`의 yfinance 폴백이 더 이상 필요 없어짐 (DB 데이터 사용)
+- evidence 영구화 시 `evidence.price_cache_id` / `evidence.technical_indicator_cache_id` 외래 키로 cache row 참조 (vector-db plan 참고)
+
 ## 수집 함수 시그니처
 
 ```python
