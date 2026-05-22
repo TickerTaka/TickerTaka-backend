@@ -179,7 +179,7 @@ DART API 응답 매핑:
 - `financial-sync:sweep:last-run:{mode}` — 전체 sweep 최근 실행 시각
 - `dart-api-count:{date}` — 일일 DART API 호출량 (FilingCache와 공유 — DART 한도는 API 키 단위, **`date`는 KST 기준 `YYYY-MM-DD` 일관 적용** — news의 `naver-api-count` 정책과 통일)
 
-운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
+**졸프 단계 정책 ([[infra-stage-policy]])**: Redis는 개발자별 로컬 Docker. 분기 단위 데이터라 동시 sync 충돌 가능성 더 낮음. `(symbol, fiscal_year, fiscal_quarter)` unique로 PG 측 중복 방어. 운영 진입 시 별도 plan으로 (현재 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션은 *후속 참고용*).
 
 ## 토론 코드 연계 (a543ff1 커밋 기준)
 

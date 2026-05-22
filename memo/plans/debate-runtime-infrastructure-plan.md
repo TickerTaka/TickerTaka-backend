@@ -22,6 +22,8 @@
 | 6. Rate limiting / cost guard | 신규 | — |
 | 7. 토론 세션 활성 상태 | 신규 | — (TTL 30분) |
 
+**졸프 단계 정책 ([[infra-stage-policy]])**: Redis는 개발자별 로컬 Docker. 위 7개 용도 모두 *개인 로컬 Redis*에서 동작 — 팀 단위 lock 약화, 토론 세션 활성 guard도 같은 사용자가 다른 PC로 접근하면 가드 안 됨. 졸프 시연 시나리오에서는 사용자 한 명이 한 PC만 사용하므로 무관.
+
 ## 기존 구현 현황 (2026-05-19 커밋 a543ff1)
 
 **다른 팀원이 토론 에이전트 본체를 이미 구현해두었음.** 본 plan은 그 구현 위에 운영 인프라(Redis/checkpoint/quote/rate/cache/guard)를 보강하는 방향으로 갱신됨.
@@ -263,7 +265,17 @@ requirements.txt 추가:
 
 ## 운영 환경 배치 (NCP 서버 + Docker 셀프 호스트)
 
-### 배치 결정
+> ⚠️ **현재(졸프) 단계는 적용 안 함** — 본 섹션은 *운영 진입(배포 결정) 시점*에 별도 `production-deployment-plan.md`로 가져갈 참고 내용. 졸프 단계에서는 [[infra-stage-policy]]에 따라 Redis/ChromaDB 모두 **개발자별 로컬 Docker**로 운영.
+
+### 졸프 단계 Redis 운영 (현재)
+
+- 개발자 PC의 `docker-compose.yml` `redis:7-alpine` 그대로 사용
+- 인증 없음, 영속화 없음, 메모리 한도 없음 (개발용 기본값)
+- 팀 단위 lock 보장 안 됨 — `A PC Redis lock != B PC Redis lock`
+- 최종 중복 방어선은 PostgreSQL unique/upsert (예: `source_url` unique, `dart_receipt_no` unique)
+- 캐시 sync 시간이 일시적으로 겹쳐도 PG 측에서 row 중복은 방어됨
+
+### 운영 진입 시 배치 결정 (후속 plan)
 
 - PostgreSQL은 NCP 매니지드 DB(Cloud DB for PostgreSQL 또는 동등 인스턴스)에 별도 운영 — 이미 구축됨
 - **Redis는 NCP 일반 서버 인스턴스 위에 Docker로 셀프 호스트** — 인프라 팀 결정

@@ -4,7 +4,8 @@
 
 기존 `news-cache-ingestion-plan.md`와 그 구현물(main 머지 완료, `app/domain/news_ingestion.py` 등)을 기준으로 다음 정책 전환을 진행한다:
 
-- **옵션 B 채택**: PostgreSQL `news_cache.content`는 항상 NULL, **ChromaDB가 본문 SOT**
+- **옵션 B 채택 (해석 B)**: PostgreSQL `news_cache.content`는 항상 NULL, **본문 추출 성공한 row만 PG에 적재** (partial insert 제거 유지)
+- **본문 SOT는 외부 원본** (네이버 기사) — ChromaDB는 *재생성 가능한 RAG 인덱스* (졸프 단계 정책, [[infra-stage-policy]])
 - UI 방향: 대시보드 뉴스 카드는 `title` + `summary` 표시 + 클릭 시 `source_url`로 redirection
 - 토론 evidence는 ChromaDB 의미 검색으로 retrieval
 
@@ -12,15 +13,17 @@
 
 같은 결정을 `filing_cache`에도 일관 적용한다 (DART 공시 본문도 동일 정책 — 별도 plan으로 분리하지 않고 본 plan에서 함께 다룸).
 
+**중요**: 본 plan은 `vector-db-and-evidence-retrieval-plan.md`의 *로컬 RAG 인덱스* 전제(졸프 단계 = 공용 ChromaDB 없음, 개발자별 로컬 운영)와 정합한다. ChromaDB 운영 인프라(백업/복구/인증/TLS)는 본 plan 범위 밖이고, 운영 진입 시 별도 plan으로 다룬다.
+
 ## 변경 결정 요약
 
 | 항목 | 기존 | 변경 후 |
 |---|---|---|
 | `news_cache.content` | 본문 텍스트 적재 (있을 때) | **항상 NULL** |
 | `filing_cache.content` | 본문 텍스트 적재 (있을 때) | **항상 NULL** |
-| 본문 SOT | PostgreSQL | **ChromaDB** |
+| 본문 SOT | PostgreSQL | **외부 원본 (네이버/DART)** — ChromaDB는 재생성 가능한 RAG 인덱스 |
 | UI 본문 표시 | 가능 | 안 함 (`title`+`summary`+redirection) |
-| partial insert (옵션 P1) | 허용 (메타만 적재) | **제거** (본문 있는 것만 적재) |
+| partial insert (옵션 P1) | 허용 (메타만 적재) | **제거** (본문 추출 성공한 row만 적재) |
 | 종목당 본문 적재 상한 (`BODY_CRAWL_LIMIT`) | 5건 | **10건** |
 | `INITIAL_FETCH_COUNT` | 20 | **30** |
 | `REFRESH_FETCH_COUNT` | 5 | 5 (변경 없음) |
@@ -28,10 +31,11 @@
 | `MAX_CACHE_ROWS` | 100 | **10** (= 본문 상한과 통합) |
 | `MAX_CONTENT_ROWS` | 10 | **사용 안 함** (content NULL) |
 | TTL | 30일 | 30일 (변경 없음) |
-| ChromaDB 동기화 | (없음) | **sync 직후 upsert + cleanup 시 delete** |
+| ChromaDB 동기화 | (없음) | **수동 reindex 스크립트** (sync 직후 동기 upsert는 후속 옵션) |
 | ChromaDB id 매핑 | — | `news_cache.id` (UUID) = ChromaDB document.id |
 | 클러스터링 / Filter A·B / 그룹 fallback | 그대로 | **그대로** |
-| 본문 크롤링(trafilatura) | 그대로 | **그대로** |
+| 본문 크롤링(trafilatura) | 그대로 | **그대로** (PG 적재 시 본문 추출 시도) |
+| ChromaDB upsert 위치 | (계획되었음) | **`scripts/reindex_local_chroma.py`** (vector-db plan Phase 3) |
 
 ## 변하지 않는 흐름
 
@@ -53,40 +57,59 @@
 - ChromaDB 임베딩 대상 — 본문 있는 기사만 임베딩 대상
 - 재배포 그룹화
 
-## 옵션 B 흐름 (적재 단계)
+## 옵션 B 흐름 (수집 단계 = PG 적재)
 
 ```
-Filter B 통과한 후보 (본문 + 관련성 OK) — 최대 10건
+Filter B 통과한 후보 (본문 추출 성공 + 관련성 OK) — 최대 10건
   ↓
-[PostgreSQL]                       [ChromaDB]
-news_cache INSERT                  collection "news" upsert
-  - id (UUID)                        - id = news_cache.id
-  - symbol                           - document = 본문 텍스트
-  - title                            - embedding = OpenAI text-embedding-3-small
-  - summary                          - metadata = {symbol, source_id, published_at, source_url}
+[PostgreSQL]                       (ChromaDB는 별도 reindex 단계에서 처리)
+news_cache INSERT
+  - id (UUID)
+  - symbol
+  - title
+  - summary
   - source_name
   - source_url
   - published_at
   - retrieved_at
   - ttl_until
-  - content = NULL  ★
+  - content = NULL  ★ (본문은 PG에 저장 안 함)
+```
+
+본문 텍스트는 PG에 저장하지 않지만 *수집 단계에서 본문 추출은 시도*한다 — 추출 성공해야 PG에 row 적재 (해석 B). 본문 자체는 ChromaDB에 별도 reindex 단계에서 들어감.
+
+## 옵션 B 흐름 (RAG 인덱싱 단계 = reindex 스크립트)
+
+```
+PG news_cache row (content=NULL) ─► source_url 기준 본문 재추출
+                                  ─► 임베딩 생성
+                                  ─► 로컬 ChromaDB upsert
+                                  
+ChromaDB collection "news"
+  - id = news_cache.id (UUID)
+  - document = 본문 텍스트 (재추출)
+  - embedding = OpenAI text-embedding-3-small
+  - metadata = {symbol, source_id, published_at, source_url}
 ```
 
 청크 정책: 본문이 짧으면(1만자 미만) 단일 청크. 초과 시 `{uuid}:chunk:N`으로 분할.
+
+**reindex 트리거**: `scripts/reindex_local_chroma.py` (vector-db plan Phase 3) — `--symbol`, `--source`, `--reset`, `--force`, `--all-watchlist` 옵션. 수집 단계 끝에 자동 트리거하지 않음 (수동 또는 cron).
 
 ## 영향 받는 모듈
 
 | 모듈 | 변경 영역 |
 |---|---|
-| `app/domain/news_ingestion.py` | 상수 변경, P1 제거, content=NULL 적재, ChromaDB upsert 호출 추가 |
-| `app/domain/news_cache_scheduler.py` | cleanup 시 ChromaDB delete 호출 추가, `MAX_CONTENT_ROWS` 관련 로직 제거 |
+| `app/domain/news_ingestion.py` | 상수 변경, P1 제거, content=NULL 적재 (ChromaDB upsert는 호출 안 함) |
+| `app/domain/news_cache_scheduler.py` | `MAX_CONTENT_ROWS` 관련 로직 제거. cleanup은 PG row만 처리 (ChromaDB delete는 reindex 스크립트 영역) |
 | `app/repositories/news_cache_repository.py` | `trim_content_for_symbol` 제거 (의미 없어짐), `trim_rows_for_symbol`만 유지 (= 10건 상한) |
-| `app/external/chroma_client.py` (신규) | ChromaDB HTTP client wrapper |
-| `app/external/embedding.py` (신규) | OpenAI 임베딩 호출 + 재시도 |
-| `app/domain/evidence_indexing.py` (신규) | cache row → ChromaDB document 변환 + upsert + delete |
-| `app/domain/filing_ingestion.py` (구현 시) | 같은 옵션 B 정책 적용 |
+| `app/external/chroma_client.py` (신규) | ChromaDB HTTP client wrapper — vector-db plan Phase 1 |
+| `app/external/embedding.py` (신규) | OpenAI 임베딩 호출 + 재시도 — vector-db plan Phase 1 |
+| `app/domain/evidence_indexing.py` (신규) | reindex 스크립트가 사용하는 헬퍼 (PG row → ChromaDB document 변환 + 본문 재추출) |
+| `scripts/reindex_local_chroma.py` (신규) | vector-db plan Phase 3 — PG row 기준 로컬 ChromaDB 인덱싱 |
+| `app/domain/filing_ingestion.py` (구현 시) | 같은 옵션 B 정책 적용 (filing-cache plan 참고) |
 | `scripts/validate_news_ingestion.py` | 기존 시나리오 갱신 + 옵션 B 시나리오 추가 |
-| `scripts/validate_news_cache_scheduler.py` | cleanup 시나리오에 ChromaDB delete 검증 추가 |
+| `scripts/validate_news_cache_scheduler.py` | cleanup 시나리오 갱신 (ChromaDB delete는 검증 대상 아님 — 로컬 재생성으로 처리) |
 
 ## 코드 변경 항목 상세
 
@@ -123,43 +146,24 @@ content = None  # 항상 NULL — 본문은 ChromaDB에 저장
 
 scraped.content는 ChromaDB upsert 페이로드로만 사용.
 
-### D. ChromaDB upsert 호출 추가
+### D. ChromaDB upsert는 sync 흐름에서 호출하지 않음
 
-sync 함수 마지막에 신규/갱신된 row를 ChromaDB로 보냄:
+수집 단계는 PG만 다루고, ChromaDB upsert는 `scripts/reindex_local_chroma.py`(vector-db plan Phase 3)로 분리. sync 함수에 ChromaDB 호출 코드를 추가하지 않음 — 졸프 단계 정책.
 
-```python
-# news_ingestion.py 끝부분 (요지)
-indexed_payloads = [
-    EvidenceDocument(
-        id=str(row.id),
-        document=scraped.content,
-        metadata={
-            "symbol": row.symbol,
-            "source_id": str(row.id),
-            "published_at": row.published_at.isoformat() if row.published_at else "",
-            "source_url": row.source_url,
-        },
-    )
-    for row, scraped in inserted_rows_with_scraped
-]
-evidence_indexer.upsert_news(indexed_payloads)
-```
+운영 진입 시점에 동기 upsert로 전환할 수 있는 hook은 `app/domain/evidence_indexing.py`에 두기 (현재는 reindex 스크립트만 호출).
 
-ChromaDB 호출 실패 시 fail-soft (PG 적재는 성공으로 처리, 로그 기록 + 후속 sweep에서 재시도).
+### E. cleanup은 PG만
 
-### E. cleanup 동기화
-
-`news_cache_scheduler.py`의 `run_news_cleanup`에서 TTL/row 상한으로 삭제된 ID를 ChromaDB로도 전파:
+`news_cache_scheduler.py`의 `run_news_cleanup`에서 TTL/row 상한으로 삭제된 PG row만 처리. ChromaDB 동기화 안 함:
 
 ```python
 # (요지)
-deleted_ids = news_repo.delete_expired_rows_returning_ids(now=now)
-evidence_indexer.delete_news(deleted_ids)
-
+news_repo.delete_expired_rows(now=now)
 for symbol in symbols:
-    trimmed_ids = news_repo.trim_rows_for_symbol_returning_ids(symbol, MAX_CACHE_ROWS)
-    evidence_indexer.delete_news(trimmed_ids)
+    news_repo.trim_rows_for_symbol(symbol, MAX_CACHE_ROWS)
 ```
+
+로컬 ChromaDB에 orphan이 남으면 `reindex_local_chroma.py --reset` 또는 `--symbol X`로 수동 재생성.
 
 기존 `trim_content_for_symbol`은 코드에서 제거 (content NULL 정책상 의미 없음).
 
@@ -317,45 +321,42 @@ ORDER BY published_at DESC LIMIT 10
 
 토론 코드는 *이미 옵션 B 패턴에 정합되어 있음* (content를 SELECT 안 함). 옵션 B 전환 시 토론 측 코드 변경 불필요.
 
-## ChromaDB 실패 정책 (fail-soft + reconcile)
+## ChromaDB 동기화 정책 (수동 reindex 우선)
 
-옵션 B 채택으로 ChromaDB가 본문 SOT가 되므로 호출 실패 처리 정책을 명시한다.
+본문 SOT가 외부 원본이고 로컬 ChromaDB는 재생성 가능한 인덱스이므로, fail-soft + reconcile 같은 복잡한 동기화 정책은 졸프 단계에서 불필요.
 
-### upsert 실패
-- PG INSERT는 commit, ChromaDB upsert는 fail-soft (예외 catch → 로그)
-- 결과적으로 PG에는 row 있는데 ChromaDB에는 document 없는 drift 발생 가능
-- 후속 sweep 또는 reconcile 스크립트로 자연 복구
+### 인덱싱 흐름
 
-### delete 실패 (cleanup 시)
-- PG delete는 commit, ChromaDB delete는 fail-soft
-- 결과적으로 PG에 row 없는데 ChromaDB에 document 남은 orphan 발생 가능
-- reconcile 스크립트로 정리
+- PG `news_cache` INSERT/UPDATE는 commit
+- ChromaDB upsert는 **별도 reindex 스크립트**로 진행 (`scripts/reindex_local_chroma.py`)
+- 수집 직후 자동 트리거하지 않음 (운영 진입 시 옵션)
 
-### reconcile 스크립트
-- `scripts/reconcile_chroma_news_cache.py` 신설
-- cron 일 1회 실행 또는 운영자 수동
-- 동작:
-  1. PG `news_cache.id` 전체 조회
-  2. ChromaDB collection `news`의 document id 전체 조회
-  3. PG에는 있는데 ChromaDB에는 없는 ID → 재임베딩 + upsert (단, 본문이 PG에 NULL이므로 재크롤링 필요할 수 있음 — 향후 보강 대상)
-  4. ChromaDB에는 있는데 PG에는 없는 ID → ChromaDB delete (orphan 정리)
-- 본 plan 닫힘 기준에 reconcile 스크립트 1회 실행 검증 포함
+### drift 발생 시
 
-### fail-closed로 전환할 시점
-- 운영 중 drift가 운영 부담이 되면 fail-closed (ChromaDB 실패 시 PG INSERT 롤백)로 전환 검토
-- 다만 OpenAI API 일시 장애 등으로 PG 적재까지 실패하면 cache 갱신이 멈춤 — trade-off 큼
-- 초기에는 fail-soft 유지
+- PG에는 있는데 로컬 ChromaDB에 없는 row → `reindex_local_chroma.py --symbol X` 실행
+- PG에 없는데 로컬 ChromaDB에 남은 orphan → `--reset` 옵션으로 collection 재생성
+- 졸프 단계에서는 *수동 재실행*으로 충분, 별도 reconcile 스크립트 작성하지 않음
+
+### 운영 진입 시점
+
+- 공용 ChromaDB로 이전하면 fail-soft + reconcile 정책 다시 검토
+- 별도 `production-deployment-plan.md` 신설 시점에 fail 정책 / 자동 동기화 / 백업 절차 정리
+- 본 plan 범위 밖
 
 ## 닫힘 기준 (plan 종료 시점에 검증되어야 할 항목)
 
-본 plan은 코드 변경만으로 닫히지 않는다 — ChromaDB가 본문 SOT가 되었기 때문:
+졸프 단계 기준:
 
-1. 코드 변경 (상수/P1 제거/content=NULL/ChromaDB upsert/delete 동기화)
+1. 코드 변경 (상수/P1 제거/content=NULL)
 2. 검증 시나리오 갱신 + 신규 시나리오 PASS
 3. **content NULL 강제 회귀 테스트** — `news_cache.content`가 어떤 경로로도 채워지지 않음을 보장 (스키마상 컬럼은 남기 때문에 우발적 채움 위험)
-4. **ChromaDB 백업/복구 절차 1회 검증** — 본문 SOT 책임 이전에 따른 의무 (vector-db plan과 공유)
-5. reconcile 스크립트 1회 실행 + drift 0건 확인
-6. 라이브 검증: SK하이닉스 watchlist 등록 → `content_not_null = 0` + ChromaDB collection 적재 확인 + **적재 10건 중 실제 유의미 기사 비율 측정** (대표 종목 3~5개 라이브 샘플로 relevance precision 재확인)
+4. `scripts/reindex_local_chroma.py` (vector-db plan Phase 3)로 PG news_cache row 기준 로컬 ChromaDB 1회 인덱싱 성공
+5. 라이브 검증: SK하이닉스 watchlist 등록 → `content_not_null = 0` + reindex 후 로컬 ChromaDB collection 적재 확인 + **적재 10건 중 실제 유의미 기사 비율 측정** (대표 종목 3~5개 라이브 샘플로 relevance precision 재확인)
+
+운영 진입 시 별도 추가 검증 (본 plan 범위 밖):
+- ChromaDB 백업/복구 절차 검증
+- fail-soft + reconcile 스크립트 도입
+- 공용 ChromaDB 동기화 정합성
 
 ## 결론
 

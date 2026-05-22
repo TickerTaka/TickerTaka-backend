@@ -170,7 +170,7 @@ News cache 패턴 일관성:
 - `price-sync:sweep:last-run:{mode}` — 전체 sweep 최근 실행 시각 (mode: `refresh`/`cleanup`)
 - pykrx는 외부 API quota가 없어 일일 호출량 키는 불필요 (다만 호출 횟수 로그는 남김)
 
-운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
+**졸프 단계 정책 ([[infra-stage-policy]])**: Redis는 개발자별 로컬 Docker. 팀 단위 lock 약함 — 같은 종목에 대해 동시 sync가 일어날 수 있으나 `(symbol, price_date)` unique로 PG에서 최종 row 중복은 방어됨. 운영 환경 Redis 배치(NCP 서버 셀프호스트)는 운영 진입 시 별도 plan으로 (현재 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션은 *후속 참고용*).
 
 ## 토론 코드 연계 (a543ff1 커밋 기준)
 

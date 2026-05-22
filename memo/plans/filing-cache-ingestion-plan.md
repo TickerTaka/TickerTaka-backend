@@ -74,7 +74,7 @@
 
 ## 확정 정책
 
-### 1. 적재 건수와 백필 범위 (옵션 B 정책 일관 적용)
+### 1. 적재 건수와 백필 범위 (옵션 B 해석 B 일관 적용)
 
 기본값:
 - 초기 백필: 최근 `6개월` 또는 최근 `30건` 중 적은 쪽
@@ -83,9 +83,10 @@
 - 종목당 본문 row 적재 상한: `10건` (= 본문 추출된 row만 적재)
 - 본문 추출 실패 시 **partial insert 없음** — 메타만 적재하지 않음 (옵션 B 일관)
 
-`news-cache-policy-revision-plan.md`의 옵션 B 결정을 일관 적용:
-- **PostgreSQL `filing_cache.content`는 항상 NULL** — 본문은 ChromaDB document에 저장
-- 본문 추출 성공한 row만 PG INSERT + ChromaDB upsert
+`news-cache-policy-revision-plan.md`의 옵션 B 결정을 일관 적용 (해석 B):
+- **PostgreSQL `filing_cache.content`는 항상 NULL** — 본문은 로컬 ChromaDB document에 별도 reindex로 적재
+- 본문 추출 성공한 row만 PG INSERT (PG는 본문 추출 시도 후 성공 row만)
+- ChromaDB upsert는 `scripts/reindex_local_chroma.py`로 분리 (졸프 단계 정책 — [[infra-stage-policy]])
 - partial insert 정책 없음 (timeout/parsing 실패 row는 적재 자체를 안 함)
 - UI는 `filing_title` + DART viewer URL로 redirection
 
@@ -133,7 +134,8 @@
 - `symbol`별 row 수 `10`건 초과 시 오래된 공시부터 삭제 (옵션 B: row = 본문 적재이므로 본문 상한과 동일)
 - 본문 NULL trim 로직은 옵션 B에서 의미 없음 (애초에 NULL 적재) — 제거
 - "오래된" 기준은 `disclosed_at ASC NULLS LAST`, NULL끼리는 `retrieved_at ASC`
-- **삭제된 ID는 ChromaDB delete로 동기화**: repository에 `delete_expired_rows_returning_ids` / `trim_rows_for_symbol_returning_ids` 인터페이스 필수
+- **PG cleanup은 PG row만 처리** — 로컬 ChromaDB는 reindex 스크립트로 재생성 (졸프 단계 정책)
+- ChromaDB drift가 보이면 `reindex_local_chroma.py --reset --source filing --symbol X` 수동 재실행
 
 ## 저장 전략
 
@@ -166,7 +168,7 @@ ChromaDB collection `filing`:
 - `filing-sync:sweep:last-run:{mode}` — 전체 sweep 최근 실행 시각
 - `dart-api-count:{date}` — 일일 DART API 호출량 (FinancialCache와 공유)
 
-운영 환경의 Redis 배치(NCP 서버 + Docker 셀프 호스트, 인증/persistence/메모리 한도)는 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션 참고.
+**졸프 단계 정책 ([[infra-stage-policy]])**: Redis는 개발자별 로컬 Docker. 팀 단위 lock 약함 — 같은 종목 공시에 대해 동시 sync 가능하나 `dart_receipt_no` unique로 PG에서 최종 중복 방어. 운영 진입 시 별도 plan으로 (현재 `debate-runtime-infrastructure-plan.md`의 "운영 환경 배치" 섹션은 *후속 참고용*).
 
 ## 토론 코드 연계 (a543ff1 커밋 기준)
 
@@ -206,10 +208,14 @@ def sync_filings_for_ticker(
   6. 본문 추출 상한 `3건`까지 `document.xml` 호출
   7. **XML 파서 모듈(`app/external/dart/document_parser.py`)을 ingestion 로직과 분리** — 단위 검증 가능 형태 (표/주석/첨부서류 처리 품질 차이가 크므로 분리 필수)
   8. XML 파싱 → text 추출 → 길이 제한 적용 (10,000자 cap)
-  9. 본문 추출 성공한 row만 `filing_cache` INSERT (content=NULL) + ChromaDB upsert
+  9. 본문 추출 성공한 row만 `filing_cache` INSERT (content=NULL) — ChromaDB upsert는 안 함
   10. 본문 추출 실패 row는 적재 자체를 skip (다음 sync에서 재시도 가능)
   11. `ttl_until` 계산
-  12. row 상한 초과분 정리 (PG row + ChromaDB document 동시 삭제)
+  12. row 상한 초과분 정리 (PG row만)
+
+ChromaDB 적재는 별도 `scripts/reindex_local_chroma.py`(vector-db plan Phase 3)가 담당. PG row 기준으로 `source_url` 또는 `dart_receipt_no` + `document.xml` 재호출하여 본문 재추출 후 로컬 ChromaDB upsert.
+
+졸프 단계 정책 ([[infra-stage-policy]]): 수집 단계는 PG metadata + 본문 추출 성공 판정만, RAG 인덱싱은 분리. 운영 진입 시 sync 직후 동기 upsert로 전환 검토.
 
 반환 예시:
 - 조회 건수 (DART API list 응답)
@@ -340,11 +346,12 @@ NewsCache와 동일:
 
 ## 결론
 
-확정 내용 (옵션 B 일관 적용):
+확정 내용 (옵션 B 해석 B 일관 적용 + 졸프 단계 로컬 RAG):
 - 데이터 소스 OpenDART `list.json` + `document.xml`
 - 본문 추출은 XML 텍스트 노드 기준, 표/이미지는 후속 확장
-- 본문 SOT는 ChromaDB collection `filing`, **PG `filing_cache.content`는 항상 NULL**
-- partial insert 없음 — 본문 추출 성공한 row만 적재
+- 본문 SOT는 외부 원본(DART), 로컬 ChromaDB collection `filing`은 재생성 가능한 RAG 인덱스
+- **PG `filing_cache.content`는 항상 NULL**
+- partial insert 없음 — 본문 추출 성공한 row만 PG 적재
 - 초기 백필 6개월 또는 30건, row 상한 = 본문 적재 상한 = 10건
 - 정기 갱신 1시간, 강제 재수집 최소 15분
 - TTL 180일, 공시 시각 기준 만료
@@ -352,6 +359,8 @@ NewsCache와 동일:
 - 정기공시(`A`)는 FinancialCache가 처리 — 본 plan에서 제외 필터
 - corp_code 매핑은 FinancialCache와 공유 (부팅 시 로컬 캐시 우선, 없으면 다운로드)
 - XML 파서 모듈은 ingestion과 분리해 단위 검증 가능
-- cleanup 시 PG delete + ChromaDB delete 동기화 (fail-soft + reconcile)
+- ChromaDB upsert/delete는 `scripts/reindex_local_chroma.py`로 분리 (졸프 단계)
+- cleanup은 PG row만 처리, ChromaDB drift는 reindex 수동 재실행으로 해결
 - watchlist 트리거 NewsCache 동일 패턴
 - Phase 0~4 순차 구현 (Phase 0/4는 다른 plan과 공유 또는 선택)
+- 운영 진입 시 별도: ChromaDB 동기화/백업 정책, 공용 collection 운영 — `production-deployment-plan.md` (배포 결정 시점에 작성)

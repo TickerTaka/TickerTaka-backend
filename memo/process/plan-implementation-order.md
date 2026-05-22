@@ -1,10 +1,12 @@
-# Plan 구현 순서 (2026-05-22 기준)
+# Plan 구현 순서 (2026-05-22 기준, 졸프 단계 로컬 RAG 정책 반영)
 
 ## 목적
 
 `memo/plans/`에 정리된 7개 plan의 구현 우선순위를 의존성 + 위험 분산 + 사용자 가치 측면에서 정한다.
 
 이 문서는 *어떤 plan부터 코드 구현에 들어갈지*의 가이드이며, 각 plan의 세부 정책/스키마는 해당 plan 문서를 참조한다.
+
+**전제 정책 ([[infra-stage-policy]])**: 졸프 단계는 배포 없음 — PostgreSQL만 공용 NCP, **Redis와 ChromaDB는 개발자별 로컬 Docker**. ChromaDB는 본문 SOT가 아니라 *재생성 가능한 RAG 인덱스* (본문 SOT는 외부 원본 — 네이버/DART). 운영 진입 시 별도 `production-deployment-plan.md`로 NCP 셀프호스트 이전 + 백업/복구 정리.
 
 ## 현재 plan 인벤토리
 
@@ -150,43 +152,51 @@
 
 ### 단계 2: news-cache 옵션 B 전환 (2-3일)
 
-기존 동작 중인 시스템을 옵션 B로 전환.
+기존 동작 중인 시스템을 옵션 B로 전환. **2.a 수집 코드 변경**과 **2.b 로컬 RAG 인덱싱 스크립트**로 분리.
+
+#### 단계 2.a: 수집 코드 (PG만)
 
 | 작업 | 출처 plan | 영향 |
 |---|---|---|
-| news-cache-policy-revision 구현 | 새 plan | `news_ingestion.py` 상수/P1 제거/content=NULL/ChromaDB upsert |
-| scheduler cleanup 동기화 | 같은 plan | `news_cache_scheduler.py` cleanup 시 ChromaDB delete + reconcile |
-| repository 갱신 | 같은 plan | `trim_*_returning_ids` 인터페이스 |
-| evidence_indexing 신설 | vector-db Phase 2-3 | `app/domain/evidence_indexing.py` |
-| 검증 시나리오 갱신 + 신규 4개 | 같은 plan | partial insert 회귀 + content NULL 강제 + ChromaDB 동기화 검증 |
-| 라이브 검증 (SK하이닉스) | 같은 plan | `content_not_null = 0` + ChromaDB collection 적재 확인 + 유의미 기사 비율 |
-| (선택) backfill 스크립트 | 같은 plan | 기존 content 있는 row의 ChromaDB backfill 1회 |
+| news-cache-policy-revision 구현 | 새 plan | `news_ingestion.py` 상수/P1 제거/content=NULL (ChromaDB 호출 없음) |
+| scheduler 갱신 | 같은 plan | `news_cache_scheduler.py`에서 `MAX_CONTENT_ROWS` 로직 제거 |
+| repository 갱신 | 같은 plan | `trim_content_for_symbol` 제거 |
+| 검증 시나리오 갱신 + 신규 4개 | 같은 plan | partial insert 회귀 + content NULL 강제 + 본문 추출 성공 row만 적재 |
+| 라이브 검증 (SK하이닉스) | 같은 plan | `content_not_null = 0` + 적재 10건 중 유의미 기사 비율 |
+
+#### 단계 2.b: 로컬 RAG 인덱싱 (수동 reindex)
+
+| 작업 | 출처 plan | 영향 |
+|---|---|---|
+| evidence_indexing 신설 | vector-db Phase 2 | `app/domain/evidence_indexing.py` (PG row → ChromaDB document 변환 헬퍼) |
+| reindex 스크립트 신설 | vector-db Phase 3 | `scripts/reindex_local_chroma.py` (`--symbol`, `--source`, `--reset`, `--force`, `--all-watchlist`) |
+| 첫 reindex 실행 | 같은 plan | PG news_cache row 기준 로컬 ChromaDB collection `news` 적재 확인 |
 
 **왜 두 번째?**
 - 이미 동작 중인 시스템 변경이라 먼저 안정화
 - **news-cache가 옵션 B 구현의 reference** — 이후 filing-cache도 같은 패턴 적용
 - 단계 1에서 만든 ChromaDB 인프라가 처음 사용되는 지점
 
-**닫힘 기준**:
-- 라이브 검증 + ChromaDB 백업/복구 절차 1회 검증 (옵션 B SOT 책임 검증)
-- reconcile 스크립트 1회 실행 + drift 0건 확인
+**닫힘 기준 (졸프 단계)**:
+- 단계 2.a: PG content NULL 강제 회귀 + 라이브 적재 검증
+- 단계 2.b: reindex 스크립트로 로컬 ChromaDB에 collection `news` 적재 + symbol metadata filter 검색 가능
+- (운영 진입 시 별도) ChromaDB 백업/복구 절차, fail-soft + reconcile — `production-deployment-plan.md`로 미룸
 
 **이 단계 완료 시 상태**:
-- ✅ 닫히는 Phase: `vector-db Phase 2`, `vector-db Phase 5 (news 부분)`, `news-cache-policy-revision 코드 측 전부`
-- 🟢 **완료된 plan**: `news-cache-policy-revision-plan.md` (코드 100%, 인프라 백업 1건은 인프라 팀 협업)
-- 🟡 진행 중 plan: vector-db (~50% 완료), debate-runtime (~17% 그대로)
+- ✅ 닫히는 Phase: `vector-db Phase 2` (News adapter), `vector-db Phase 3` (reindex 스크립트), `news-cache-policy-revision` 코드 측 전부
+- 🟢 **완료된 plan**: `news-cache-policy-revision-plan.md` (졸프 단계 닫힘 기준 100%, 운영 진입 항목은 별도 plan으로 분리)
+- 🟡 진행 중 plan: vector-db (~60% 완료 — Phase 1+2+3), debate-runtime (~25% 그대로)
 - 📄 봐야 할 plan 문서:
-  - `news-cache-policy-revision-plan.md` — 전체 (특히 "코드 변경 항목 상세", "검증 시나리오 변경", "ChromaDB 실패 정책", "닫힘 기준" 섹션)
-  - `vector-db-and-evidence-retrieval-plan.md` — Phase 2, Phase 5(news 부분)
+  - `news-cache-policy-revision-plan.md` — 전체 (특히 "옵션 B 흐름 - 수집 단계", "옵션 B 흐름 - RAG 인덱싱 단계", "ChromaDB 동기화 정책 (수동 reindex 우선)", "닫힘 기준")
+  - `vector-db-and-evidence-retrieval-plan.md` — Phase 2, Phase 3 (로컬 Chroma reindex)
 - 📋 산출물:
   - `app/domain/evidence_indexing.py` (신설)
-  - `app/domain/news_ingestion.py` (수정 — 상수/P1/content NULL/ChromaDB upsert)
-  - `app/domain/news_cache_scheduler.py` (수정 — cleanup ChromaDB 동기)
-  - `app/repositories/news_cache_repository.py` (수정 — `trim_*_returning_ids`)
+  - `app/domain/news_ingestion.py` (수정 — 상수/P1/content NULL, ChromaDB 호출 없음)
+  - `app/domain/news_cache_scheduler.py` (수정 — `MAX_CONTENT_ROWS` 제거)
+  - `app/repositories/news_cache_repository.py` (수정 — `trim_content_for_symbol` 제거)
+  - `scripts/reindex_local_chroma.py` (신설)
   - `scripts/validate_news_ingestion.py` (갱신 + 신규 시나리오 4개)
-  - `scripts/reconcile_chroma_news_cache.py` (신설)
-  - (선택) `scripts/backfill_chroma_from_news_cache.py`
-- ⚠️ 인프라 팀 협업 1건: ChromaDB 디렉토리 → NCP Object Storage 주기 백업 + 복구 절차 검증
+  - `scripts/validate_chroma_connection.py`는 단계 1에 이미 있음
 
 ### 단계 3: 신규 cache plan (각 2-3일)
 
@@ -366,21 +376,23 @@ watchlist 등록 직후 다음이 병렬로 enqueue됨:
 
 ## Plan × 단계 진행 매트릭스
 
-각 plan이 단계 진행에 따라 어떻게 닫히는지 한눈에 (a543ff1 커밋 기준 갱신):
+각 plan이 단계 진행에 따라 어떻게 닫히는지 한눈에 (a543ff1 커밋 + 졸프 단계 로컬 RAG 정책 반영):
 
 | plan | 시작 | 단계 1 후 | 단계 2 후 | 단계 3.1 후 | 단계 3.2 후 | 단계 3.3 후 | 단계 4 후 |
 |---|---|---|---|---|---|---|---|
 | `news-cache-ingestion` (기존) | 100% (옵션 A) | 100% | 100% (옵션 B 전환) | 동일 | 동일 | 동일 | 동일 |
-| `news-cache-policy-revision` | 0% | 0% | **100%** ✅ (인프라 1건 별도) | 동일 | 동일 | 동일 | 동일 |
-| `vector-db-and-evidence-retrieval` | 0% | ~20% | ~50% | ~50% | ~50% | ~80% | **100%** ✅ |
-| `debate-runtime-infrastructure` | **~25%** (a543ff1) | ~42% | ~42% | ~42% | ~42% | ~42% | **100%** ✅ |
+| `news-cache-policy-revision` | 0% | 0% | **100%** ✅ (졸프 닫힘 기준) | 동일 | 동일 | 동일 | 동일 |
+| `vector-db-and-evidence-retrieval` | 0% | ~20% | ~60% | ~60% | ~60% | ~75% | **100%** ✅ (졸프 단계) |
+| `debate-runtime-infrastructure` | **~25%** (a543ff1) | ~42% | ~42% | ~42% | ~42% | ~42% | **100%** ✅ (졸프, 운영 배치 섹션 별도) |
 | `price-cache-ingestion` | 0% | 0% | 0% | **100%** ✅ | 동일 | 동일 | 동일 |
 | `financial-cache-ingestion` | 0% | 0% | 0% | 0% | **100%** ✅ | 동일 | 동일 |
 | `filing-cache-ingestion` | 0% | 0% | 0% | 0% | 0% (corp_code 공유) | **100%** ✅ | 동일 |
 | 토론 도메인 plan (backfill) | ~50% (a543ff1) | ~50% | ~50% | 초안 작성 | 작성 완료 | (검토) | **100%** ✅ |
+| (후속) `production-deployment-plan` | — | — | — | — | — | — | 배포 결정 시점 별도 작성 |
 
 **범례**: ✅ = 100% 닫힘, 숫자 % = 부분 닫힘
 **a543ff1**: 2026-05-19 토론 에이전트 본체 구현 커밋 — debate-runtime Phase 4 일부 + Phase 1 부분, 토론 도메인 plan 영역의 절반 정도 선구현
+**졸프 단계 닫힘**: 운영 인프라(공용 ChromaDB/Redis NCP 셀프호스트, 백업/복구, 인증/TLS, fail-soft+reconcile) 항목은 본 매트릭스에서 제외 — 배포 결정 시 별도 plan
 
 ## 단계별 plan 완료 카운트
 
@@ -397,9 +409,18 @@ watchlist 등록 직후 다음이 병렬로 enqueue됨:
 
 | 단계 | 작업 | 소요 | 핵심 산출물 |
 |---|---|---|---|
-| 1 | 공용 Redis 헬퍼 + ChromaDB 인프라 | 1-2일 | `app/core/redis.py`, `app/external/chroma_client.py`, `app/external/embedding.py` |
-| 2 | news-cache 옵션 B 전환 + 라이브 검증 | 2-3일 | news-cache 코드 변경 + `evidence_indexing.py` + ChromaDB 백업/복구 절차 |
+| 1 | 공용 Redis 헬퍼 + ChromaDB 인프라 (로컬) | 1-2일 | `app/core/redis.py`, `app/external/chroma_client.py`, `app/external/embedding.py` |
+| 2.a | news-cache 옵션 B 전환 (수집 코드) | 1-2일 | news-cache 코드 변경 (PG만, ChromaDB 호출 없음) |
+| 2.b | 로컬 RAG 인덱싱 스크립트 + 첫 reindex | 1일 | `scripts/reindex_local_chroma.py`, `app/domain/evidence_indexing.py` |
 | 3.1 | price-cache + technical_indicator | 2-3일 | pykrx 도입 + 가격/지표 적재 + scheduler |
 | 3.2 | financial-cache + corp_code 인프라 | 2-3일 | DART 클라이언트 + corp_code 매핑 + 재무 적재 + ROE/PER/PBR |
-| 3.3 | filing-cache | 2-3일 | DART 공시 + XML 파서 + 옵션 B 일관 적재 |
+| 3.3 | filing-cache | 2-3일 | DART 공시 + XML 파서 + 옵션 B 일관 적재 (PG만, RAG는 reindex 스크립트 확장) |
 | 4 | 토론 도메인 plan 작성 + 구현 | TBD | 토론 plan + 런타임 Redis 모듈 + retrieval + LangGraph + 토론 endpoint |
+| (후속) | 운영 진입 — 배포 결정 시 별도 plan | TBD | `production-deployment-plan.md` 신설 — NCP 셀프호스트, 백업/복구, 인증/TLS, 공용 ChromaDB 이전, fail-soft+reconcile |
+
+**졸프 단계 단계 4 종료 후 운영 진입 시**:
+- 공용 Redis (NCP 서버 + Docker 셀프호스트)로 이전
+- 공용 ChromaDB (또는 Qdrant) 이전 + 백업/복구 + 인증/TLS
+- sync 직후 ChromaDB 동기 upsert로 전환 (현재 수동 reindex → 자동)
+- fail-soft + reconcile 스크립트 도입
+- 인프라 팀 협업 (호스트 IP, ACG, 비밀번호, 백업 정책)
