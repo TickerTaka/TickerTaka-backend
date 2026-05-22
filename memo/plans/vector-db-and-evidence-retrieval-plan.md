@@ -1,366 +1,1039 @@
-# Vector DB (ChromaDB) + Evidence Retrieval 계획
+# Vector DB (Local ChromaDB) + Evidence Retrieval 계획
 
 ## 목표
 
-토론 단계에서 cache 테이블들(`news_cache`, `filing_cache`, 추후 `financial_cache`)에 적재된 텍스트를 **의미 기반(semantic)으로 검색**하여 evidence 후보를 추출한다.
+토론 단계에서 `filing_cache`를 중심으로 공시 본문을 의미 기반으로 검색해 evidence 후보를 만든다. `news_cache`는 다른 담당자가 수집/본문 처리하는 영역으로 두고, 이 계획의 1차 구현 범위에서는 공시 RAG 경로를 먼저 완성한다.
+
+현재 프로젝트 전제는 **배포 없음**이다. 따라서 운영용 공용 ChromaDB 서버를 별도로 구축하지 않고, 다음 구조를 사용한다.
+
+```text
+공용 NCP PostgreSQL
+= 팀 공용 메타데이터 truth
+
+개발자별 로컬 Redis
+= lock / cooldown / 임시 상태
+
+개발자별 로컬 ChromaDB
+= 개인 RAG 본문/embedding 인덱스
+```
 
 핵심 원칙:
-- PostgreSQL은 *원본* 저장, ChromaDB는 *의미 검색* 색인 — 둘은 1:1 동기화.
-- 토론은 카테고리(technical/financial/market) × 3 라운드 × Bull/Bear/Judge 구조 → 각 발언당 evidence 1개 이상 강제 → 검색 품질이 토론 품질 직결.
-- BM25 같은 키워드 검색은 종목명이 너무 자주 등장하는 한국 기사 특성상 약하므로 dense embedding 우선.
-- 영구성/대용량 운영은 후속 단계, 초기 구현은 단일 ChromaDB 인스턴스로 시작.
 
-## 검증 완료 내용
+- PostgreSQL은 팀 공용 메타데이터 truth다.
+- `filing_cache.content`는 기본적으로 `NULL`로 둔다.
+- `news_cache` 수집/본문 처리는 이 계획의 1차 구현 범위 밖이다.
+- 본문 텍스트와 embedding은 각자 로컬 ChromaDB에 저장한다.
+- ChromaDB는 운영 공용 SOT가 아니라 **개발자 개인 RAG 인덱스**다.
+- 같은 PostgreSQL row를 기준으로 reindex하면 각자 로컬 Chroma를 재생성할 수 있어야 한다.
+- Redis는 개인 로컬 인스턴스를 사용한다. 팀 전체 중복 실행 방지는 약하지만, PostgreSQL unique/upsert로 최종 중복 row를 방어한다.
+
+## 현재 상태
 
 확인 완료:
-- `docker-compose.yml`에 `chromadb/chroma:latest` 컨테이너 정의 (port 8080, volume `chromadata`)
-- `.env.example`에 `CHROMA_URL` 환경 변수 있음
-- 영구 저장은 `chromadata` 볼륨에 위임 (compose에 정의됨)
-- ChromaDB 0.5+ 기준 client 사용 가능
 
-추가 검증 필요:
-- 클라우드 운영 시 ChromaDB 호스팅 결정 (self-host vs Chroma Cloud vs 대안 — Qdrant/Weaviate)
-- 본 plan은 self-host (docker-compose) 기준
+- NCP PostgreSQL `stock_debate` DB 사용 중
+- DART 공시 metadata 적재 성공
+- `filing_cache`에 `symbol`, `filing_title`, `dart_receipt_no`, `source_url`, `disclosed_at` 저장 성공
+- 같은 DART 적재 재실행 시 `dart_receipt_no` 기준 upsert 확인
+- `docker-compose.yml`에 로컬 Redis / ChromaDB 서비스 정의 있음
+- `.env.example`에 `REDIS_URL`, `CHROMA_URL` 정의 있음
+
+현재 검증 결과:
+
+```text
+DART 1차 적재: fetched=10 inserted=10 updated=0
+DART 2차 적재: fetched=10 inserted=0 updated=10
+watchlist API smoke test: PASS
+```
 
 ## 아키텍처
 
-```
-PostgreSQL                          ChromaDB
-─────────────                       ───────────────
-news_cache    ───[adapter]───►      collection: news
-filing_cache  ───[adapter]───►      collection: filing
-financial_cache (선택)──────►       collection: financial
-                                    
-                                    (각 document = 1개 cache row, id = cache row UUID)
+```text
+                           공용 NCP PostgreSQL
+                           ─────────────────
+                           app_user
+                           watchlist
+                           ticker_metadata
+                           news_cache      (다른 담당 영역)
+                           filing_cache    (content = NULL)
+                           price_cache
+                           financial_cache
+                                      ▲
+                                      │ metadata/source_url/receipt_no
+                                      │
+개발자 A PC                          │                           개발자 B PC
+───────────                          │                           ───────────
+FastAPI ──────────────── DATABASE_URL┘                           FastAPI
+Redis(localhost:6379)                                            Redis(localhost:6379)
+Chroma(localhost:8080)                                           Chroma(localhost:8080)
+  collection: news                                                 collection: news
+  collection: filing                                               collection: filing
 ```
 
-원칙:
-- Cache row 적재 시 → 동기 또는 비동기 임베딩 upsert
-- Cache row 삭제 시 → 같은 ID로 ChromaDB delete
-- Cache row content NULL 처리(보유 상한 초과) → ChromaDB document도 삭제
+역할 분리:
+
+| 저장소 | 위치 | 역할 |
+| --- | --- | --- |
+| PostgreSQL | NCP 공용 | watchlist, filing metadata, source_url, 중복 방지 |
+| Redis | 각자 로컬 | sync lock, cooldown, 일일 API counter, 임시 상태 |
+| ChromaDB | 각자 로컬 | RAG용 document text + embedding + metadata |
+
+## 데이터 흐름
+
+전체 흐름은 두 단계로 나눈다.
+
+```text
+1차 수집 단계
+= 장바구니 종목 기준으로 DART 공시를 가져와 PostgreSQL filing_cache 테이블에 metadata 저장
+
+2차 RAG 인덱싱 단계
+= PostgreSQL filing_cache row를 기준으로 공시 본문을 가져와 로컬 ChromaDB에 document + embedding 저장
+```
+
+즉, 장바구니 추가는 공시 수집을 트리거한다. Chroma 인덱싱은 그 다음 단계다. 뉴스 수집/뉴스 본문 인덱싱은 다른 담당 영역으로 분리한다.
+
+### 1. 장바구니 추가
+
+```text
+POST /api/watchlists
+-> 공용 PostgreSQL watchlist row 생성
+-> background task로 DART 공시 sync 실행
+```
+
+현재 구현 기준:
+
+```python
+background_tasks.add_task(sync_watchlist_filings, watchlist.symbol)
+```
+
+참고:
+
+```text
+sync_watchlist_news도 현재 코드에 있을 수 있지만, 뉴스 수집/본문 처리 구현은 이 계획의 담당 범위에서 제외한다.
+```
+
+### 2. DART 공시 수집 및 PostgreSQL metadata 적재
+
+DART 공시 sync는 공용 PostgreSQL에 metadata를 저장한다.
+
+공시 수집:
+
+```text
+filing_cache:
+  symbol
+  filing_title
+  filing_type
+  dart_receipt_no
+  source_url
+  disclosed_at
+  retrieved_at
+  ttl_until
+  content = NULL
+  summary = NULL
+```
+
+공시 수집 세부 흐름:
+
+```text
+1. watchlist.symbol을 받음
+2. DART corpCode.xml에서 stock_code -> corp_code 매핑
+3. DART list.json으로 최근 공시 목록 조회
+4. filing_cache에 metadata upsert
+5. source_url은 DART viewer URL로 저장
+6. content/summary는 저장하지 않음
+```
+
+공시 저장 예:
+
+```text
+symbol = 005930
+filing_title = 분기보고서 (2026.03)
+dart_receipt_no = 20260515002181
+source_url = https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002181
+content = NULL
+summary = NULL
+```
+
+이 단계의 목적:
+
+```text
+대시보드 목록 표시
+DART 원문 페이지 리다이렉션
+중복 수집 방지
+RAG 인덱싱 대상 row 확보
+```
+
+### 3. 개인 로컬 Chroma RAG 인덱싱
+
+각 개발자는 자기 PC에서 reindex 스크립트를 실행한다.
+
+```bash
+conda run -n tickertaka311 python -m scripts.reindex_local_chroma --symbol 005930
+```
+
+동작:
+
+```text
+1. 공용 PostgreSQL에서 filing_cache row 조회
+2. 로컬 ChromaDB에 해당 id가 있는지 확인
+3. filing_cache는 dart_receipt_no로 DART document.xml 조회
+4. 본문 텍스트 추출
+5. embedding 생성
+6. 로컬 ChromaDB에 upsert
+7. PostgreSQL content 컬럼은 계속 NULL 유지
+```
+
+공시 기준 Chroma 저장:
+
+```text
+collection = filing
+id = filing:{filing_cache.id}
+document = filing_title + "\n\n" + DART document.xml에서 추출한 본문
+metadata.source_id = filing_cache.id
+metadata.dart_receipt_no = filing_cache.dart_receipt_no
+metadata.source_url = filing_cache.source_url
+metadata.symbol = filing_cache.symbol
+```
+
+정리:
+
+```text
+PostgreSQL filing_cache
+= 공시 껍데기, 링크, 중복 방지, 대시보드용
+
+Local Chroma filing
+= 공시 본문, embedding, RAG 검색용
+```
+
+## ChromaDB Collection 구조
+
+collection은 데이터 타입별로 분리한다.
+
+```text
+news       # 다른 담당 영역, 1차 구현 제외
+filing
+financial  # 후속
+```
+
+symbol별 collection은 만들지 않는다. symbol은 metadata filter로 처리한다.
+
+### document id 정책
+
+초기에는 단일 청크를 우선한다.
+
+```text
+filing:{filing_cache.id}
+```
+
+본문이 너무 길어 분할이 필요하면 다음 형식을 사용한다.
+
+```text
+filing:{filing_cache.id}:chunk:{idx}
+```
+
+### filing collection 예시
+
+```json
+{
+  "id": "filing:05997754-f761-4272-b74b-a6bab3adc0f7",
+  "document": "분기보고서 (2026.03)\n\n...DART document.xml에서 추출한 본문...",
+  "metadata": {
+    "symbol": "005930",
+    "source_id": "05997754-f761-4272-b74b-a6bab3adc0f7",
+    "source_type": "filing",
+    "dart_receipt_no": "20260515002181",
+    "filing_title": "분기보고서 (2026.03)",
+    "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260515002181",
+    "published_at": "2026-05-15T00:00:00+09:00",
+    "chunk_idx": 0
+  }
+}
+```
 
 ## 임베딩 대상
 
-| Cache | Document 텍스트 | 우선순위 |
-|---|---|---|
-| NewsCache | `title` + `\n\n` + `content`(있으면) 또는 `summary` | 1순위 |
-| FilingCache | `filing_title` + `\n\n` + `content`(있으면) | 1순위 |
-| FinancialCache | 핵심 수치를 자연어 직렬화 (예: "2024Q3 매출 X억, 영업이익 Y억...") | 후속 |
-| PriceCache / TechnicalIndicatorCache | 임베딩 대상 아님 — 수치 검색은 SQL이 더 적합 | — |
+| Source | PostgreSQL | Chroma document |
+| --- | --- | --- |
+| News | 다른 담당 영역 | 1차 구현 제외 |
+| Filing | `filing_cache` metadata, `content=NULL` | `filing_title + DART 본문 텍스트` |
+| Financial | 후속 | 핵심 수치 자연어 직렬화 |
+| Price/Technical | SQL 조회 | 임베딩하지 않음 |
 
-청킹 정책:
-- News/Filing 본문이 짧으면 (예: 1500자 이하) 단일 document
-- 그 이상이면 ~500 토큰 청크 + 50 토큰 overlap
-- 청크 ID는 `{cache_row_uuid}:chunk:{idx}` — 다중 vector / 동일 source 표현
+본문 소스:
+
+- Filing: DART `document.xml` API 결과
+
+## 청킹 정책
+
+초기 구현은 단일 document를 우선한다.
+
+```text
+본문 1만자 이하 -> 단일 document
+본문 1만자 초과 -> 약 500 토큰 청크 + 50 토큰 overlap
+```
+
+단일 document를 우선하는 이유:
+
+- `cache_row.id`와 Chroma document id를 1:1로 맞추기 쉽다.
+- cleanup / lookup / evidence display가 단순하다.
+- 초기 데이터 규모와 시연 목적에는 충분하다.
 
 ## 임베딩 모델
 
-후보:
-- **OpenAI `text-embedding-3-small`** (1536 차원)
-  - 한국어 품질 양호, 비용 저렴 (\$0.02 / 1M tokens)
-  - OpenRouter 경유 가능 여부 확인 필요 (기본은 OpenAI 직접)
-- **BGE-M3** (1024 차원, 다국어 강함)
-  - self-host 가능 → 비용 0, latency 통제 가능
-  - GPU 또는 대용량 RAM 필요
-- **ko-sroberta-multitask** (한국어 특화 sentence-transformers)
-  - CPU 가능, 한국어 단문 강함
-  - 다국어 약함
+초기 선택:
 
-초기 선택: **OpenAI `text-embedding-3-small`** — 개발 속도 + 한국어 수용 가능
-운영 비용 부담 시 BGE-M3로 self-host 이전.
-
-환경 변수 추가:
-- `EMBEDDING_MODEL=openai/text-embedding-3-small` (또는 `bge-m3`)
-- `OPENAI_API_KEY` (이미 OpenRouter 키 있음 — 임베딩은 별도 OpenAI 직접 호출 필요 여부 확인)
-
-## Collection 구조
-
-```
-collection_name = "news" | "filing" | "financial"
-embedding_function = OpenAIEmbeddings(...) or BGEEmbeddings(...)
-
-document fields:
-  id        = "{cache_row_uuid}" 또는 "{cache_row_uuid}:chunk:{idx}"
-  document  = text 본문
-  metadata  = {
-    symbol: str
-    source_id: str (cache_row_uuid)
-    source_type: "news" | "filing" | ...
-    published_at: ISO 8601 string
-    source_url: str
-    chunk_idx: int (청킹 시)
-  }
+```text
+HuggingFace jhgan/ko-sroberta-multitask
 ```
 
-설계 결정:
-- **per-type collection** (news/filing 분리) — symbol 필터로는 collection을 분리하지 않음
-- symbol은 metadata filter로 검색 시 적용 (`where={"symbol": "005930"}`)
-- collection을 symbol 단위로 너무 잘게 쪼개면 collection 관리 비용↑
+이유:
 
-## 인덱싱 시점
+- 로컬에서 동작해 API key와 비용이 필요 없다.
+- 한국어 문장 임베딩에 맞춰져 있다.
+- 개발자별 로컬 ChromaDB 구조와 잘 맞는다.
 
-옵션:
-- **A. 동기 임베딩** — cache sync 함수 마지막에 embedding upsert 수행
-  - 장점: 항상 최신, 별도 sweep 불필요
-  - 단점: sync 함수가 늦어짐 (OpenAI 호출 + 네트워크)
-- **B. 비동기 sweep** — 매 시간 신규 row 임베딩 (cache_row에 `embedded_at` 필드 추가 또는 ChromaDB id 존재 확인)
-  - 장점: cache sync 함수 빠름
-  - 단점: 토론 시점에 갓 적재된 evidence 누락 가능
-- **C. 토론 시점 lazy** — 미임베딩 row를 그때 임베딩
-  - 토론 latency 직접 영향 → 비추천
+환경 변수:
 
-초기 선택: **옵션 A** — cache sync는 이미 background task로 분리되어 응답 latency 외 영향 없음.
-비용/속도 검증 후 옵션 B로 이전 검토.
-
-구현 위치:
-- `app/external/chroma_client.py` — ChromaDB wrapper
-- `app/domain/evidence_indexing.py` — cache row → document 변환 + upsert
-- `NewsIngestionService.sync_news_for_ticker` 끝에 `evidence_indexer.upsert_news(rows)` 호출
-- `FilingIngestionService.sync_filings_for_ticker`도 동일
-
-## Retrieval 흐름 (토론 시점)
-
-```
-1. 토론 세션 시작
-   user_id, symbol, category ∈ {technical, financial, market}
-
-2. 카테고리별 query 생성
-   technical: "{name_kr} 기술적 분석 차트 이동평균 RSI 거래량 추세"
-   financial: "{name_kr} 매출 영업이익 재무 부채 현금흐름"
-   market: "{name_kr} 시장 업황 경쟁 거시 외부 요인"
-
-3. ChromaDB collection별 top-K 검색
-   news     → top 5
-   filing   → top 3
-   financial(선택) → top 2
-
-4. metadata filter
-   {"symbol": "005930"}
-   {"published_at": {"$gte": <7 days ago>}}  # 카테고리에 따라 윈도우 조정
-
-5. 결과 후처리
-   - 중복 source 제거
-   - 출처 다양성 ranking (news clustering 등)
-   - LangGraph context에 주입
-
-6. 발언 시 evidence_id로 PostgreSQL 원본 lookup → 화면에 표시
+```env
+EMBEDDING_PROVIDER=huggingface
+EMBEDDING_MODEL=jhgan/ko-sroberta-multitask
 ```
 
-## TTL / 삭제 동기화
+후속 대안:
 
-PostgreSQL과 ChromaDB는 1:1이어야 함. 동기화 지점:
+- BGE-M3: self-host 가능, 다국어 강함
+- ko-sroberta-multitask: 한국어 단문에 강함
+- OpenAI text-embedding-3-small: 품질/안정성은 좋지만 API key와 비용 필요
+- Qdrant/pgvector 이전: 운영 규모가 커질 때 검토
 
-- **삭제**:
-  - cache row 삭제 (TTL 만료, row 상한 초과) → 같은 ID로 `collection.delete(ids=[...])`
-  - cleanup sweep에서 SQL delete 직후 동일 ID 리스트로 ChromaDB delete 호출
-- **content NULL 처리**:
-  - cache row의 `content`가 NULL이 되어도 메타데이터는 남음
-  - 그러나 본문이 없으면 의미 검색 가치가 없음 → ChromaDB document는 삭제
-  - 다음 sync에서 본문 보강되면 다시 임베딩
-- **content 갱신**:
-  - 정정 공시나 본문 보강으로 content가 바뀌면 ChromaDB document upsert로 덮어쓰기
+## Redis 사용 위치
 
-## 환경 변수 / 외부 의존성
+Redis는 ChromaDB와 경쟁하는 저장소가 아니다.
 
-추가 환경 변수:
-- `CHROMA_URL=http://localhost:8080` (이미 있음 — 운영 시 NCP 서버 IP로 교체)
-- `CHROMA_TOKEN=` (토큰 인증 사용 시)
-- `EMBEDDING_MODEL=openai/text-embedding-3-small`
-- `OPENAI_API_KEY=...` (임베딩 직접 호출용 — OpenRouter는 임베딩 미지원이면 추가 필요)
+Redis 역할:
 
-requirements.txt 추가:
-- `chromadb-client==0.5.x` (서버 분리, client만)
-- `openai==1.x.x` (이미 있을 수 있음 — 확인 필요)
-- (옵션 BGE-M3 도입 시) `sentence-transformers==3.x.x` + `torch`
-
-## 운영 환경 배치 (NCP 서버 + Docker 셀프 호스트)
-
-### 배치 결정
-
-- ChromaDB도 Redis와 같은 패턴 — **NCP 일반 서버 인스턴스 위에 Docker로 셀프 호스트**
-- Chroma Cloud(매니지드)는 베타 단계 + NCP와 다른 리전이라 latency↑로 채택 안 함
-- 별도 매니지드 vector DB(Qdrant Cloud / Pinecone / Weaviate Cloud)는 코드 변경 필요해 채택 안 함
-- Redis와 같은 NCP 서버에 docker compose로 함께 띄우는 것을 1순위 — 트래픽 작은 초기에 운영 일원화
-- 트래픽/메모리 압박 보이면 후속에 ChromaDB만 별도 서버로 분리
-
-### 운영 docker-compose 예시 (인프라 팀 참고용)
-
-Redis와 같은 서버에 함께 띄울 경우:
-
-```yaml
-services:
-  redis:
-    # debate-runtime-infrastructure-plan.md 참고
-
-  chroma:
-    image: chromadb/chroma:latest
-    container_name: tickertaka-chroma-prod
-    restart: unless-stopped
-    command: ["run", "--host", "0.0.0.0", "--port", "8080"]
-    ports:
-      - "8080:8080"  # 사설망 운영이면 bind 사설 IP만
-    volumes:
-      - /var/lib/tickertaka/chroma:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      # 토큰 인증 (운영 권장)
-      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
-      - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_TOKEN}
-    healthcheck:
-      # ChromaDB 0.6+ 부터 v1 API deprecated → v2 사용
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/heartbeat"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+```text
+sync lock
+cooldown
+일일 API 호출량 counter
+토론 임시 상태
+rate limit
+intraday quote cache
 ```
 
-### 운영 시 결정 항목
+현재 실제 사용 중:
 
-1. **영속 볼륨**
-   - ChromaDB 0.5+ 는 SQLite + parquet 조합으로 디스크 저장
-   - 호스트 디렉토리 마운트(`/var/lib/tickertaka/chroma`) 필수
-   - 컨테이너 재기동 시 데이터 유지
-2. **인증**
-   - ChromaDB 기본은 인증 없음 → 공인망 노출 시 위험
-   - 사설망(VPC 내부)이면 인증 생략 가능 (관행)
-   - 공인망 노출 시 **token authn 필수** (`CHROMA_SERVER_AUTHN_PROVIDER` + `CHROMA_SERVER_AUTHN_CREDENTIALS`)
-   - 클라이언트는 `chromadb.HttpClient(host=..., headers={"X-Chroma-Token": "..."})` 형태로 전달
-3. **메모리 / 디스크 추정**
-   - 본 프로젝트 추정:
-     - News + Filing 본문 약 종목당 ~30 문서 × 500 토큰 × 1536차원(float32) = ~6KB/문서
-     - 100종목 = 3,000 문서 × 6KB ≈ 18MB 벡터 데이터
-     - 메타데이터 + 인덱스 + 본문 텍스트 별도 ≈ 100~200MB
-   - **메모리 1GB / 디스크 5GB 인스턴스로 충분** (여유 포함)
-   - 1만 종목 확장 시 ~2GB 벡터 + ~2GB 인덱스 예상 → 메모리 4GB로 증설
-4. **포트 / 네트워크**
-   - 사설망: `bind` 사설 IP만 listen
-   - 공인 IP: NCP ACG에서 API 서버 IP만 허용
-   - 운영 시 HTTPS 종결(nginx 등)을 앞에 둘 수도 있으나 초기는 사설망 평문 권장
-5. **백업**
-   - `/var/lib/tickertaka/chroma` 디렉토리 통째로 백업
-   - **운영 중 백업 시 ChromaDB 일시 정지 권장** (SQLite write lock 회피)
-   - 또는 ChromaDB 자체 snapshot API 활용 (0.5+ 일부 버전)
-   - 백업 대상: NCP Object Storage 등 외부 저장소
-6. **모니터링**
-   - `/api/v2/heartbeat` 엔드포인트 ping (healthcheck에 이미 포함, v1은 0.6+ deprecated)
-   - 디스크 사용량 추적 (성장 곡선)
-   - 컬렉션별 document 수 (`collection.count()`)
-   - 임베딩 호출 횟수 / 비용
+- `NewsIngestionService`
+  - `news-sync:lock:{symbol}`
+  - `news-sync:last-sync:{symbol}`
+  - `naver-api-count:{YYYY-MM-DD}`
+- `NewsCacheScheduler`
+  - sweep last-run 기록
 
-### 로컬 개발 환경과의 분리
+후속 적용 예정:
 
-- 로컬은 기존 `docker-compose.yml`의 `chromadb/chroma:latest` 그대로 사용 (인증 없음, 영속화는 `chromadata` 볼륨)
-- 운영 서버는 위의 운영 compose로 띄움 (인증 + 영속 디렉토리 + healthcheck)
-- API 서버는 `.env`(운영) / `.env.local`(로컬 개발) 중 어느 한 곳의 `CHROMA_URL`/`CHROMA_TOKEN`을 읽어 자동 분기
+- `filing-sync:lock:{symbol}`
+- `filing-sync:last-sync:{symbol}`
+- `dart-api-count:{YYYY-MM-DD}`
 
-### `.env` 운영/로컬 분리 예시
+로컬 개발에서는 각자 Redis를 쓰므로 팀 전체 lock은 보장하지 않는다.
+
+```text
+A PC Redis lock != B PC Redis lock
+```
+
+따라서 동시에 같은 종목을 수집할 수는 있다. 대신 PostgreSQL의 unique/upsert로 최종 row 중복은 방어한다.
+
+## Chroma 인덱싱 시점
+
+현재 전제에서는 공용 ChromaDB가 없으므로, cache sync 직후 Chroma upsert를 항상 강제하지 않는다.
+
+초기 구현 방식:
+
+```text
+수동 reindex 스크립트 우선
+```
+
+예시:
 
 ```bash
-# 로컬 개발 (.env.local — git 무시)
-CHROMA_URL=http://localhost:8080
-
-# 운영 서버 (.env — git 무시, 운영 서버에만 배치)
-CHROMA_URL=http://10.0.x.x:8080
-CHROMA_TOKEN=STRONG_RANDOM_TOKEN
+python -m scripts.reindex_local_chroma --symbol 005930
+python -m scripts.reindex_local_chroma --source filing --symbol 005930
 ```
 
-### 코드 측 영향
+후속으로 가능:
 
-거의 없음. ChromaDB Python client는 다음과 같이 환경 변수에서 URL/토큰을 받아 처리:
+```text
+watchlist background sync 종료 후 로컬 Chroma upsert
+```
+
+단, 이 경우에도 각자 PC에서 실행 중인 API 프로세스의 로컬 Chroma에만 저장된다.
+
+## Retrieval 흐름
+
+토론 시점에는 로컬 ChromaDB에서 evidence를 검색한다.
+
+```text
+1. 사용자/종목/카테고리 입력
+2. 카테고리별 query 생성
+3. 로컬 Chroma filing collection 검색
+4. metadata filter로 symbol 제한
+5. Chroma 결과의 source_id로 공용 PostgreSQL metadata 조회
+6. LLM에는 Chroma document text 제공
+7. UI에는 PostgreSQL title/source_url 제공
+```
+
+카테고리별 검색 후보:
+
+```text
+technical: price/technical SQL 보조, news evidence는 다른 담당 구현 후 연동
+financial: filing 중심 + financial_cache SQL 보조
+market: news evidence는 다른 담당 구현 후 연동
+```
+
+## 동기화 / 재생성 정책
+
+각자 로컬 Chroma는 공용 SOT가 아니다. 언제든 재생성 가능해야 한다.
+
+재생성 기준:
+
+```text
+공용 PostgreSQL cache row
++ source_url / dart_receipt_no
++ 현재 본문 추출 코드
++ 현재 embedding model
+```
+
+필요 스크립트:
+
+```bash
+python -m scripts.reindex_local_chroma --symbol 005930
+python -m scripts.reindex_local_chroma --reset --symbol 005930
+```
+
+삭제 정책:
+
+- PostgreSQL row가 삭제되었는데 로컬 Chroma에는 남아 있을 수 있다.
+- 로컬 개발 환경에서는 큰 문제가 아니다.
+- `--reset` 옵션으로 collection 또는 symbol 단위 삭제 후 재생성한다.
+
+## 로컬 개발 실행 방식
+
+각 개발자 PC에서 실행:
+
+```bash
+docker compose up -d redis chroma
+```
+
+`.env` 또는 `.env.local`:
+
+```env
+DATABASE_URL=postgresql://stock_user:tickertaka@101.79.19.53:5432/stock_debate
+REDIS_URL=redis://localhost:6379/0
+CHROMA_URL=http://localhost:8080
+CHROMA_TOKEN=
+```
+
+검증:
+
+```bash
+python -m scripts.validate_redis_integration
+python -m scripts.validate_chroma_connection
+python -m scripts.reindex_local_chroma --symbol 005930
+python -m scripts.validate_evidence_retrieval --symbol 005930
+```
+
+## 구현 상세 설계
+
+이번 구현의 핵심은 **공용 PostgreSQL에는 metadata만 유지하고, 본문/embedding은 로컬 ChromaDB에 재생성 가능하게 저장**하는 것이다.
+
+구현은 다음 순서로 진행한다.
+
+```text
+1. 로컬 ChromaDB 연결 wrapper
+2. embedding 생성 wrapper
+3. DART 공시 본문 추출
+4. PostgreSQL cache row -> Chroma document 변환
+5. 로컬 reindex 스크립트
+6. 토론 evidence retrieval 함수
+```
+
+### 1. ChromaDB wrapper
+
+파일:
+
+```text
+app/external/chroma_client.py
+```
+
+역할:
+
+```text
+CHROMA_URL을 읽어서 로컬 ChromaDB에 연결
+collection 생성/조회
+document upsert
+document 조회
+similarity query
+symbol/source 단위 delete
+heartbeat 검증
+```
+
+예상 인터페이스:
 
 ```python
-import chromadb
-client = chromadb.HttpClient(
-    host=settings.chroma_url,
-    headers={"X-Chroma-Token": settings.chroma_token} if settings.chroma_token else None,
+class ChromaClient:
+    def heartbeat(self) -> bool: ...
+    def get_or_create_collection(self, name: str): ...
+    def upsert_documents(self, collection_name: str, documents: list[ChromaDocument]) -> None: ...
+    def get_documents(self, collection_name: str, ids: list[str]) -> list[ChromaDocument]: ...
+    def query(
+        self,
+        collection_name: str,
+        query_embedding: list[float],
+        where: dict,
+        limit: int,
+    ) -> list[ChromaSearchResult]: ...
+    def delete_by_ids(self, collection_name: str, ids: list[str]) -> None: ...
+    def delete_by_symbol(self, collection_name: str, symbol: str) -> None: ...
+```
+
+주의:
+
+```text
+ChromaDB는 각자 로컬 Docker이므로 실패해도 PostgreSQL metadata 적재를 망가뜨리면 안 된다.
+reindex 스크립트에서는 실패를 명확히 출력하고 종료한다.
+watchlist background task에 붙이는 경우에는 fail-soft 처리한다.
+```
+
+### 2. Embedding wrapper
+
+파일:
+
+```text
+app/external/embedding.py
+```
+
+역할:
+
+```text
+EMBEDDING_PROVIDER / EMBEDDING_MODEL 읽기
+텍스트 batch embedding 생성
+HuggingFace local embedding 기본 사용
+OpenAI embedding 선택 지원
+429 / 5xx retry
+긴 본문 truncate 또는 chunking 전처리
+```
+
+예상 인터페이스:
+
+```python
+class EmbeddingClient:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_query(self, query: str) -> list[float]: ...
+```
+
+초기 모델:
+
+```text
+jhgan/ko-sroberta-multitask
+```
+
+환경 변수:
+
+```env
+EMBEDDING_PROVIDER=huggingface
+EMBEDDING_MODEL=jhgan/ko-sroberta-multitask
+```
+
+### 3. DART 공시 본문 추출
+
+파일:
+
+```text
+app/external/dart.py
+```
+
+현재 상태:
+
+```text
+corpCode.xml 조회 가능
+list.json으로 공시 목록 조회 가능
+DART viewer source_url 생성 가능
+document.xml 본문 조회는 아직 없음
+```
+
+추가할 기능:
+
+```python
+class DartClient:
+    def fetch_document_xml(self, receipt_no: str) -> bytes: ...
+    def extract_document_text(self, document_xml_zip: bytes) -> str: ...
+    def fetch_filing_text(self, receipt_no: str) -> str: ...
+```
+
+처리 흐름:
+
+```text
+1. dart_receipt_no로 DART document.xml API 호출
+2. 응답 ZIP 파일 열기
+3. 내부 XML 파일 읽기
+4. XML/HTML tag 제거
+5. 공백 정리
+6. 너무 짧거나 비어 있으면 indexing skip
+```
+
+저장 위치:
+
+```text
+PostgreSQL filing_cache.content에는 저장하지 않음
+로컬 ChromaDB document에만 저장
+```
+
+### 4. Evidence indexing domain
+
+파일:
+
+```text
+app/domain/evidence_indexing.py
+```
+
+역할:
+
+```text
+PostgreSQL cache row를 Chroma document 형식으로 변환
+본문 추출
+청킹
+embedding 생성
+Chroma upsert
+```
+
+예상 인터페이스:
+
+```python
+class EvidenceIndexer:
+    def index_filing_rows(self, rows: list[FilingCache]) -> IndexingResult: ...
+    def reindex_symbol(self, symbol: str, source: str | None = None, force: bool = False) -> IndexingResult: ...
+    def reset_symbol(self, symbol: str, source: str | None = None) -> None: ...
+```
+
+공시 document 생성 규칙:
+
+```text
+collection = filing
+document_id = filing:{filing_cache.id}
+document = filing_title + "\n\n" + extracted_dart_text
+metadata.source_id = filing_cache.id
+metadata.source_type = filing
+metadata.symbol = filing_cache.symbol
+metadata.dart_receipt_no = filing_cache.dart_receipt_no
+metadata.filing_title = filing_cache.filing_title
+metadata.source_url = filing_cache.source_url
+metadata.published_at = disclosed_at ISO string
+metadata.chunk_idx = 0
+```
+
+skip 조건:
+
+```text
+본문 추출 실패
+본문 길이 너무 짧음
+source_url / dart_receipt_no 없음
+이미 같은 document_id가 있고 force=false
+```
+
+### 5. 로컬 reindex 스크립트
+
+파일:
+
+```text
+scripts/reindex_local_chroma.py
+```
+
+목적:
+
+```text
+각 개발자가 공용 PostgreSQL metadata를 기준으로 자기 로컬 ChromaDB를 재생성한다.
+```
+
+명령 예시:
+
+```bash
+python -m scripts.reindex_local_chroma --symbol 005930
+python -m scripts.reindex_local_chroma --symbol 005930 --source filing
+python -m scripts.reindex_local_chroma --symbol 005930 --force
+python -m scripts.reindex_local_chroma --symbol 005930 --reset
+```
+
+동작:
+
+```text
+1. DATABASE_URL로 공용 PostgreSQL 연결
+2. symbol 기준 filing_cache row 조회
+3. 로컬 ChromaDB heartbeat 확인
+4. DART 공시 본문 추출
+5. embedding 생성
+6. Chroma upsert
+7. inserted / skipped / failed 카운트 출력
+```
+
+출력 예:
+
+```text
+[REINDEX] source=filing symbol=005930 rows=10 indexed=8 skipped=1 failed=1
+[SKIP] filing:... already exists
+[FAIL] receipt_no=... document.xml empty
+```
+
+### 6. Retrieval domain
+
+파일:
+
+```text
+app/domain/evidence_retrieval.py
+```
+
+역할:
+
+```text
+토론 agent가 사용할 evidence 후보를 로컬 ChromaDB에서 검색하고,
+PostgreSQL metadata를 붙여서 반환한다.
+```
+
+예상 인터페이스:
+
+```python
+class EvidenceRetriever:
+    def retrieve(
+        self,
+        symbol: str,
+        category: str,
+        limit: int = 5,
+    ) -> list[EvidenceItem]: ...
+```
+
+반환 구조:
+
+```python
+class EvidenceItem:
+    source_id: str
+    source_type: str
+    symbol: str
+    title: str
+    source_url: str
+    text: str
+    score: float
+```
+
+검색 흐름:
+
+```text
+1. category에 맞는 query 생성
+2. query embedding 생성
+3. filing collection 검색
+4. where={"symbol": symbol} filter 적용
+5. Chroma result의 source_id로 PostgreSQL metadata 조회
+6. LLM에는 text 전달
+7. UI에는 title/source_url 전달
+```
+
+카테고리별 우선순위:
+
+```text
+technical = price/technical SQL 보조, news는 다른 담당 구현 후 연동
+financial = filing 우선 + financial_cache SQL 보조
+market = news는 다른 담당 구현 후 연동
+```
+
+## 구현 순서
+
+1차 구현 범위:
+
+```text
+Chroma wrapper
+Embedding wrapper
+DART filing 본문 추출
+filing 전용 reindex
+filing retrieval smoke test
+```
+
+2차 구현 범위:
+
+```text
+뉴스 담당 구현물과 filing retrieval 연동
+category별 source mix
+LangGraph agent context 연결
+```
+
+3차 구현 범위:
+
+```text
+watchlist background sync 종료 후 선택적 로컬 Chroma upsert
+reset/reconcile 스크립트 보강
+검색 품질 튜닝
+```
+
+## 뉴스 담당자에게 요청할 내용
+
+뉴스는 이 계획의 1차 구현 범위가 아니지만, 최종 RAG 검색에서는 `filing` collection과 `news` collection을 함께 조회해야 한다. 따라서 뉴스 담당자는 아래 인터페이스와 규칙을 맞춰 구현한다.
+
+### 1. 같은 로컬 ChromaDB를 사용
+
+```text
+ChromaDB 서버를 source별로 따로 띄우지 않는다.
+개발자별 로컬 ChromaDB 인스턴스 하나를 사용한다.
+뉴스는 같은 ChromaDB 안의 news collection에 저장한다.
+```
+
+구조:
+
+```text
+localhost:8080 ChromaDB
+├─ collection: filing   # 공시 담당 구현
+└─ collection: news     # 뉴스 담당 구현
+```
+
+### 2. 공통 wrapper 사용
+
+뉴스 담당자는 별도 Chroma 연결 코드를 새로 만들지 않고, 공통 wrapper를 사용한다.
+
+공통 파일:
+
+```text
+app/external/chroma_client.py
+app/external/embedding.py
+```
+
+사용 형태:
+
+```python
+chroma.upsert_documents(
+    collection_name="news",
+    documents=news_documents,
 )
 ```
 
-`app/config.py`에 `chroma_token: str = Field(default="", alias="CHROMA_TOKEN")` 한 줄만 추가하면 됨.
+### 3. news collection document 규칙
 
-### 인프라 팀에 요청할 정보
+뉴스 document id:
 
-- ChromaDB 호스트(IP/도메인) / 포트
-- 토큰 (또는 인증 없는 사설망 운영 여부)
-- 사설망 내부 IP인지 공인 IP인지
-- 영속 디렉토리 마운트 경로 (백업 운영용)
-- Redis와 같은 서버 공존 여부 (자원 분배)
+```text
+news:{news_cache.id}
+```
+
+청킹 시:
+
+```text
+news:{news_cache.id}:chunk:{idx}
+```
+
+document 본문:
+
+```text
+news_cache.title + "\n\n" + 뉴스 본문 텍스트
+```
+
+metadata 필수 필드:
+
+```text
+source_id = news_cache.id
+source_type = news
+symbol = news_cache.symbol
+title = news_cache.title
+source_url = news_cache.source_url
+published_at = news_cache.published_at ISO string
+chunk_idx = 0
+```
+
+예시:
+
+```json
+{
+  "id": "news:2ad25a4d-8c8a-4fd8-8e52-3f4b0b0f2d10",
+  "document": "삼성전자, 반도체 실적 개선 기대\n\n...뉴스 본문...",
+  "metadata": {
+    "source_id": "2ad25a4d-8c8a-4fd8-8e52-3f4b0b0f2d10",
+    "source_type": "news",
+    "symbol": "005930",
+    "title": "삼성전자, 반도체 실적 개선 기대",
+    "source_url": "https://...",
+    "published_at": "2026-05-22T09:00:00+09:00",
+    "chunk_idx": 0
+  }
+}
+```
+
+### 4. 뉴스 담당자가 제공해야 할 함수
+
+최소 제공 함수:
+
+```python
+def index_news_rows(rows: list[NewsCache], force: bool = False) -> IndexingResult:
+    ...
+```
+
+또는 서비스 형태:
+
+```python
+class NewsEvidenceIndexer:
+    def index_news_rows(self, rows: list[NewsCache], force: bool = False) -> IndexingResult: ...
+    def reindex_symbol(self, symbol: str, force: bool = False) -> IndexingResult: ...
+```
+
+필요 동작:
+
+```text
+1. news_cache row 조회
+2. source_url 기준 뉴스 본문 추출
+3. title + 본문으로 document 생성
+4. embedding 생성
+5. collection_name="news"로 Chroma upsert
+6. 이미 같은 document_id가 있으면 force=false일 때 skip
+```
+
+### 5. Retrieval 연동을 위한 반환 계약
+
+최종 retrieval에서 `filing`과 `news` 결과를 합치려면 source metadata key가 맞아야 한다.
+
+반드시 맞출 필드:
+
+```text
+source_id
+source_type
+symbol
+source_url
+published_at
+chunk_idx
+```
+
+source별 title 필드:
+
+```text
+news: title
+filing: filing_title
+```
+
+retrieval에서 통일할 때는 둘 다 `EvidenceItem.title`로 매핑한다.
+
+### 6. 뉴스 담당자에게 전달할 요약
+
+```text
+ChromaDB는 따로 만들지 말고 같은 로컬 ChromaDB를 사용해주세요.
+collection_name만 news로 넣으면 됩니다.
+document_id는 news:{news_cache.id} 형식으로 맞춰주세요.
+metadata에는 source_id, source_type, symbol, source_url, published_at, chunk_idx를 반드시 넣어주세요.
+embedding wrapper와 Chroma wrapper는 공통 코드를 사용해주세요.
+뉴스 본문 추출과 news_cache -> news document 변환은 뉴스 담당 쪽에서 구현해주세요.
+```
 
 ## 구현 단계
 
-### Phase 1. ChromaDB wrapper + 임베딩 API
+### Phase 1. ChromaDB wrapper + embedding wrapper
 
-목표:
-- `app/external/chroma_client.py` — `get_collection(name)` / `upsert(documents)` / `query(query_text, where, k)` / `delete(ids)`
-- `app/external/embedding.py` — OpenAI 임베딩 호출 + 재시도
+파일:
 
-산출물:
-- `scripts/validate_chroma_connection.py` — chroma ping + collection 생성 + upsert/query/delete
+- `app/external/chroma_client.py`
+- `app/external/embedding.py`
 
-### Phase 2. NewsCache adapter
+기능:
 
-목표:
-- `NewsIngestionService.sync_news_for_ticker` 끝에 신규/갱신 row를 ChromaDB에 upsert
-- `news_repo.delete_*` / cleanup 호출 직후 ChromaDB delete
+- Chroma heartbeat
+- collection 생성/조회
+- upsert
+- query
+- get by id
+- delete
+- HuggingFace/OpenAI embedding batch 호출
+- retry/backoff
 
-산출물:
+검증:
+
+```bash
+python -m scripts.validate_chroma_connection
+```
+
+### Phase 2. 본문 추출 adapter
+
+News:
+
+- `source_url`에서 본문 스크래핑
+- 기존 `article_scraper` 재사용
+
+Filing:
+
+- DART `document.xml` 호출
+- ZIP 내부 XML 파싱
+- plain text 추출
+
+파일:
+
+- `app/external/dart.py`
 - `app/domain/evidence_indexing.py`
-- `scripts/validate_evidence_indexing_news.py` — sync 후 collection 내 document 수 확인
 
-### Phase 3. FilingCache adapter
+### Phase 3. 로컬 Chroma reindex 스크립트
 
-Phase 2와 동일 구조, collection만 `filing`.
+파일:
 
-### Phase 4. Retrieval API
+- `scripts/reindex_local_chroma.py`
 
-목표:
-- 토론 도메인이 호출하는 `retrieve_evidence(symbol, category, k)` 함수
-- LangGraph node에서 사용
+기능:
 
-산출물:
+- PostgreSQL에서 cache row 조회
+- Chroma에 이미 있는 id는 skip
+- `--force`면 재조회/upsert
+- `--reset`이면 symbol/source 단위 삭제 후 재생성
+- News/Filing source 선택 가능
+
+### Phase 4. Retrieval API / domain 함수
+
+파일:
+
 - `app/domain/evidence_retrieval.py`
-- `scripts/validate_evidence_retrieval.py` — 알려진 기사로 의미 검색 품질 점검
+- `scripts/validate_evidence_retrieval.py`
 
-### Phase 5. Cleanup 동기화
+기능:
 
-목표:
-- Cache cleanup sweep과 ChromaDB delete가 1:1 동기화
+- symbol/category 기준 query 생성
+- Chroma similarity search
+- source quota/fallback
+- PostgreSQL metadata lookup
+- LLM context용 evidence text 반환
 
-산출물:
-- 각 `*CacheSchedulerService.run_*_cleanup`이 삭제된 ID 리스트를 evidence_indexer에 전달
+### Phase 5. 정리/검증
 
-## 관측성과 로그
+검증 항목:
 
-최소 구조화 로그:
-- collection별 document 수 (주기적)
-- 임베딩 호출 건수 / 비용 추정
-- 청크 평균 크기 / 청크 수
-- 검색 응답 latency (p50/p95)
-- delete 동기화 누락 건수 (PostgreSQL row 없는데 ChromaDB에는 남은 케이스)
+- 로컬 Chroma에 filing document upsert
+- `symbol=005930` metadata filter 검색
+- 검색 결과의 `source_url`이 DART viewer URL인지 확인
+- 같은 PostgreSQL row 기준 reindex 재실행 시 중복 document가 생기지 않음
+- `--reset` 후 재생성 가능
 
-추가 운영 지표:
-- 토론 evidence로 채택된 document 분포 (어떤 source가 자주 선택되는지)
-- 검색 결과 빈 응답 비율 (cache가 비어 있는 종목)
+## FAISS / pgvector / Chroma 비교 결론
 
-## 향후 확장 후보
+| 선택지 | 판단 |
+| --- | --- |
+| FAISS | 벡터 검색은 빠르지만 metadata/document/persistence/delete 동기화를 직접 구현해야 해서 현재 목적에는 과함 |
+| pgvector | PostgreSQL 하나로 단순하지만, 현재는 PG에 본문을 두지 않고 개인별 RAG 인덱스를 쓰는 구조라 우선순위 낮음 |
+| ChromaDB | document + embedding + metadata를 같이 다룰 수 있어 RAG 개발에 가장 편함 |
+| Qdrant | 운영/성능은 좋지만 배포 없는 현재 단계에서는 인프라가 무거움 |
 
-- 하이브리드 검색: BM25(키워드) + dense embedding 결합 + rerank
-- Cross-encoder rerank: top-K를 LLM이나 reranker로 재정렬
-- 다국어 모델 도입: 영문 기사 / 해외 종목 지원
-- 임베딩 모델 self-host 이전 (비용)
-- relevance feedback (사용자가 평가한 evidence를 가중치로 활용)
-- 시간 가중 검색: 최근 기사에 가산점
-- collection 단위 partition: 종목 수가 1만 이상으로 늘면 symbol prefix 단위로 collection 분할
+결론:
 
-## 결론
+```text
+배포 없는 현재 단계:
+공용 PostgreSQL + 개인 로컬 ChromaDB + 개인 로컬 Redis
 
-확정 내용:
-- ChromaDB self-host (docker-compose), 1:1 동기화로 PostgreSQL 보완
-- collection 단위는 데이터 타입(news/filing), symbol은 metadata filter
-- 임베딩 모델 OpenAI `text-embedding-3-small`로 시작
-- 청킹은 1500자 초과 시 ~500 토큰 + 50 overlap
-- 인덱싱은 cache sync 직후 동기 upsert (옵션 A)
-- TTL/삭제는 cache cleanup과 동시 ChromaDB delete
-- 검색은 카테고리별 query → top-K → metadata filter → LangGraph context 주입
-- Phase 1~5 순차 구현, Phase 4부터는 토론 도메인 plan과 연계
+운영 배포가 필요해지는 후속 단계:
+공용 ChromaDB 또는 Qdrant 서버로 이전 검토
+```
+
+## 닫힘 기준
+
+- [ ] 로컬 ChromaDB heartbeat 검증
+- [ ] HuggingFace embedding wrapper 검증
+- [ ] DART filing 본문 추출 검증
+- [ ] `filing_cache.content`는 계속 `NULL` 유지
+- [ ] filing document가 로컬 Chroma `filing` collection에 upsert됨
+- [ ] `symbol` metadata filter 검색 가능
+- [ ] 검색 결과에서 PostgreSQL metadata와 Chroma document를 함께 조합 가능
+- [ ] `scripts/reindex_local_chroma.py`로 개인 로컬 Chroma를 재생성 가능
