@@ -38,6 +38,7 @@ Thumbs.db
 
 pgdata/
 chromadata/
+vector_store/
 *.pid
 *.log
 *.rdb
