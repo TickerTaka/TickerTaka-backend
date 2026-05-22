@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     redis_url:   str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     chroma_url:  str = Field(default="http://localhost:8080",    alias="CHROMA_URL")
     chroma_token: str = Field(default="",                        alias="CHROMA_TOKEN")
+    embedding_provider: str = Field(default="huggingface", alias="EMBEDDING_PROVIDER")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    embedding_model: str = Field(default="jhgan/ko-sroberta-multitask", alias="EMBEDDING_MODEL")
 
     # OpenRouter
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")
