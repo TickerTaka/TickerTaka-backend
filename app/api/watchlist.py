@@ -13,6 +13,7 @@ from app.domain.watchlist_service import (
     UserNotFoundError,
     WatchlistAlreadyExistsError,
     WatchlistService,
+    sync_watchlist_filings,
     sync_watchlist_news,
 )
 from app.schemas.watchlist import (
@@ -66,6 +67,7 @@ def create_watchlist(
 
     try:
         background_tasks.add_task(sync_watchlist_news, watchlist.symbol)
+        background_tasks.add_task(sync_watchlist_filings, watchlist.symbol)
         sync_enqueued = True
     except Exception:
         logger.exception("failed to enqueue watchlist sync for %s", watchlist.symbol)

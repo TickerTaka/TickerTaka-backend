@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core.db import session_scope
+from app.domain.filing_ingestion import FilingIngestionService
 from app.domain.news_ingestion import NewsIngestionService
 from app.models import Watchlist
 from app.repositories.watchlist_repository import WatchlistRepository
@@ -68,3 +69,22 @@ def sync_watchlist_news(symbol: str) -> None:
             )
     except Exception:
         logger.exception("watchlist background sync failed for %s", symbol)
+
+
+def sync_watchlist_filings(symbol: str) -> None:
+    try:
+        with session_scope() as session:
+            service = FilingIngestionService(session)
+            result = service.sync_filings_for_ticker(symbol)
+            logger.info(
+                "watchlist filing sync finished",
+                extra={
+                    "symbol": symbol,
+                    "fetched": result.fetched_count,
+                    "inserted": result.inserted_count,
+                    "updated": result.updated_count,
+                    "skipped": result.skipped_count,
+                },
+            )
+    except Exception:
+        logger.exception("watchlist filing sync failed for %s", symbol)
