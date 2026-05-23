@@ -50,8 +50,9 @@
 
 선택:
 - 초기 구현은 **단일회사 주요계정 API** 사용 — 매출/영업이익/당기순이익/자산/부채/자본 핵심 9계정만 필요
-- PER/PBR/ROE/debt_ratio는 계산 가능 (PER/PBR은 가격이 필요 → PriceCache 의존)
-- 첫 적재에는 PER/PBR/ROE를 NULL로 두고, 후속 단계에서 가격 캐시와 함께 계산
+- ROE/debt_ratio는 재무제표만으로 계산 가능
+- PER/PBR은 가격이 필요 → PriceCache 의존
+- 초기 적재에서는 **ROE/debt_ratio만 채우고**, `PER/PBR`은 `NULL` 유지
 
 corp_code 매핑:
 - DART는 8자리 `corp_code`를 기반으로 동작
@@ -141,14 +142,14 @@ cleanup:
 - `source_url` = DART 보고서 viewer URL
 - `retrieved_at`
 
-후속 계산 필드 (Phase 후반에 추가):
+후속 계산 필드 (별도 phase에서 추가):
 - `per` = `close_price` / `net_income_per_share`
 - `pbr` = `close_price` / `total_equity_per_share`
 - `roe` = `net_income` / `total_equity`
 - `debt_ratio` = `total_liabilities` / `total_equity`
 
 계산 시점:
-- PER/PBR은 `price_cache` 의존 → 초기 구현에서는 NULL로 두고, 후속 phase에서 `compute_financial_ratios(symbol)` 별도 호출
+- PER/PBR은 `price_cache` 의존 → 초기 구현에서는 NULL 유지, 후속 phase에서 별도 계산
 - ROE/debt_ratio는 재무제표만으로 계산 가능 → 초기 적재 시 함께 계산
 
 **Valuation date 기준 (PER/PBR 후속 phase 결정 사항)**:
@@ -194,8 +195,8 @@ ORDER BY fiscal_year DESC, fiscal_quarter DESC NULLS LAST LIMIT 4
 
 영향:
 - 본 plan 적재 컬럼이 위 SELECT와 일치 (분기 4개 = 최근 1년치)
-- PER/PBR/ROE/debt_ratio 모두 SELECT 대상 — 본 plan Phase 4 (PER/PBR 보강)가 토론 품질에 직접 영향
-- 초기 적재 시 PER/PBR이 NULL이면 토론에서 "N/A"로 표시됨 — 빨리 채우는 게 유리
+- ROE/debt_ratio는 즉시 사용 가능
+- PER/PBR은 초기에는 `NULL`이며, 후속 valuation phase 전까지 토론에서 `N/A` 처리됨
 - evidence 영구화 시 `evidence.financial_cache_id` 외래 키로 cache row 참조
 
 ## 수집 함수 시그니처
@@ -226,7 +227,7 @@ def compute_financial_ratios(
   8. row 상한 초과분 정리
 - `compute_financial_ratios`:
   1. `financial_cache` + `price_cache` 조인
-  2. PER/PBR 계산
+  2. (후속 phase) PER/PBR 계산
   3. upsert로 보강
 
 반환 예시:
@@ -250,8 +251,8 @@ NewsCache와 동일 구조:
 - 그 직후 또는 02:30에 `--mode cleanup`
 
 PER/PBR 계산 시점:
-- price_cache 갱신 직후(매일 16:00 KST sweep 끝)에 `compute_financial_ratios(symbol)` 호출
-- 또는 financial_cache 갱신과 가격 sweep 후 일괄 처리
+- 별도 valuation phase에서 결정
+- price_cache 갱신 직후 계산 또는 별도 일괄 처리 중 하나로 고정해야 함
 
 ## 구현 단계
 
@@ -294,7 +295,7 @@ PER/PBR 계산 시점:
 3. `run_financial_cleanup()` — row 상한 정리
 4. `scripts/run_financial_cache_scheduler.py` — cron 진입점
 
-### Phase 4. PER/PBR 보강
+### Phase 4. PER/PBR 보강 (후속)
 
 ## 검증/보완 메모 (2026-05-22)
 

@@ -6,7 +6,9 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core.db import session_scope
+from app.domain.financial_ingestion import FinancialIngestionService
 from app.domain.news_ingestion import NewsIngestionService
+from app.domain.price_ingestion import PriceIngestionService
 from app.models import Watchlist
 from app.repositories.watchlist_repository import WatchlistRepository
 
@@ -68,3 +70,37 @@ def sync_watchlist_news(symbol: str) -> None:
             )
     except Exception:
         logger.exception("watchlist background sync failed for %s", symbol)
+
+
+def sync_watchlist_prices(symbol: str) -> None:
+    try:
+        with session_scope() as session:
+            result = PriceIngestionService(session).sync_prices_for_ticker(symbol, mode="initial", force=True)
+            logger.info(
+                "watchlist background price sync finished",
+                extra={
+                    "symbol": symbol,
+                    "fetched": result.fetched_count,
+                    "inserted": result.inserted_count,
+                    "updated": result.updated_count,
+                    "indicators": result.indicators_count,
+                },
+            )
+    except Exception:
+        logger.exception("watchlist background price sync failed for %s", symbol)
+
+
+def sync_watchlist_financials(symbol: str) -> None:
+    try:
+        with session_scope() as session:
+            result = FinancialIngestionService(session).sync_financials_for_ticker(symbol, mode="initial", force=True)
+            logger.info(
+                "watchlist background financial sync finished",
+                extra={
+                    "symbol": symbol,
+                    "fetched_periods": result.fetched_periods,
+                    "saved_rows": result.saved_rows,
+                },
+            )
+    except Exception:
+        logger.exception("watchlist background financial sync failed for %s", symbol)

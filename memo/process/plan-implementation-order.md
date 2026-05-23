@@ -60,8 +60,8 @@
 
 ### `financial-cache-ingestion-plan.md`
 - Phase 0 (corp_code) + Phase 1~3 → **단계 3.2에서 닫힘**
-- Phase 4 (PER/PBR — price 의존) → 단계 3.2 안에서 price_cache 이미 완료 후라 함께 처리 가능
-- 전체 마무리는 **단계 3.2 끝**
+- Phase 4 (PER/PBR — price 의존) → **후속 valuation phase**로 분리
+- 현재 단계 3.2의 닫힘 기준은 **재무 원숫자 + ROE/debt_ratio + scheduler**
 
 ### `filing-cache-ingestion-plan.md`
 - Phase 0 (corp_code) → financial-cache와 공유 (단계 3.2에서 이미 도입)
@@ -109,8 +109,8 @@
         │                       │ corp_code 매핑 공유 │
         │                       └─────────────────────┘
         │
-        │ PER/PBR 계산 의존
-        └──► financial-cache Phase 후반
+        │ 후속 valuation phase 의존
+        └──► financial-cache Phase 4 (별도)
                   │
                   ▼
 [단계 4: 토론 도메인 (별도 plan 작성 후)]
@@ -235,7 +235,7 @@
 - corp_code 매핑 도입 (filing과 공유) — `app/external/dart/corp_code.py`
 - 분기 단위 (변동 빈도 가장 낮음 → corp_code 인프라 안정화에 적합)
 - 5년 백필 (~20분기)
-- ROE/debt_ratio 즉시 계산, PER/PBR은 가격 의존 — price_cache 이미 완료라 함께 처리 가능
+- ROE/debt_ratio 즉시 계산, PER/PBR은 가격 의존이라 후속 valuation phase로 분리
 
 **이 단계 완료 시 상태**:
 - ✅ 닫히는 Phase: `financial-cache Phase 0-4`
@@ -243,14 +243,14 @@
 - 🟡 진행 중: vector-db (~50% 그대로), debate-runtime (~17% 그대로)
 - 📄 봐야 할 plan 문서:
   - `financial-cache-ingestion-plan.md` 전체
-  - (PER/PBR 계산 시) `price-cache-ingestion-plan.md` (가격 의존 부분)
+  - `price-cache-ingestion-plan.md` (가격 의존 배경)
 - 📋 산출물:
   - `app/external/dart/corp_code.py` (corp_code 매핑, filing과 공유)
   - `app/external/dart/client.py` (DART HTTP wrapper)
   - `app/external/dart/financial_account_map.py`
   - `app/repositories/financial_cache_repository.py`
   - `app/domain/financial_ingestion.py`
-  - `app/domain/financial_ratios.py` (PER/PBR 계산)
+  - `app/domain/financial_ratios.py` (ROE/debt_ratio 계산)
   - `app/domain/financial_cache_scheduler.py`
   - `app/domain/watchlist_service.py` 수정 (`sync_watchlist_financials` 추가)
   - `app/api/watchlist.py` 수정
@@ -413,7 +413,7 @@ watchlist 등록 직후 다음이 병렬로 enqueue됨:
 | 2.a | news-cache 옵션 B 전환 (수집 코드) | 1-2일 | news-cache 코드 변경 (PG만, ChromaDB 호출 없음) |
 | 2.b | 로컬 RAG 인덱싱 스크립트 + 첫 reindex | 1일 | `scripts/reindex_local_chroma.py`, `app/domain/evidence_indexing.py` |
 | 3.1 | price-cache + technical_indicator | 2-3일 | pykrx 도입 + 가격/지표 적재 + scheduler |
-| 3.2 | financial-cache + corp_code 인프라 | 2-3일 | DART 클라이언트 + corp_code 매핑 + 재무 적재 + ROE/PER/PBR |
+| 3.2 | financial-cache + corp_code 인프라 | 2-3일 | DART 클라이언트 + corp_code 매핑 + 재무 적재 + ROE/debt_ratio |
 | 3.3 | filing-cache | 2-3일 | DART 공시 + XML 파서 + 옵션 B 일관 적재 (PG만, RAG는 reindex 스크립트 확장) |
 | 4 | 토론 도메인 plan 작성 + 구현 | TBD | 토론 plan + 런타임 Redis 모듈 + retrieval + LangGraph + 토론 endpoint |
 | (후속) | 운영 진입 — 배포 결정 시 별도 plan | TBD | `production-deployment-plan.md` 신설 — NCP 셀프호스트, 백업/복구, 인증/TLS, 공용 ChromaDB 이전, fail-soft+reconcile |

@@ -34,6 +34,7 @@ celery[redis]
 # 데이터
 yfinance==0.2.43
 pandas==2.2.3
+pykrx==1.0.45
 beautifulsoup4==4.12.3
 trafilatura==2.0.0
 
