@@ -138,7 +138,7 @@
 
 초기 통합 범위:
 - `watchlist -> filing ingest`
-- `direct Chroma upsert`
+- `watchlist task 안에서 자동 filing indexing`
 - validation scripts
 
 이번 통합 범위 밖:
@@ -216,7 +216,7 @@ filing은 **news의 옵션 B 정책을 강제하지 않는다.** `hc`의 구현 
 
 작업:
 - `EvidenceIndexingService`에 filing 경로 확장
-- direct upsert 정책 통일
+- watchlist task 안에서 filing indexing 자동 연결
 
 닫힘 기준:
 - filing row → `filing` 컬렉션 임베딩 저장 가능
@@ -306,7 +306,7 @@ news의 옵션 B(direct upsert)를 filing에 강제하지 않는다.
 - `debate_repo.fetch_filing_context()`는 이미 존재함
 - 따라서 이번 통합 범위는:
   - filing row 적재
-  - direct Chroma upsert
+  - watchlist task 안에서 자동 filing indexing
   - filing evidence indexing 검증
   - `debate_repo.fetch_filing_context()`와 컬럼 정합성 확인
 - 이번 통합 범위 밖:
@@ -359,7 +359,7 @@ news의 옵션 B(direct upsert)를 filing에 강제하지 않는다.
 1. 현재/`hc` 중 무엇을 유지하고 무엇을 흡수할지 명확하다.
 2. `app/external/dart/` 패키지 구조 유지에 동의한다.
 3. filing은 `hc` 구현대로 `PG content=NULL`, `summary=NULL` 정책을 유지한다.
-4. filing도 news와 같은 direct upsert 정책으로 맞춘다.
+4. filing 인덱싱은 ingest 함수 본체를 바꾸지 않고, watchlist task에서 자동 연결하는 방식으로 간다.
 5. watchlist 최종 트리거가 `news + price + financial + filing`임을 확정한다.
 6. 검증 스크립트 범위가 metadata ingestion + filing evidence indexing까지 포함됨을 확정한다.
 
