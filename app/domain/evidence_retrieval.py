@@ -20,6 +20,13 @@ from app.repositories.news_cache_repository import NewsCacheRepository
 logger = logging.getLogger(__name__)
 
 _DEFAULT_EXCERPT_LENGTH = 320
+_CATEGORY_QUERY_MAP = {
+    "technical": "{symbol_name} 기술적 분석 차트 이동평균 RSI MACD 거래량 추세",
+    "financial": "{symbol_name} 실적 재무 분기보고서 매출 영업이익 순이익 부채",
+    "market": "{symbol_name} 업황 경쟁사 수요 공급 시장 반응 뉴스 공시",
+    "macro": "{symbol_name} 거시경제 금리 환율 경기 사이클 업황",
+    "synthesis": "{symbol_name} 투자 판단 핵심 리스크 성장 실적 시장",
+}
 
 
 @dataclass(slots=True)
@@ -203,6 +210,32 @@ def search_evidence_for_symbol(
     with session_scope() as session:
         service = EvidenceRetrievalService(session)
         return service.search_symbol_evidence(query=query, symbol=symbol, top_k=top_k)
+
+
+def build_category_query(
+    *,
+    symbol: str,
+    symbol_name: str,
+    category: str,
+) -> str:
+    template = _CATEGORY_QUERY_MAP.get(category, _CATEGORY_QUERY_MAP["synthesis"])
+    return template.format(symbol=symbol, symbol_name=symbol_name or symbol)
+
+
+def format_evidence_context(evidences: list[dict[str, Any]]) -> str:
+    if not evidences:
+        return "[근거 검색] 관련 뉴스/공시 근거 없음"
+
+    lines = ["[근거 검색 요약]"]
+    for index, evidence in enumerate(evidences, start=1):
+        source_type = evidence.get("source_type", "OTHER")
+        title = evidence.get("source_title", "제목 없음")
+        excerpt = evidence.get("excerpt", "")
+        label = evidence.get("source_label") or source_type
+        lines.append(f"{index}. [{source_type}] {title} ({label})")
+        if excerpt:
+            lines.append(f"   - {excerpt}")
+    return "\n".join(lines)
 
 
 def _excerpt_document(document: str, title: str | None) -> str:

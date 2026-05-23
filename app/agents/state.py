@@ -31,6 +31,7 @@ class DebateState(TypedDict):
     agenda:            list[str]
     price_context:     str
     financial_context: str
+    evidence_context:  str
     news_chunks:       list[str]
 
     # 발언 누적 (add 리듀서)

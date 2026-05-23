@@ -31,6 +31,7 @@ BULL_HUMAN = """
 [데이터]
 {price_context}
 {financial_context}
+{evidence_context}
 
 [Bear 직전 발언]
 {last_bear_statement}
@@ -60,6 +61,7 @@ BEAR_HUMAN = """
 [데이터]
 {price_context}
 {financial_context}
+{evidence_context}
 
 [Bull 직전 발언]
 {last_bull_statement}
@@ -78,6 +80,7 @@ MODERATOR_PRE_HUMAN = """
 [데이터]
 {price_context}
 {financial_context}
+{evidence_context}
 
 '{category}' 관점에서 토론할 핵심 쟁점 3가지를 설계하세요.
 
@@ -99,6 +102,7 @@ MODERATOR_CHECK_HUMAN = """
 [실제 데이터]
 {price_context}
 {financial_context}
+{evidence_context}
 
 [검증 항목]
 1. 언급된 수치가 실제 데이터와 일치하는가?
@@ -124,6 +128,7 @@ MODERATOR_SUMMARY_HUMAN = """
 
 [종목] {symbol} ({symbol_name}) — {category}
 {price_context}
+{evidence_context}
 {portfolio_context}
 
 아래 형식으로 요약하세요:

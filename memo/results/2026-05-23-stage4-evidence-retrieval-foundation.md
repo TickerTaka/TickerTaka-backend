@@ -39,6 +39,22 @@
 
 이 변경으로 bull / bear 노드의 ReAct agent는 이제 뉴스/공시 근거를 실제로 검색할 수 있다.
 
+### 4. data_node evidence prefetch 추가
+
+- `app/agents/nodes/data_node.py`
+  - 카테고리별 query template 생성
+  - 토론 시작 시 `top_k=4` evidence를 미리 검색
+  - `evidence_context` 문자열로 요약해 state에 넣음
+  - `news_chunks`도 retrieval 결과 기반으로 우선 구성
+
+- `app/agents/state.py`
+  - `evidence_context` 필드 추가
+
+- `app/agents/prompts/prompts.py`
+  - bull / bear / moderator prompt에 `evidence_context` 주입
+
+이 단계로 토론 프롬프트 자체가 최신 뉴스/공시 근거를 기본 문맥으로 갖게 됐다.
+
 ## 현재 설계 판단
 
 - 이번 단계는 retrieval foundation만 우선 구현했다.
@@ -56,6 +72,20 @@
 ## 남은 작업
 
 - category별 query template / source quota 세분화
-- `data_node`에 retrieval 요약 직접 주입 여부 결정
 - intraday quote Redis 캐싱
 - LLM cache / rate limit / checkpoint
+
+## 후속 진행 - Intraday Quote
+
+- `app/external/quote_client.py`
+  - `YFinanceQuoteClient`
+  - `QuoteSnapshot`
+- `app/domain/intraday_quote.py`
+  - Redis key `quote:latest:{symbol}`
+  - 장중 5분 / 장후 30분 / 주말 24시간 TTL
+- `app/agents/tools/market_tools.py`
+  - `get_stock_price()`가 direct yfinance 대신 `IntradayQuoteService`를 통해 시세 조회
+- `app/agents/nodes/data_node.py`
+  - DB에 가격 데이터가 없을 때 intraday quote + yfinance 기술지표 폴백 조합 사용
+- `scripts/validate_intraday_quote.py`
+  - Fake Redis / Fake QuoteClient로 cache hit + stale refresh 검증

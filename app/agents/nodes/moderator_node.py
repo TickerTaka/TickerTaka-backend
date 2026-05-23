@@ -40,6 +40,7 @@ def moderator_pre_node(state: DebateState) -> dict:
         category=state["category"],
         price_context=state["price_context"],
         financial_context=state["financial_context"],
+        evidence_context=state["evidence_context"],
     ))
     parsed = _parse(raw, {"agenda": ["쟁점1", "쟁점2", "쟁점3"]})
     return {
@@ -63,6 +64,7 @@ def moderator_check_node(state: DebateState) -> dict:
         category=state["category"],
         price_context=state["price_context"],
         financial_context=state["financial_context"],
+        evidence_context=state["evidence_context"],
     ), temp=0.1)
     parsed  = _parse(raw, {"verdict": "ok", "note": "", "corrected_fact": ""})
     verdict = parsed.get("verdict", "ok")
@@ -108,6 +110,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
         symbol=state["symbol"], symbol_name=state["symbol_name"],
         category=state["category"],
         price_context=state["price_context"],
+        evidence_context=state["evidence_context"],
         portfolio_context=port_ctx,
     ), temp=0.4)
     parsed  = _parse(raw, {"summary_content": raw, "key_points": []})

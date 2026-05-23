@@ -3,6 +3,12 @@
 from __future__ import annotations
 import logging
 from app.agents.state import DebateState
+from app.domain.evidence_retrieval import (
+    build_category_query,
+    format_evidence_context,
+    search_evidence_for_symbol,
+)
+from app.domain.intraday_quote import IntradayQuoteService
 from app.repositories.debate_repo import (
     fetch_price_context, fetch_financial_context,
     fetch_news_context, fetch_filing_context, fetch_event_timeline,
@@ -20,6 +26,16 @@ async def data_agent_node(state: DebateState) -> dict:
     news     = await fetch_news_context(symbol)
     filings  = await fetch_filing_context(symbol)
     events   = await fetch_event_timeline(symbol)
+    evidence_query = build_category_query(
+        symbol=symbol,
+        symbol_name=state["symbol_name"],
+        category=state["category"],
+    )
+    evidences = search_evidence_for_symbol(
+        query=evidence_query,
+        symbol=symbol,
+        top_k=4,
+    )
 
     price = raw.get("price", {})
     tech  = raw.get("tech",  {})
@@ -31,7 +47,9 @@ async def data_agent_node(state: DebateState) -> dict:
     return {
         "price_context":     _fmt_price(symbol, price, tech, events),
         "financial_context": _fmt_finance(finance),
-        "news_chunks":       [n.get("title","") + " " + (n.get("summary") or "") for n in news]
+        "evidence_context":  format_evidence_context(evidences),
+        "news_chunks":       [ev.get("source_title", "") + " " + (ev.get("excerpt") or "") for ev in evidences]
+                           or [n.get("title","") + " " + (n.get("summary") or "") for n in news]
                            + [f.get("filing_title","") + " " + (f.get("summary") or "") for f in filings],
     }
 
@@ -83,12 +101,18 @@ def _fmt_finance(rows) -> str:
 def _yfinance_fallback(symbol):
     try:
         import yfinance as yf
-        t    = yf.Ticker(symbol)
+
+        quote = IntradayQuoteService().get_latest_quote(symbol)
+        t = yf.Ticker(symbol)
         hist = t.history(period="6mo")
-        if hist.empty: return {}, {}
-        cl   = hist["Close"]
-        l    = hist.iloc[-1]; p = hist.iloc[-2]
-        price = {"close_price": float(l["Close"]), "change_rate": round((l["Close"]-p["Close"])/p["Close"]*100,2), "volume": int(l["Volume"])}
+        if hist.empty:
+            return {}, {}
+        cl = hist["Close"]
+        price = {
+            "close_price": quote.price,
+            "change_rate": quote.change_rate,
+            "volume": quote.volume,
+        }
         tech  = {}
         if len(cl) >= 20: tech["ma20"] = round(float(cl.rolling(20).mean().iloc[-1]),2)
         if len(cl) >= 60: tech["ma60"] = round(float(cl.rolling(60).mean().iloc[-1]),2)
