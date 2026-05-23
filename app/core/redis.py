@@ -37,3 +37,7 @@ def build_redis_client(
 @lru_cache
 def get_redis() -> redis.Redis | None:
     return build_redis_client(get_settings().redis_url)
+
+
+def clear_redis_cache() -> None:
+    get_redis.cache_clear()

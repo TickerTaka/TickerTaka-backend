@@ -55,6 +55,7 @@ class DeterministicEmbeddingClient:
 class OpenAIEmbeddingClient:
     model: str
     api_key: str
+    max_batch_size: int = 32
     _client: object = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -65,7 +66,11 @@ class OpenAIEmbeddingClient:
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
-        return self._embed_batch(list(texts))
+        outputs: list[list[float]] = []
+        text_list = list(texts)
+        for start in range(0, len(text_list), self.max_batch_size):
+            outputs.extend(self._embed_batch(text_list[start : start + self.max_batch_size]))
+        return outputs
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed_batch([text])[0]

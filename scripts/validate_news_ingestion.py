@@ -28,6 +28,7 @@ class ScenarioResult:
     updated: int
     skipped: int
     filtered: int
+    dedup_skipped: int
     body_failed: int
     body_saved: int
     grouped: int
@@ -231,6 +232,7 @@ def to_result(name: str, raw_result, final_rows: int, final_content_rows: int) -
         updated=raw_result.updated_count,
         skipped=raw_result.skipped_count,
         filtered=raw_result.filtered_count,
+        dedup_skipped=raw_result.dedup_skipped_count,
         body_failed=raw_result.body_failed_count,
         body_saved=raw_result.body_saved_count,
         grouped=raw_result.grouped_count,
@@ -337,7 +339,8 @@ def run_duplicate_update_scenario(ticker: TestTicker) -> ScenarioResult:
             expect(result.inserted == 1, "duplicate_update: inserted should be 1")
             expect(result.updated == 0, "duplicate_update: updated should be 0")
             expect(result.skipped == 0, "duplicate_update: skipped should be 0")
-            expect(result.filtered == 2, "duplicate_update: filtered should be 2")
+            expect(result.filtered == 0, "duplicate_update: filtered should be 0")
+            expect(result.dedup_skipped == 2, "duplicate_update: dedup_skipped should be 2")
             expect(result.body_saved == 1, "duplicate_update: body_saved should be 1")
             expect(result.final_rows == 3, "duplicate_update: final_rows should be 3")
             expect(result.final_content_rows == 1, "duplicate_update: final_content_rows should be 1")
@@ -598,6 +601,7 @@ def run_whitespace_variant_scenario() -> ScenarioResult:
         inserted=0,
         updated=0,
         skipped=0,
+        dedup_skipped=0,
         filtered=0,
         body_failed=0,
         body_saved=0,
@@ -799,6 +803,7 @@ def run_metadata_name_match_scenario() -> ScenarioResult:
         inserted=0,
         updated=0,
         skipped=0,
+        dedup_skipped=0,
         filtered=0,
         body_failed=0,
         body_saved=0,
@@ -1008,6 +1013,7 @@ def main() -> None:
                     f"updated={scenario.updated}",
                     f"skipped={scenario.skipped}",
                     f"filtered={scenario.filtered}",
+                    f"dedup_skipped={scenario.dedup_skipped}",
                 ]
             )
         )

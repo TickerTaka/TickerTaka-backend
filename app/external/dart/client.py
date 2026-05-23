@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
+from app.core.redis import get_redis, make_key
 from app.external.dart.financial_account_map import FINANCIAL_ACCOUNT_NAME_MAP
 
 
@@ -15,6 +18,7 @@ REPORT_CODES = {
     3: "11014",
     4: "11011",
 }
+KST = ZoneInfo("Asia/Seoul")
 
 
 @dataclass(slots=True)
@@ -34,6 +38,7 @@ class DartClient:
     def __init__(self, session: requests.Session | None = None) -> None:
         self.settings = get_settings()
         self.session = session or requests.Session()
+        self.redis_client = get_redis()
 
     def fetch_financials(
         self,
@@ -68,7 +73,7 @@ class DartClient:
         payload = None
         selected_div = None
         for fs_div in fs_div_priority:
-            response = self.session.get(
+            response = self._get(
                 "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json",
                 params={
                     "crtfc_key": self.settings.dart_api_key,
@@ -77,9 +82,7 @@ class DartClient:
                     "reprt_code": reprt_code,
                     "fs_div": fs_div,
                 },
-                timeout=30,
             )
-            response.raise_for_status()
             data = response.json()
             if data.get("status") == "000" and data.get("list"):
                 payload = data
@@ -121,3 +124,18 @@ class DartClient:
             total_equity=mapped["total_equity"],
             source_url=source_url,
         )
+
+    @retry(wait=wait_exponential(multiplier=1, min=1, max=8), stop=stop_after_attempt(3), reraise=True)
+    def _get(self, url: str, *, params: dict, timeout: int = 30) -> requests.Response:
+        response = self.session.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        self._record_daily_api_call()
+        return response
+
+    def _record_daily_api_call(self) -> None:
+        if self.redis_client is None:
+            return
+        key = make_key("dart-api-count", datetime.now(KST).date().isoformat())
+        count = self.redis_client.incr(key)
+        if count == 1:
+            self.redis_client.expire(key, 60 * 60 * 48)

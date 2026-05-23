@@ -45,7 +45,6 @@ class EvidenceIndexingService:
         symbol: str,
         *,
         reset: bool = False,
-        force: bool = False,
     ) -> ReindexNewsResult:
         if reset:
             self.chroma_client.delete(where={"symbol": symbol}, name=self.collection_name)
@@ -76,8 +75,11 @@ class EvidenceIndexingService:
                         "source_id": str(row.id),
                         "source_type": "news",
                         "source_url": row.source_url,
-                        "published_at": row.published_at.isoformat() if row.published_at else None,
-                        "force": force,
+                        **(
+                            {"published_at": row.published_at.isoformat()}
+                            if row.published_at
+                            else {}
+                        ),
                     },
                 )
             )
@@ -96,7 +98,6 @@ class EvidenceIndexingService:
         row: NewsCache,
         *,
         content: str,
-        force: bool = False,
     ) -> ChromaDocument:
         document_text = f"{row.title}\n\n{content.strip()}".strip()
         return ChromaDocument(
@@ -107,7 +108,10 @@ class EvidenceIndexingService:
                 "source_id": str(row.id),
                 "source_type": "news",
                 "source_url": row.source_url,
-                "published_at": row.published_at.isoformat() if row.published_at else None,
-                "force": force,
+                **(
+                    {"published_at": row.published_at.isoformat()}
+                    if row.published_at
+                    else {}
+                ),
             },
         )

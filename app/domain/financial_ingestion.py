@@ -25,6 +25,7 @@ class SyncFinancialResult:
 
 class FinancialIngestionService:
     INITIAL_BACKFILL_YEARS = 5
+    REFRESH_LOOKBACK_YEARS = 2
     MAX_CACHE_ROWS = 60
     COOLDOWN_HOURS = 6
     LOCK_TTL_SECONDS = 300
@@ -70,7 +71,10 @@ class FinancialIngestionService:
                 raise ValueError(f"corp code not found for symbol: {symbol}")
 
             current_year = datetime.now(UTC).year
-            years = list(range(current_year - (backfill_years or self.INITIAL_BACKFILL_YEARS) + 1, current_year + 1))
+            lookback_years = backfill_years or (
+                self.INITIAL_BACKFILL_YEARS if mode == "initial" else self.REFRESH_LOOKBACK_YEARS
+            )
+            years = list(range(current_year - lookback_years + 1, current_year + 1))
             records = self.dart_client.fetch_financials(corp_code=corp_code, years=years)
             result.fetched_periods = len(records)
 

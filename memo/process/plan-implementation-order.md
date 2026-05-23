@@ -169,7 +169,7 @@
 | 작업 | 출처 plan | 영향 |
 |---|---|---|
 | evidence_indexing 신설 | vector-db Phase 2 | `app/domain/evidence_indexing.py` (PG row → ChromaDB document 변환 헬퍼) |
-| reindex 스크립트 신설 | vector-db Phase 3 | `scripts/reindex_local_chroma.py` (`--symbol`, `--source`, `--reset`, `--force`, `--all-watchlist`) |
+| reindex 스크립트 신설 | vector-db Phase 3 | `scripts/reindex_local_chroma.py` (`--symbol`, `--source`, `--reset`, `--all-watchlist`) |
 | 첫 reindex 실행 | 같은 plan | direct upsert 이후 복구/백필 경로 검증 |
 
 **왜 두 번째?**

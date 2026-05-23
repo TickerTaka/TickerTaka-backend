@@ -50,6 +50,7 @@ class SyncNewsResult:
     body_attempts_count: int = 0
     body_saved_count: int = 0
     filtered_count: int = 0
+    dedup_skipped_count: int = 0
     trimmed_rows_count: int = 0
     trimmed_content_count: int = 0
     elapsed_ms: int = 0
@@ -153,29 +154,17 @@ class NewsIngestionService:
 
             for candidate in candidates:
                 scraped = body_urls.get(candidate.normalized_url)
+                if candidate.existing is not None:
+                    result.dedup_skipped_count += 1
+                    continue
                 if not self._passes_storage_filters(ticker, candidate, scraped):
                     result.filtered_count += 1
                     continue
-                if candidate.existing is None:
-                    row = self._build_news_row(symbol, candidate, scraped)
-                    self.repo.save(row)
-                    self._upsert_chroma_row(row, scraped)
-                    result.inserted_count += 1
-                    result.body_saved_count += 1
-                else:
-                    if scraped and scraped.content:
-                        candidate.existing.summary = scraped.summary or candidate.existing.summary
-                        candidate.existing.source_name = scraped.source_name or candidate.existing.source_name
-                        candidate.existing.published_at = scraped.published_at or candidate.existing.published_at
-                        candidate.existing.ttl_until = (
-                            (scraped.published_at or candidate.existing.published_at or datetime.now(UTC))
-                            + timedelta(days=30)
-                        )
-                        self._upsert_chroma_row(candidate.existing, scraped)
-                        result.updated_count += 1
-                        result.body_saved_count += 1
-                    else:
-                        result.skipped_count += 1
+                row = self._build_news_row(symbol, candidate, scraped)
+                self.repo.save(row)
+                self._upsert_chroma_row(row, scraped)
+                result.inserted_count += 1
+                result.body_saved_count += 1
 
             trimmed_ids = self.repo.trim_rows_for_symbol_returning_ids(symbol, self.MAX_CACHE_ROWS)
             result.trimmed_rows_count = len(trimmed_ids)
@@ -199,6 +188,7 @@ class NewsIngestionService:
                 "body_quota_saved": result.body_quota_saved_count,
                 "body_attempts": result.body_attempts_count,
                 "body_saved": result.body_saved_count,
+                "dedup_skipped": result.dedup_skipped_count,
                 "trimmed_rows": result.trimmed_rows_count,
                 "trimmed_content": result.trimmed_content_count,
                 "elapsed_ms": result.elapsed_ms,
