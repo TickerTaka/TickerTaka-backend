@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     bear_model:      str = Field(default="meta-llama/llama-3.3-70b-instruct:free", alias="BEAR_MODEL")
     moderator_model: str = Field(default="deepseek/deepseek-r1:free",              alias="MODERATOR_MODEL")
     fallback_model:  str = Field(default="openrouter/free",                        alias="FALLBACK_MODEL")
+    llm_cache_enabled: bool = Field(default=True, alias="LLM_CACHE_ENABLED")
+    llm_cache_ttl_seconds: int = Field(default=86400, alias="LLM_CACHE_TTL_SECONDS")
 
     # 외부 API
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")

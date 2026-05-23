@@ -4,6 +4,7 @@ import json
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from app.agents.debate_checkpoint import clear_checkpoint
 from app.agents.state import DebateState
 from app.agents.prompts.prompts import (
     MODERATOR_PRE_SYSTEM, MODERATOR_PRE_HUMAN,
@@ -143,6 +144,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
+    clear_checkpoint(state["session_id"])
 
     return {
         "statements": [{

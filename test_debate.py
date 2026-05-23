@@ -5,6 +5,7 @@ import uuid
 from dotenv import load_dotenv
 load_dotenv(".env.local")
 
+from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.debate_graph import debate_graph
 from app.agents.state import DebateState
 
@@ -13,14 +14,15 @@ async def run(
     symbol:      str = "005930.KS",
     symbol_name: str = "삼성전자",
     category:    str = "financial",
+    session_id:  str | None = None,
 ):
-    session_id = str(uuid.uuid4())
+    session_id = session_id or str(uuid.uuid4())
     print(f"\n{'='*60}")
     print(f"  {symbol_name} ({symbol}) — {category} 토론")
     print(f"  session_id: {session_id}")
     print(f"{'='*60}\n")
 
-    state: DebateState = {
+    state: DebateState = load_checkpoint(session_id) or {
         "session_id":         session_id,
         "symbol":             symbol,
         "symbol_name":        symbol_name,
@@ -32,6 +34,7 @@ async def run(
         "agenda":             [],
         "price_context":      "",
         "financial_context":  "",
+        "evidence_context":   "",
         "news_chunks":        [],
         "statements":         [],
         "moderator_flag":     "ok",
@@ -46,6 +49,8 @@ async def run(
     async for chunk in debate_graph.astream(state):
         node = list(chunk.keys())[0]
         data = chunk[node]
+        state = merge_state(state, data)
+        save_checkpoint(state)
 
         if "agenda" in data and data["agenda"]:
             print("📋 [의제]")
@@ -76,4 +81,5 @@ if __name__ == "__main__":
     symbol      = sys.argv[1] if len(sys.argv) > 1 else "005930.KS"
     symbol_name = sys.argv[2] if len(sys.argv) > 2 else "삼성전자"
     category    = sys.argv[3] if len(sys.argv) > 3 else "financial"
-    asyncio.run(run(symbol, symbol_name, category))
+    session_id  = sys.argv[4] if len(sys.argv) > 4 else None
+    asyncio.run(run(symbol, symbol_name, category, session_id))

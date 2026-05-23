@@ -89,3 +89,35 @@
   - DB에 가격 데이터가 없을 때 intraday quote + yfinance 기술지표 폴백 조합 사용
 - `scripts/validate_intraday_quote.py`
   - Fake Redis / Fake QuoteClient로 cache hit + stale refresh 검증
+
+## 후속 진행 - LLM Cache
+
+- `app/core/llm_cache.py`
+  - `CachedChatModel`
+  - Redis key: `llm-cache:{model}:{prompt_version}:{sha256(prompt)}:{temperature}`
+  - 응답 `content` / metadata를 24시간 TTL로 저장
+- `app/core/llm_factory.py`
+  - 기존 `ChatOpenAI` 반환을 cache wrapper로 감쌈
+  - role별 prompt version(`bull-v1`, `bear-v1`, `moderator-v1`) 사용
+- `app/config.py`
+  - `LLM_CACHE_ENABLED`
+  - `LLM_CACHE_TTL_SECONDS`
+- `scripts/validate_llm_cache.py`
+  - Fake LLM / Fake Redis로 동일 prompt가 1회만 실제 invoke 되는지 검증
+
+## 후속 진행 - Checkpoint
+
+- `app/agents/debate_checkpoint.py`
+  - Redis key: `debate:checkpoint:{session_id}`
+  - state JSON 저장 / 로드 / 삭제
+  - partial update를 기존 state에 누적하는 `merge_state()` 제공
+- `test_debate.py`
+  - 시작 시 동일 `session_id` checkpoint가 있으면 복구
+  - 각 graph chunk 이후 checkpoint 저장
+- `app/agents/nodes/moderator_node.py`
+  - 토론 완료 후 checkpoint 삭제
+- `scripts/validate_debate_checkpoint.py`
+  - Fake Redis로 save/load/clear 검증
+
+현재 단계는 LangGraph 전용 공식 Redis checkpointer 도입 전의 실용적인 1차 구현이다.
+실제 실행 경로(`test_debate.py`)에서 중간 state 복구가 가능하도록 먼저 닫았다.
