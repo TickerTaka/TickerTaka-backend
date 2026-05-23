@@ -152,3 +152,6 @@
   - debate router 등록
 - `scripts/validate_debate_service.py`
   - fake graph / fake tracker 기반 서비스 검증
+- `scripts/validate_debate_api.py`
+  - FastAPI TestClient 기반 endpoint smoke test
+  - `POST /api/debates`, `GET /api/debates/{session_id}`, 404/422 검증

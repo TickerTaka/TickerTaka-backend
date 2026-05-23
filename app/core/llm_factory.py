@@ -22,6 +22,8 @@ def get_llm(
     temperature: float = 0.7,
 ) -> CachedChatModel | ChatOpenAI:
     settings = get_settings()
+    if not settings.openrouter_api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required to execute live debates")
 
     # 현재 사용 가능한 무료 모델 — rate limit 시 순서대로 시도
     model_map = {

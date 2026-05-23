@@ -51,6 +51,10 @@ class AgentRole(str, Enum):
     SYSTEM = "system"
 
 
+def _enum_values(enum_cls: type[Enum]) -> list[str]:
+    return [member.value for member in enum_cls]
+
+
 class DebateSession(Base):
     """Debate execution session."""
 
@@ -64,14 +68,32 @@ class DebateSession(Base):
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     symbol: Mapped[str] = mapped_column(String(30), ForeignKey("ticker_metadata.symbol"), nullable=False)
-    category: Mapped[DebateCategory] = mapped_column(SQLEnum(DebateCategory, name="debate_category", create_type=False), nullable=False)
+    category: Mapped[DebateCategory] = mapped_column(
+        SQLEnum(
+            DebateCategory,
+            name="debate_category",
+            create_type=False,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
     mode: Mapped[DebateMode] = mapped_column(
-        SQLEnum(DebateMode, name="debate_mode", create_type=False),
+        SQLEnum(
+            DebateMode,
+            name="debate_mode",
+            create_type=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         server_default=text("'moderator'::debate_mode"),
     )
     status: Mapped[DebateStatus] = mapped_column(
-        SQLEnum(DebateStatus, name="debate_status", create_type=False),
+        SQLEnum(
+            DebateStatus,
+            name="debate_status",
+            create_type=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         server_default=text("'pending'::debate_status"),
     )
@@ -102,9 +124,25 @@ class AgentStatement(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("debate_session.id", ondelete="CASCADE"), nullable=False)
-    round: Mapped[DebateRound] = mapped_column(SQLEnum(DebateRound, name="debate_round", create_type=False), nullable=False)
+    round: Mapped[DebateRound] = mapped_column(
+        SQLEnum(
+            DebateRound,
+            name="debate_round",
+            create_type=False,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
     round_order: Mapped[int] = mapped_column(Integer, nullable=False)
-    agent_role: Mapped[AgentRole] = mapped_column(SQLEnum(AgentRole, name="agent_role", create_type=False), nullable=False)
+    agent_role: Mapped[AgentRole] = mapped_column(
+        SQLEnum(
+            AgentRole,
+            name="agent_role",
+            create_type=False,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     model_name: Mapped[str | None] = mapped_column(String(100))

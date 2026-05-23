@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.domain.debate_service import DebateExecutionService, DebateStartRejectedError
-from app.models import AgentStatement, DebateSession, ModeratorSummary, TickerMetadata
+from app.models import AgentStatement, DebateSession, DebateStatus, ModeratorSummary, TickerMetadata
 from app.schemas.debate import DebateCreateRequest, DebateSessionResponse, DebateStatementResponse
 
 router = APIRouter(prefix="/api/debates", tags=["debates"])
@@ -24,7 +24,7 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
         user_id=payload.user_id,
         symbol=payload.symbol,
         category=payload.category,
-        status="running",
+        status=DebateStatus.RUNNING,
     )
     db.add(session_row)
     db.commit()
@@ -36,13 +36,23 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
             user_id=str(payload.user_id),
             symbol=payload.symbol,
             symbol_name=ticker.name_kr,
-            category=payload.category,
+            category=payload.category.value,
             user_portfolio={"avg_price": payload.avg_price} if payload.avg_price is not None else {},
         )
     except DebateStartRejectedError as exc:
         db.delete(session_row)
         db.commit()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        db.refresh(session_row)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": str(exc),
+                "session_id": str(session_row.id),
+                "status": "failed",
+            },
+        ) from exc
 
     return _build_session_response(db, session_row.id)
 
