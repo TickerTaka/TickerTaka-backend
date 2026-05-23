@@ -25,6 +25,15 @@ class FilingCacheRepository:
         ).all()
         return {row.dart_receipt_no: row for row in rows if row.dart_receipt_no}
 
+    def get_by_ids(self, ids: Sequence[str | UUID]) -> dict[str, FilingCache]:
+        if not ids:
+            return {}
+        normalized_ids = [UUID(str(value)) for value in ids]
+        rows = self.session.scalars(
+            select(FilingCache).where(FilingCache.id.in_(normalized_ids))
+        ).all()
+        return {str(row.id): row for row in rows}
+
     def list_by_symbol(self, symbol: str) -> list[FilingCache]:
         stmt: Select[tuple[FilingCache]] = (
             select(FilingCache)

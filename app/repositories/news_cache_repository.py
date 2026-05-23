@@ -24,6 +24,15 @@ class NewsCacheRepository:
         ).all()
         return {row.source_url: row for row in rows}
 
+    def get_by_ids(self, ids: Sequence[str | UUID]) -> dict[str, NewsCache]:
+        if not ids:
+            return {}
+        normalized_ids = [UUID(str(value)) for value in ids]
+        rows = self.session.scalars(
+            select(NewsCache).where(NewsCache.id.in_(normalized_ids))
+        ).all()
+        return {str(row.id): row for row in rows}
+
     def get_recent_by_symbol(self, symbol: str, since_hours: int = 24) -> list[NewsCache]:
         since = datetime.now(UTC) - timedelta(hours=since_hours)
         stmt: Select[tuple[NewsCache]] = (
