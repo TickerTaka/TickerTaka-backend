@@ -9,6 +9,10 @@
 
 이번 작업에서는 `filing-cache`는 제외했다.
 
+참고:
+- filing 수동 통합 결과는 별도 문서
+  - `memo/results/2026-05-23-stage3-filing-cache-manual-merge.md`
+
 ## 구현 내용
 
 ### 1. Price / Technical Cache
