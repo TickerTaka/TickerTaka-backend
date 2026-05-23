@@ -11,6 +11,7 @@ from app.agents.prompts.prompts import (
     MODERATOR_CHECK_SYSTEM, MODERATOR_CHECK_HUMAN,
     MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN,
 )
+from app.core.debate_runtime_guard import get_tracker
 from app.core.llm_factory import get_llm
 from app.repositories.debate_repo import (
     save_statement, save_evidence,
@@ -145,6 +146,11 @@ async def moderator_summary_node(state: DebateState) -> dict:
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
     clear_checkpoint(state["session_id"])
+    get_tracker().end_session(
+        user_id=state["user_id"],
+        symbol=state["symbol"],
+        session_id=state["session_id"],
+    )
 
     return {
         "statements": [{

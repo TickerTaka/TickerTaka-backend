@@ -55,6 +55,7 @@ class CachedChatModel:
             return cached
 
         response = self._inner.invoke(input, config=config, stop=stop, **kwargs)
+        self._record_usage(response)
         self._write(cache_key, response)
         return response
 
@@ -105,6 +106,31 @@ class CachedChatModel:
         except Exception:
             logger.exception("llm cache write failed")
 
+    def _record_usage(self, response: Any) -> None:
+        usage_metadata = getattr(response, "usage_metadata", None) or {}
+        response_metadata = getattr(response, "response_metadata", None) or {}
+        prompt_tokens = _coerce_usage_value(
+            usage_metadata.get("input_tokens"),
+            response_metadata.get("token_usage", {}).get("prompt_tokens"),
+            response_metadata.get("usage", {}).get("prompt_tokens"),
+        )
+        completion_tokens = _coerce_usage_value(
+            usage_metadata.get("output_tokens"),
+            response_metadata.get("token_usage", {}).get("completion_tokens"),
+            response_metadata.get("usage", {}).get("completion_tokens"),
+        )
+        if prompt_tokens == 0 and completion_tokens == 0:
+            return
+        try:
+            from app.core.debate_runtime_guard import get_tracker
+
+            get_tracker().record_usage_from_current_context(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+        except Exception:
+            logger.exception("llm usage tracking failed")
+
 
 def _serialize_messages(input: Any) -> str:
     if isinstance(input, str):
@@ -125,3 +151,13 @@ def _serialize_message(message: BaseMessage) -> dict[str, Any]:
         "name": getattr(message, "name", None),
         "additional_kwargs": getattr(message, "additional_kwargs", {}),
     }
+
+
+def _coerce_usage_value(*values: Any) -> int:
+    for value in values:
+        try:
+            if value is not None:
+                return int(value)
+        except Exception:
+            continue
+    return 0

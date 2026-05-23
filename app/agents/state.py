@@ -17,6 +17,7 @@ class Statement(TypedDict):
 class DebateState(TypedDict):
     # 세션 메타
     session_id:     str
+    user_id:        str
     symbol:         str
     symbol_name:    str
     category:       str       # technical | financial | market | macro | synthesis

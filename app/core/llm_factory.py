@@ -4,6 +4,7 @@ from typing import Literal
 
 from langchain_openai import ChatOpenAI
 from app.config import get_settings
+from app.core.debate_runtime_guard import get_tracker
 from app.core.llm_cache import CachedChatModel, LLMCachePolicy
 
 logger = logging.getLogger(__name__)
@@ -55,9 +56,4 @@ def get_llm(
     )
 
 
-def get_tracker():
-    """rate limit 추적 (Redis 없으면 더미 반환)"""
-    class DummyTracker:
-        async def check_and_increment(self, _): return True
-        async def get_usage(self): return {}
-    return DummyTracker()
+__all__ = ["get_llm", "get_tracker"]

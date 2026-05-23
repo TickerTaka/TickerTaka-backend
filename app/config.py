@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     fallback_model:  str = Field(default="openrouter/free",                        alias="FALLBACK_MODEL")
     llm_cache_enabled: bool = Field(default=True, alias="LLM_CACHE_ENABLED")
     llm_cache_ttl_seconds: int = Field(default=86400, alias="LLM_CACHE_TTL_SECONDS")
+    max_tokens_per_user_per_day: int = Field(default=1000000, alias="MAX_TOKENS_PER_USER_PER_DAY")
+    max_debates_per_user_per_day: int = Field(default=20, alias="MAX_DEBATES_PER_USER_PER_DAY")
+    debate_active_ttl_seconds: int = Field(default=1800, alias="DEBATE_ACTIVE_TTL_SECONDS")
 
     # 외부 API
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")

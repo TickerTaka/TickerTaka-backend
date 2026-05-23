@@ -121,3 +121,34 @@
 
 현재 단계는 LangGraph 전용 공식 Redis checkpointer 도입 전의 실용적인 1차 구현이다.
 실제 실행 경로(`test_debate.py`)에서 중간 state 복구가 가능하도록 먼저 닫았다.
+
+## 후속 진행 - Active Guard / Rate Limit
+
+- `app/core/debate_runtime_guard.py`
+  - active guard key: `debate:active:{user_id}:{symbol}`
+  - daily token key: `rate:user:{user_id}:tokens:{KST date}`
+  - daily debate key: `rate:user:{user_id}:debates:{KST date}`
+  - session cost key: `cost:debate:{session_id}`
+- `test_debate.py`
+  - 토론 시작 전에 active guard / daily debate limit 검사
+  - 실행 중에는 runtime context를 bind해서 LLM usage를 세션/사용자 단위로 자동 집계
+  - 종료 시 active guard 해제
+- `app/core/llm_cache.py`
+  - LLM 응답의 usage metadata를 읽어 현재 토론 context에 token usage 반영
+- `scripts/validate_debate_runtime_guard.py`
+  - Fake Redis로 active guard, daily debate limit, token usage 집계 검증
+
+## 후속 진행 - Debate API 최소 경로
+
+- `app/domain/debate_service.py`
+  - 토론 세션 실행 orchestration
+  - active guard / checkpoint / graph 실행을 한 곳에서 묶음
+- `app/api/debate.py`
+  - `POST /api/debates`
+  - `GET /api/debates/{session_id}`
+- `app/schemas/debate.py`
+  - request / response schema
+- `app/main.py`
+  - debate router 등록
+- `scripts/validate_debate_service.py`
+  - fake graph / fake tracker 기반 서비스 검증
