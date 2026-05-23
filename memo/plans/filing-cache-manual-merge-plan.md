@@ -151,13 +151,18 @@
 
 ### 3. Chroma / evidence
 
-현재 원칙 유지:
-- `filing_cache.content`는 NULL 유지 가능
-- ingest 시 filing 본문 추출 성공하면 **즉시 Chroma `filing` 컬렉션 upsert**
+filing은 **news의 옵션 B 정책을 강제하지 않는다.** `hc`의 구현 패턴(PG 메타 적재 + 별도 인덱싱) 그대로 유지하되, 누락 방지를 위해 watchlist sync task 안에서 자동 reindex를 트리거한다.
 
-즉, filing도 news와 동일 정책을 맞춘다:
-- direct upsert 우선
-- filing에는 별도 reindex 경로를 이번 통합 범위에 넣지 않음
+원칙:
+- `filing_cache.content`는 NULL 유지 (hc 정책 그대로)
+- `FilingIngestionService.sync_filings_for_ticker`는 `list.json` 호출 → PG 메타 적재까지만 수행 (hc 그대로)
+- 본문 추출 + 임베딩 + Chroma `filing` 컬렉션 upsert는 `EvidenceIndexer.index_filing_rows` / `reindex_symbol`에서 수행 (hc 그대로)
+- **watchlist sync task 흐름**: `sync_watchlist_filings(symbol)` 안에서 `FilingIngestionService.sync_filings_for_ticker(symbol)` 직후 `EvidenceIndexer(session).reindex_symbol(symbol)` 자동 호출
+
+근거:
+- news는 본문 크롤링 fallback 경로가 있어 *본문 확보 시점 = PG row 채택 시점* 묶음이 의미 있음 (direct upsert)
+- filing은 DART `document.xml`이 단일 reliable 소스 → 본문 확보 가능성 ≈ 1, fallback 경로 없음 → ingest와 인덱싱을 분리해도 외부 호출 횟수 동일
+- 따라서 두 패턴의 결과(API 호출량, Chroma 적재 결과)는 동등하며, hc 함수 본체는 손대지 않고 watchlist task에서 한 줄 트리거만 추가하는 것이 사용자 원칙("hc 방식 수정 금지, 충돌 회피만")과 가장 정합
 
 ### 4. Watchlist 트리거
 
@@ -258,22 +263,20 @@
 
 ## 주의할 충돌 지점
 
-### 1. Option B 정합성
+### 1. filing 인덱싱 정책
 
-현재 news는:
-- PG 메타 저장
-- direct Chroma upsert
-- reindex는 복구용
+news의 옵션 B(direct upsert)를 filing에 강제하지 않는다.
 
-filing도 이 원칙과 맞춰야 한다.
-
-즉 `hc` 구현에 다음이 있더라도 그대로 쓰지 않는다:
-- PG `content` 저장 전제
-- `force` 같은 이미 제거된 Stage 2 구식 옵션
+근거:
+- news 옵션 B는 *크롤링 실패가 빈번*하다는 전제에서 본문 확보 시점에 PG 적재를 묶기 위한 정책
+- filing은 DART API 단일 소스, fallback 경로 없음 → 두 패턴(direct upsert vs PG 적재 + 별도 reindex)의 외부 호출 횟수가 동등
+- 사용자 원칙: hc 구현 방식을 수정하지 않고, 실제 *충돌*(import/시그니처/패키지 구조)만 어댑팅
 
 이번 filing 통합 정책:
-- **direct Chroma upsert만 적용**
-- filing용 별도 reindex 경로는 이번 범위 밖
+- hc의 `FilingIngestionService` 본체는 PG 메타 적재까지만 수행 (그대로)
+- `EvidenceIndexer.index_filing_rows` / `reindex_symbol`로 본문 추출 + Chroma `filing` upsert (그대로)
+- **`sync_watchlist_filings(symbol)`에서 두 단계를 자동 연결** — PG 적재 직후 같은 task 안에서 reindex 트리거
+- 그 외 `force` 같은 Stage 2 구식 옵션은 흡수하지 않음 (사용 코드 없음 → 자연 정리)
 
 ### 2. DART 클라이언트 계층 중복
 
@@ -362,13 +365,14 @@ filing도 이 원칙과 맞춰야 한다.
 
 구현 완료 판정 기준:
 
-1. `sync_filings_for_ticker()` 동작
+1. `sync_filings_for_ticker()` 동작 (PG 메타 적재까지)
 2. `filing_cache` upsert/trim/cleanup 동작
-3. filing direct Chroma upsert 동작
+3. **`sync_watchlist_filings(symbol)` 안에서 PG 적재 직후 `EvidenceIndexer.reindex_symbol(symbol)`이 자동 트리거되어 `filing` 컬렉션에 본문이 적재됨**
 4. watchlist background filing sync 동작
 5. validation scripts 통과
 6. `debate_repo.fetch_filing_context()`와 컬럼 정합성 확인
-7. Stage 3 문서에 filing까지 포함되어 전체 닫힘 판정 가능
+7. DART 일일 카운터(`dart-api-count:{KST date}`)가 financial / filing 양쪽에서 같은 키로 incr
+8. Stage 3 문서에 filing까지 포함되어 전체 닫힘 판정 가능
 
 ---
 
@@ -420,28 +424,26 @@ filing도 이 원칙과 맞춰야 한다.
      - 그리고 `__init__.py`에 export 추가
    - plan 본문 117-119행("필요 시 filing 전용 parser 분리: `document_parser.py`")과 호환 — `DartFilingItem`/`DartApiError`는 client.py 또는 별도 `filing_types.py`에 둘 수 있음. 결정 필요.
 
-### B. plan 정책 ↔ hc 구현 정책 불일치 (사용자가 명시한 "방식 수정 금지"와 충돌)
+### B. plan 정책 ↔ hc 구현 정책 (사용자 결정 반영)
 
-5. **direct Chroma upsert 정책의 충돌**
-   - plan 본문 158-160행: "ingest 시 filing 본문 추출 성공하면 즉시 Chroma `filing` 컬렉션 upsert"
-   - hc 실제 코드: **`FilingIngestionService.sync_filings_for_ticker`는 PG 메타 upsert만 수행하고 Chroma 호출 없음**. 본문 추출/임베딩은 `EvidenceIndexer.index_filing_rows`(별도 호출, validate 스크립트에서만 트리거)에서 일어남.
-   - 즉 hc는 plan이 가정한 "direct upsert"가 아니라 **"PG ingest + 별도 reindex 트리거"** 패턴이다 (news의 Stage 2 옵션 B와 다른 모델).
-   - 사용자 요청("방식 수정하지 말고 구현된 정도만 가져온다") 기준으로는 **hc 패턴(PG 적재 + 별도 reindex) 유지가 정합**. 그러면 plan 본문 158-160행과 275-276행 ("이번 filing 통합 정책: direct Chroma upsert만 적용. filing용 별도 reindex 경로는 이번 범위 밖")을 **갱신**해야 한다.
-   - **권장 결정**: 옵션 두 가지 중 명시 필요
-     - (가) plan 원안대로 — `FilingIngestionService` 끝에 `EvidenceIndexer.index_filing_rows(saved_rows)` 호출을 추가. "방식 수정"에 해당하므로 사용자 의도와 약한 충돌.
-     - (나) hc 실제 패턴 유지 — direct upsert 안 함. validation/operations 단계에서 `EvidenceIndexer.reindex_symbol(symbol)`을 watchlist sync 직후에 또는 별도 cron으로 호출. plan 본문 갱신 필요.
-   - news(Stage 2 옵션 B)와 패턴 차이를 *허용*하는 방향이 사용자 요청과 가장 정합. (나) 채택 권장.
+5. **인덱싱 정책 — 결정됨**
+   - 사용자 결정: filing은 news 옵션 B(direct upsert)를 강제하지 않음. hc의 "PG 적재 + 별도 reindex" 패턴 유지.
+   - 단, 누락 방지를 위해 `sync_watchlist_filings(symbol)` 안에서 PG 적재 직후 `EvidenceIndexer(session).reindex_symbol(symbol)`을 자동 트리거.
+   - 근거: filing은 DART `document.xml` 단일 reliable 소스라 fallback이 없고, 두 패턴의 외부 호출 횟수가 동등.
+   - plan 본문 152-164행("Chroma / evidence")과 261-275행("filing 인덱싱 정책")이 이 결정을 반영해 갱신됨.
+   - 닫힘 기준 3번을 "PG 적재 직후 자동 reindex 트리거" 형태로 갱신함.
 
-6. **Redis lock / cooldown 미적용**
-   - 현재 news/price/financial은 모두 Redis `<source>-sync:lock:{symbol}` + `last-sync` cooldown 사용.
-   - hc `FilingIngestionService`는 **Redis 사용 안 함**. 락/쿨다운 없음.
-   - 사용자 정책("방식 수정 금지") 기준으론 hc 그대로 두는 게 맞으나, watchlist에서 동시에 enqueue되면 동일 종목 중복 sync 위험 (DART API 카운터 낭비). plan 본문에 명시 누락.
-   - **권장 메모**: filing에는 lock/cooldown을 *지금은* 도입하지 않음을 plan에 명시하거나, 도입 여부를 결정 — 일관성 위해 도입한다면 그건 plan 254행 "최소 수정만 적용"의 범위.
+6. **Redis lock / cooldown — hc 그대로 유지**
+   - 사용자 원칙: hc 구현 방식 수정 금지, 실제 충돌만 회피.
+   - filing의 lock/cooldown 부재는 *충돌*이 아니라 *일관성 차이*이므로 이번 통합 범위 밖.
+   - 단일 사용자 졸프 단계에서 동시 sync 위험은 낮고, `dart_receipt_no` unique constraint가 PG 측 최종 방어선.
+   - 운영 진입 시점에 필요하면 후속 plan으로 분리.
 
-7. **`dart-api-count` 일일 카운터 미연동**
-   - 현재 `app/external/dart/client.py` (financial용)가 Stage 3 보완으로 `dart-api-count:{KST date}` Redis 카운터 추가됨.
-   - hc `DartClient`(filing용)는 카운터 코드 없음. 즉 filing 흡수 시 카운터가 financial과 공유되지 않으면 일일 한도 추적이 깨짐.
-   - plan 본문 137행 "DART 일일 API 카운터는 기존 Redis 규칙 재사용" 표현은 있으나 실제 구현 책임 위치(어디서 incr?) 미명시. filing API 호출 함수(`list_filings`, `fetch_document_xml`)에도 동일 카운터 incr 필요.
+7. **`dart-api-count` 일일 카운터 — 충돌 회피용 추가만 필요**
+   - 현재 `app/external/dart/client.py`(financial)는 Stage 3 보완에서 `dart-api-count:{KST date}` Redis 카운터 추가됨.
+   - hc `DartClient`(filing 메서드 포함)는 카운터 없음 → 흡수 시 financial은 카운트되지만 filing은 안 카운트되는 *비대칭* 발생 = 충돌.
+   - 사용자 원칙 ("실제 충돌만 피함") 적용: filing API 메서드(`list_filings`, `fetch_document_xml`)에도 같은 키로 incr 추가 — hc 방식 자체를 바꾸는 게 아니라 카운터 한 줄 끼우는 보강.
+   - plan 본문 137행 ("DART 일일 API 카운터는 기존 Redis 규칙 재사용")의 책임 위치를 명시.
 
 ### C. 모델/스키마 정합성
 
@@ -478,7 +480,7 @@ filing도 이 원칙과 맞춰야 한다.
 - **본문 32행 "현재 충돌 예상 파일" 목록에 `docker-compose.yml`, `requirements.txt`, `.env.example`, `.gitignore`, `memo/plans/vector-db-and-evidence-retrieval-plan.md` 추가** — 실제 git diff 기준 충돌함.
 - **본문 39행 "filing scheduler는 없음"** — 정합 ✓.
 - **본문 117행 "`corp_code.py`는 그대로 재사용"** — 표현은 맞지만 hc 호출부가 인터페이스 다르므로 *어댑팅 필요*임을 명시.
-- **본문 158-160 / 275-276행 "direct upsert"** — 위 5번대로 hc 패턴과 충돌. plan 정책을 (나)로 갱신할지 (가)로 hc 코드 수정할지 결정 필요. 사용자 요청 ("방식 수정하지 말고") 기준 (나) 권장.
+- **본문 152-164 / 261-275행 "filing 인덱싱 정책"** — 사용자 결정 반영해 갱신됨 (hc 패턴 유지 + watchlist task 자동 트리거).
 - **본문 244-256 "파일별 통합 전략" 표에 다음 행 추가 필요**:
   - `app/external/embedding.py` — **현재 유지** (Protocol 구조)
   - `docker-compose.yml` — **현재 유지** (hc command 형식 채택 금지)
@@ -492,8 +494,8 @@ plan 본문 Phase B-E는 그대로 두되, 각 Phase 시작 직전 다음 한 �
 
 - **Phase B 시작 전**: 현재 `app/external/dart/__init__.py`에 `DartFilingItem`, `DartApiError` 도입 + filing API 메서드들을 `client.py`에 머지
 - **Phase C 시작 전**: hc `FilingIngestionService.__init__`에 `corp_code_provider` inject 인자 추가 (어댑터), `get_corp_code_by_stock_code` 호출을 `corp_code_provider.get_corp_code` + 별도 `DartCorpCode` 객체 합성으로 변환
-- **Phase D 시작 전**: 현재 `EvidenceIndexingService`에 `index_filing_rows` / `reindex_filing_for_symbol` 메서드 추가 — chroma 호출은 모두 현재 wrapper 시그니처 사용
-- **Phase E 시작 전**: hc `watchlist.py`(news+filing) / `watchlist_service.py`를 그대로 덮어쓰지 말고, 현재 4-task 흐름(news+price+financial)에 filing만 *추가*
+- **Phase D 시작 전**: 현재 `EvidenceIndexingService`에 hc `EvidenceIndexer`의 메서드(`index_filing_rows`, `reindex_symbol`, `reset_symbol`) 흐름을 흡수 — chroma 호출만 현재 wrapper 시그니처(`upsert(name, [ChromaDocument], embedding_client=...)`)로 변환. embedding 호출은 `get_embedding_client()`로.
+- **Phase E 시작 전**: hc `watchlist.py`(news+filing) / `watchlist_service.py`를 그대로 덮어쓰지 말고, 현재 흐름(news+price+financial)에 filing task만 *추가*. `sync_watchlist_filings(symbol)` 본문에 PG 적재 후 `EvidenceIndexer.reindex_symbol(symbol)` 자동 호출 추가 (사용자 결정 옵션 1).
 - **Phase F**: validate_watchlist_api.py / validate_watchlist_flow.py는 hc의 가정(news+filing)이 아니라 현재(news+price+financial+filing)로 갱신
 
 ### G. 닫힘 기준 추가 권장
@@ -507,6 +509,6 @@ plan 본문 354-371행 닫힘 기준에 다음을 추가:
 ### 요약
 
 - plan의 큰 방향(현재 인프라 유지 + filing 도메인 흡수)은 옳다.
-- "hc 도메인 로직 최대한 그대로"라는 표현은 hc의 *인터페이스*가 현재와 달라 그대로 실행되지 않으므로 **어댑터 작업이 필수**라는 점을 plan에 명시해야 한다.
-- 가장 큰 정책 결정 1건: **direct upsert vs PG 적재+별도 reindex**. 사용자가 명시한 "방식 수정 금지" 원칙을 따르면 hc 패턴(PG 적재+별도 reindex) 유지가 정합 — plan 본문의 direct upsert 강제 표현을 갱신해야 한다.
-- plan 본문이 다루지 않은 hc 변경분(docker-compose, requirements, .env.example, memo 문서, validate_watchlist_*)에 대한 채택 방향을 plan에 명시해야 한다.
+- "hc 도메인 로직 최대한 그대로"라는 표현은 hc의 *인터페이스*가 현재와 달라 그대로 실행되지 않으므로 **어댑터 작업이 필수**라는 점을 plan에 명시했다.
+- 인덱싱 정책 결정 (사용자 확정): filing은 news 옵션 B를 따르지 않고 hc 패턴(PG 적재 + 별도 reindex) 유지. `sync_watchlist_filings(symbol)`에서 reindex 자동 트리거하는 한 줄만 추가. plan 본문 152-164행, 261-275행, 닫힘 기준 갱신 완료.
+- plan 본문이 다루지 않은 hc 변경분(docker-compose, requirements, .env.example, memo 문서, validate_watchlist_*)에 대한 채택 방향을 plan에 명시해야 한다 — D 섹션 참고.
