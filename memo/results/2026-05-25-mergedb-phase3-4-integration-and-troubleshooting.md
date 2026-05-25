@@ -420,3 +420,62 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 - "live debate가 실제 동작하는가"
 
 에 대해 **예라고 답할 수 있는 상태**다.
+
+---
+
+## 검증/보완 메모 (2026-05-25, 외부 검증 종합)
+
+본 문서에서 참조된 모든 결과 문서 / plan / 핵심 구현 파일 / 검증 스크립트를 한 번에 대조했다. 개별 보고서 하단에는 영역별 세부 검증이 추가되어 있고, 본 메모는 검증자가 요청한 다섯 가지 질문에 대한 응답을 정리한다.
+
+### 1. 가장 큰 리스크 / 문제점
+
+| # | 항목 | 영향 | 분류 |
+|---|---|---|---|
+| 1 | `filing` Chroma 컬렉션의 64d/768d 차원 충돌 | live 토론에서 filing evidence가 매번 누락됨 (검증컬렉션은 영향 없음) | **운영 품질** (즉시 reset 1회로 해결) |
+| 2 | 한국 종목 yfinance suffix 미보정 (`000020 → 000020.KS`) | price_cache가 비어 있는 짧은 윈도우에서 fallback 빈약 | **약한 구조 미완** (어댑터 1줄) |
+| 3 | `try_start_session(estimated_tokens=0)` 디폴트 | daily_token cap이 사후 적용 → 첫 초과 세션은 통과 | **운영 품질** (사전 추정 추가) |
+| 4 | bull/bear ReAct agent가 `cached=False`로 우회 (`llm_factory.py:51-52`) | LLM cache 히트율이 ReAct 경로에서 0 → 비용/지연 절감 미실현 | **구조 절충**, LangChain Runnable 정식 상속으로 정리 권장 |
+| 5 | filing scheduler / cleanup 미구현 | TTL 만료 row가 자동 삭제 안 됨, 정정 공시 감지 없음 | **plan 범위 밖** (Stage 3.3 수동 통합 1차의 의도된 비범위) |
+
+가장 빠르게 운영 품질을 끌어올릴 수 있는 항목은 #1 (filing 컬렉션 reset) + #2 (yfinance suffix 어댑터 한 줄). 둘 다 1시간 미만.
+
+### 2. 계획 대비 완료 판정
+
+| plan | 시작 | mergedb 시점 | 비고 |
+|---|---|---|---|
+| `news-cache-policy-revision` | 100% | 100% | Stage 2 |
+| `price-cache-ingestion` | 100% | 100% | live 검증은 watchlist 트리거 시점에 가려져 부분 검증 |
+| `financial-cache-ingestion` | 100% (Phase 0-3) | 100% | Phase 4(PER/PBR)는 의도된 비범위 |
+| `filing-cache-ingestion` | — | 100% (Phase 0-3) | hc 수동 흡수, scheduler 비범위 |
+| `filing-cache-manual-merge-plan` | 100% | 100% | 닫힘 기준 1-8 충족 |
+| `vector-db-and-evidence-retrieval` | 75% | **100%** | Phase 4 retrieval 닫힘 |
+| `debate-runtime-infrastructure` | 25% | **100% (1차)** | Phase 1-5 1차 구현 + live 동작 |
+| 토론 도메인 plan (backfill) | 50% | **100% (1차)** | API endpoint + live 검증 |
+
+`plan-implementation-order.md` 매트릭스 마지막 컬럼("단계 4 후 / 100%") 도달.
+
+### 3. 구조적으로 잘된 점
+
+1. **plan 채택 원칙이 코드에 100% 반영됨** — `app/external/dart/` 패키지 유지, `__init__.py` export 보강, `_get` retry + dart-api-count 통합, hc의 `get_corp_code_by_stock_code` 시그니처 어댑팅, `sync_watchlist_filings` 자동 reindex 트리거. plan 보완 메모(A.1~A.4, B.3, B.7, G)에서 권장한 어댑팅이 코드에 일관 적용됨.
+2. **fail-soft 경계가 정확** — `_safe_query_collection`(차원 충돌 흡수), `try_start_session`의 redis_error_fail_open, `update_session_status(..., "failed", ...)` + `end_session` finally. 한 부분의 외부 의존 실패가 토론 전체를 멈추지 않음.
+3. **검증 스크립트가 컬렉션 분리** — `news_validate_retrieval`, `filing_validate_retrieval`, `filing_validate_reindex` 별도 컬렉션 + 검증 끝에 `delete_collection`. 실 데이터/실 컬렉션 오염 위험 없음.
+4. **`models/debate.py`의 `values_callable=_enum_values`** — Python enum name 대신 DB value 저장. 트러블슈팅 A의 fix가 SQLAlchemy 정석 패턴.
+5. **`watchlist sync_enqueued` 응답 필드** — enqueue 실패 시 클라이언트가 알 수 있게 노출. 백그라운드 작업 가시성.
+
+### 4. 남은 보완 우선순위
+
+1. **즉시 (10-30분)**: filing Chroma 컬렉션 reset + watchlist 종목 재인덱스. `chromadb-utils` 또는 `chroma_client.delete_collection("filing")` 후 `EvidenceIndexingService.reindex_filing_for_symbol`. 검증컬렉션이 아니라 **실컬렉션** `filing`을 대상으로.
+2. **즉시 (5분)**: `data_node._yfinance_fallback`의 symbol → yfinance suffix 어댑터. KRX 종목코드 6자리 + KOSPI/KOSDAQ 분기로 `.KS`/`.KQ` 부착. `TickerMetadata`에 market 컬럼이 있으면 그것으로 분기.
+3. **단기 (1-2일)**: bull/bear ReAct agent의 cached 우회 정리. `CachedChatModel`을 LangChain `BaseChatModel` 정식 상속으로 재작성하거나, ReAct agent를 cache wrapper와 분리해 별도 cache 경로(예: 동일 도구 호출 → 동일 결과 캐싱) 도입.
+4. **운영 진입 직전**: filing scheduler + cleanup (TTL 만료 row 삭제), `sync_financials_for_ticker(mode="refresh")` 호출 범위 축소(2~3분기), daily_token 사전 추정, LangGraph 공식 Redis checkpointer 도입.
+5. **운영 진입 시 별도 plan**: NCP 셀프호스트 이전, Chroma 백업/복구, 인증/TLS, fail-soft + reconcile 자동화. `plan-implementation-order.md` 마지막 행("후속 production-deployment-plan")으로 자연 이월.
+
+### 5. 단계별 판정
+
+| 단계 | 판정 |
+|---|---|
+| Stage 3 | **완료** — 핵심 범위(price + financial + filing 수동 통합)가 plan 닫힘 기준 모두 충족, live 검증 1회씩 확보 |
+| Stage 4 구현 | **1차 완료** — retrieval/intraday/llm cache/checkpoint/runtime guard/debate API가 모두 코드 + 검증 + live 경로 동작 확인 |
+| Stage 4 live | **품질 보정 단계 진입** — 구조 미완 없음(약한 항목 1건만 어댑터 1줄). `filing` 차원 충돌과 yfinance suffix는 *코드 구조의 결함이 아니라 데이터 상태 / 경계 어댑터 누락*이라 별도 plan 작성 없이 일과 내 처리 가능 |
+
+검증자 입장에서의 한 줄 요약: **"Stage 3 완료 + Stage 4 1차 구현 완료, 남은 작업은 live 품질 보정"이라는 본 보고서의 자기 판정은 코드/검증 스크립트/plan과 모두 정합한다.**

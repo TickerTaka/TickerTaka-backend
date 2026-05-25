@@ -175,3 +175,60 @@ Stage 4 이후 `uvicorn + curl` 기준 live debate 실행을 실제로 확인했
 상세 기록은 아래 별도 종합 문서를 참조한다.
 
 - `memo/results/2026-05-25-mergedb-phase3-4-integration-and-troubleshooting.md`
+
+---
+
+## 검증/보완 메모 (2026-05-25, 외부 검증)
+
+본 보고서가 명시한 Stage 4 1차 구현 범위와 실제 코드 / `vector-db-and-evidence-retrieval-plan.md` Phase 4 + `debate-runtime-infrastructure-plan.md` Phase 1-5 + 토론 plan 영역을 대조했다.
+
+### 닫힘 평가
+
+| 영역 | plan Phase | 상태 |
+|---|---|---|
+| Retrieval API | vector-db Phase 4 | **닫힘** — `EvidenceRetrievalService.search_symbol_evidence`가 news + filing 양 컬렉션 metadata filter + score 머지 (`evidence_retrieval.py:77-92`) |
+| Intraday quote | debate-runtime Phase 1 | **닫힘** — `IntradayQuoteService` + Redis TTL key `quote:latest:{symbol}` |
+| LLM cache | debate-runtime Phase 2 | **닫힘 (1차)** — `CachedChatModel.invoke` + Redis SETEX, 캐시 히트 시 inner 호출 X (`llm_cache.py:48-71`) |
+| Rate limit / active guard | debate-runtime Phase 3, 5 | **닫힘 (1차)** — `DebateRuntimeGuard.try_start_session`이 active SETNX + daily debate INCR + daily token cap (`debate_runtime_guard.py:59-93`) |
+| Checkpoint | debate-runtime Phase 4 | **1차 닫힘** — 자체 Redis 키 `debate:checkpoint:{session_id}`, LangGraph 공식 checkpointer는 후속 (`debate_checkpoint.py:13-73`) |
+| Debate API | 토론 plan | **닫힘** — `POST /api/debates` 201, `GET /api/debates/{session_id}` 200, 404/422/409/503 분기 (`api/debate.py:17-100`) |
+
+### 구조적으로 잘 된 점
+
+1. **evidence retrieval 카테고리 → query 분기** (`evidence_retrieval.py:23-29`) — technical/financial/market/macro/synthesis 5개 카테고리별 query template + symbol_name 치환. plan 본문 "카테고리별 query template / source quota" 1단계 충족. quota는 아직 source당 동일이지만 head_limit으로 조정 가능.
+
+2. **`_safe_query_collection`의 fail-soft** (`evidence_retrieval.py:136-154`) — chroma 호출이 예외(차원 충돌, 컬렉션 부재 등) 시 빈 dict 반환 + logger.exception. 토론 그래프 자체가 죽지 않게 격리. live 트러블슈팅 H에서 발견된 64/768 차원 충돌이 토론을 멈추지 않는 이유.
+
+3. **`CachedChatModel`이 `bind_tools` + `__getattr__`로 LangChain 인터페이스 보존** (`llm_cache.py:62-74`) — 트러블슈팅 F의 fix가 단순한 위임 패턴이라 후속 LangChain 업그레이드 시 brittle. 단 ReAct agent 경로에서는 `cached=False`로 우회(`llm_factory.py:51-52`)해 Runnable 계약 깨짐 회피. **현재 단계에서는 적절한 절충**, 운영 진입 시 LangChain `BaseChatModel` 정식 상속으로 정리 권장.
+
+4. **`_record_usage`가 캐시 미스에서만 호출됨** (`llm_cache.py:57-60`) — 캐시 히트 시 토큰 카운트 중복 누적 안 되도록 정확한 위치. 단 캐시 히트도 사용자 입장에서는 "토론 1회" → daily_debate 카운터(`try_start_session`)는 캐시 여부와 무관하게 +1.
+
+5. **`DebateExecutionService.run_session`의 finally end_session** (`debate_service.py:68-69`) — 예외 발생해도 active guard 반드시 해제. `update_session_status(..., "failed", ...)`도 try 안에서 동작. 사용자 두 번째 토론이 영구 차단되는 사고 방지.
+
+6. **`debate_service`가 checkpoint를 chunk마다 save** (`debate_service.py:58-62`) — 중간 실패 시 다음 호출에서 `load_checkpoint`로 복구 시도. `merge_state`가 statements는 append, 나머지는 overwrite — 부분 round 결과 누락 없음.
+
+7. **`api/debate.py`의 에러 코드 분기** (`api/debate.py:42-55`) — `DebateStartRejectedError` → 409 + 세션 row delete, 기타 Exception → 503 + session_id를 응답에 포함. 트러블슈팅 B의 fix가 사용자 경험에 적합 (UI에서 재시도 가능).
+
+### 잔여 약점 / 운영 품질 보정 항목
+
+1. **`try_start_session`의 estimated_tokens=0 디폴트** (`debate_service.py:34`, `api/debate.py:34-41`) — caller가 항상 0을 넘기므로 daily_token cap이 실행 후에만 적용된다. 한 사용자가 daily_token 한도를 넘어서도 *해당 세션은 실행 완료*되고, 다음 세션에서야 차단된다. 1차 인프라로는 OK이지만 운영 진입 시 토큰 사전 추정(평균값) 추가 권장.
+
+2. **filing 컬렉션 차원 64/768 충돌** (트러블슈팅 H) — 구조 문제가 아니라 데이터 상태 문제. `_safe_query_collection`가 fail-soft하므로 토론은 계속 진행. **운영 품질**. 즉시 보정:
+   - `chroma.delete_collection("filing")` → 재생성 후 `EvidenceIndexingService.reindex_filing_for_symbol(symbol)` 전 watchlist symbol에 대해 재실행
+   - 또는 `scripts/reindex_local_chroma.py`에 filing reset 옵션이 있다면 그것으로 일괄 처리
+   - 검증컬렉션(`filing_validate_reindex`)은 매 검증 끝에 삭제되므로 영향 없음.
+
+3. **`data_node._yfinance_fallback`이 한국 종목 suffix 미보정** (트러블슈팅 I, `data_node.py:101-128`) — `yf.Ticker(symbol)`에 `000020` 그대로 전달 → yfinance 인식 못 함 → empty hist → fallback도 실패. **구조 미완 (약함)**:
+   - 어댑터 한 줄 추가하면 해결 (`yf_symbol = symbol + ".KS"` 또는 KOSDAQ ".KQ"); 단 PG 캐시가 있으면 fallback 자체가 호출 안 되므로 핵심 경로는 정상. price_cache 적재가 watchlist 등록 후 background로 끝나기 전 토론을 즉시 시작할 때만 영향. → 운영 품질 + 보조 경로 보강.
+
+4. **`_search_news` / `_search_filings`의 score 머지가 distance 기준** (`evidence_retrieval.py:91-92`) — chroma의 distance는 작을수록 가까운 값. score 정렬은 ascending이라 정합 ✓. 단 두 컬렉션이 서로 다른 embedding 모델/차원이면 distance 분포가 비교 불가능해질 수 있음 — 현재는 둘 다 동일 `get_embedding_client()`로 768d 통일이라 OK. **유지 조건**으로 명시 필요.
+
+5. **`debate_service._astream_with_config`의 `TypeError` fallback** (`debate_service.py:115-119`) — 그래프 구현체가 `astream(state, config)` 시그니처를 지원 안 하면 `astream(state)`로 폴백. 향후 LangGraph 버전 업 시 시그니처 변경 자동 흡수, 단 fake graph가 `astream(state)`만 받아도 동작 — 본 보고서의 `validate_debate_service.py:38-43`이 그것에 의존.
+
+6. **`_record_usage`의 `usage_metadata` 형식 가정** (`llm_cache.py:124-146`) — OpenRouter 응답의 usage 위치가 LangChain 버전마다 다름. 3개 경로(`usage_metadata.input_tokens`, `response_metadata.token_usage.prompt_tokens`, `response_metadata.usage.prompt_tokens`)를 모두 시도 — 강건성 OK. 단 0/0이면 silent return이라 토큰 미과금 케이스가 invisible. 운영 진입 시 0/0 카운터 추가하면 모델 사이드 변경 감지 가능.
+
+7. **`debate_checkpoint`의 statements 머지 정책** (`debate_checkpoint.py:66-73`) — base statements + patch statements를 단순 concat. 동일 round_order 중복은 검출 안 됨. 정상 흐름에서는 노드별로 새 statements만 yield하므로 OK이지만, 사용자가 같은 session_id로 토론을 재실행하면 statements가 누적될 수 있다. `api/debate.py`가 매번 새 `DebateSession.id`를 발급하므로 실 경로에서는 발생 안 함.
+
+### 판정
+
+**Stage 4 = 1차 구현 완료 + live 경로 검증 완료.** plan 본문이 명시한 Phase 1-5 + 토론 plan 영역이 모두 코드 + 검증 스크립트 + live `uvicorn + curl` 동작까지 닫혔다. 잔여 항목은 모두 *구조 미완*이 아닌 *운영 품질 보정* 또는 *조건부 보강*(suffix 어댑터 1줄)에 해당한다.

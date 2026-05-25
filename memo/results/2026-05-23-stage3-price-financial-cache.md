@@ -201,3 +201,31 @@
 - 2순위: `sync_financials_for_ticker(mode="refresh")`의 호출 범위 축소(최근 2~3분기) — DART 일일 한도 보호
 - 3순위: 실 DB 라이브 검증 1회 (`pykrx + 005930`, `dart + 005930`) — plan 닫힘 기준 마무리
 - 4순위(후속): `upsert_many` batch 최적화, scheduler key 컨벤션 통일, inserted/updated 정확 카운팅
+
+---
+
+## 검증/보완 메모 (2026-05-25, mergedb 통합 이후 재확인)
+
+filing 수동 병합 + Stage 4 인프라 진입 이후, Stage 3.1/3.2 산출물이 여전히 정합한지 다시 확인했다.
+
+### filing 통합 이후의 변경 영향 (확인)
+
+- `app/external/dart/client.py`에 filing API 메서드가 추가되면서 `_get`이 retry + `_record_daily_api_call` 일관 적용 (`client.py:246-259`) → financial 호출도 같은 `dart-api-count:{KST date}` 키로 incr. 본 보고서 위 "1순위" 즉시 보강 권장 사항이 mergedb에서 완료된 상태.
+- `app/external/dart/__init__.py`에 `DartApiError, DartFilingItem` export 추가 — financial 흐름은 영향 없음.
+- `app/domain/watchlist_service.py`에 `sync_watchlist_filings` 추가 (`watchlist_service.py:110-131`) — `app/api/watchlist.py`가 `news → price → financial → filing` 4-task enqueue (`watchlist.py:71-74`). financial sync는 기존 위치 유지.
+
+### Stage 4 측에서 financial / price를 참조하는 경로
+
+- `data_node` (`data_node.py:24-27`)가 `fetch_price_context` / `fetch_financial_context`로 PG 캐시를 그대로 사용. price/financial 모델/리포 인터페이스 변경 없음.
+- `_fmt_finance` (`data_node.py:87-98`)가 `r['fiscal_year']`, `r['fiscal_quarter']`, `revenue/operating_profit/net_income`, `PER/PBR/ROE`를 사용 → 본 보고서가 명시한 PG 컬럼과 동일. financial_ingestion에서 `PER/PBR=None` 유지 정책이 토론에서 "N/A"로 표시되도록 자연 우회되어 있음.
+
+### 미해결 권장 사항 (mergedb 시점에도 그대로)
+
+- `scripts/refresh_corp_code_map.py` — 본 보고서 추가 반영 섹션에 신설 완료 명시. mergedb에서도 존재 (`scripts/` 확인).
+- pykrx + 실 PG 1년치 백필 / DART 1종목 financial 백필 — Stage 3.3 filing은 실 DART API + 실 PG로 `{"symbol":"000020", ...}` 결과까지 확인됐지만, price / financial 자체의 라이브 검증은 여전히 fake 모드 검증만 끝난 상태로 보인다. mergedb 보고서(`2026-05-25`)는 watchlist 4-task가 live로 enqueue되는 것까지 확인했고, 그 안에서 price/financial이 실제 외부 API 호출까지 갔는지(또는 어떤 에러로 끝났는지)에 대한 라이브 로그는 별도 캡처가 없다. → Stage 4 live 품질 보정 작업에 합쳐서 1회 확인 권장.
+- `sync_financials_for_ticker(mode="refresh")` 호출 범위 축소(최근 2~3분기) — 코드상 여전히 5년 × 4분기 = 20회. watchlist 100+ 종목으로 확장 시 DART 일일 한도 소진 위험.
+- `upsert_many` batch 최적화 / inserted/updated 정확 카운팅 — 회귀 없음 확인. 후속.
+
+### 판정
+
+Stage 3.1/3.2의 구조는 그대로 유효. filing 통합 과정에서 financial 흐름에 회귀를 일으킨 변경 없음. live 검증은 여전히 부분적이지만 plan 보완 메모(2026-05-23) 권장 사항 일부는 mergedb 시점에 이미 반영됨(`dart-api-count`, retry, `refresh_corp_code_map.py`). 나머지는 운영 품질 단계 작업으로 자연 이월.
