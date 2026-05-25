@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core.db import get_db
 from app.domain.debate_service import DebateExecutionService, DebateStartRejectedError
 from app.models import AgentStatement, DebateSession, DebateStatus, ModeratorSummary, TickerMetadata
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/api/debates", tags=["debates"])
 
 @router.post("", response_model=DebateSessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_db)) -> DebateSessionResponse:
+    settings = get_settings()
     ticker = db.get(TickerMetadata, payload.symbol)
     if ticker is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {payload.symbol}")
@@ -38,6 +40,7 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
             symbol_name=ticker.name_kr,
             category=payload.category.value,
             user_portfolio={"avg_price": payload.avg_price} if payload.avg_price is not None else {},
+            estimated_tokens=settings.estimated_tokens_for_category(payload.category.value),
         )
     except DebateStartRejectedError as exc:
         db.delete(session_row)

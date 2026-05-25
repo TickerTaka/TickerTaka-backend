@@ -9,6 +9,7 @@ from app.domain.evidence_retrieval import (
     search_evidence_for_symbol,
 )
 from app.domain.intraday_quote import IntradayQuoteService
+from app.external.yfinance_symbol import resolve_yfinance_symbol
 from app.repositories.debate_repo import (
     fetch_price_context, fetch_financial_context,
     fetch_news_context, fetch_filing_context, fetch_event_timeline,
@@ -103,7 +104,7 @@ def _yfinance_fallback(symbol):
         import yfinance as yf
 
         quote = IntradayQuoteService().get_latest_quote(symbol)
-        t = yf.Ticker(symbol)
+        t = yf.Ticker(resolve_yfinance_symbol(symbol))
         hist = t.history(period="6mo")
         if hist.empty:
             return {}, {}

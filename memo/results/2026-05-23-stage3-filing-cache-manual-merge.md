@@ -120,6 +120,10 @@ python -m scripts.validate_watchlist_flow
 - Chroma telemetry 경고
   - `Failed to send telemetry event ClientStartEvent: capture() takes 1 positional argument but 3 were given`
   - 기능 실패 원인은 아니며 filing 검증 결과에는 영향 없음
+- live 경로에서 과거 64차원 검증 데이터가 실컬렉션 `filing`에 남아 있으면 768차원 운영 임베딩과 충돌할 수 있음
+  - 조치 스크립트:
+    - `scripts/reset_filing_collection.py`
+    - `scripts/reindex_all_filings.py`
 
 ## 판단
 

@@ -431,13 +431,13 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 
 | # | 항목 | 영향 | 분류 |
 |---|---|---|---|
-| 1 | `filing` Chroma 컬렉션의 64d/768d 차원 충돌 | live 토론에서 filing evidence가 매번 누락됨 (검증컬렉션은 영향 없음) | **운영 품질** (즉시 reset 1회로 해결) |
-| 2 | 한국 종목 yfinance suffix 미보정 (`000020 → 000020.KS`) | price_cache가 비어 있는 짧은 윈도우에서 fallback 빈약 | **약한 구조 미완** (어댑터 1줄) |
-| 3 | `try_start_session(estimated_tokens=0)` 디폴트 | daily_token cap이 사후 적용 → 첫 초과 세션은 통과 | **운영 품질** (사전 추정 추가) |
+| 1 | `filing` Chroma 컬렉션의 64d/768d 차원 충돌 | live 토론에서 filing evidence가 매번 누락됨 (검증컬렉션은 영향 없음) | **운영 품질** (reset + 재색인 스크립트로 해결 가능) |
+| 2 | 한국 종목 yfinance suffix 미보정 | price_cache가 비어 있는 짧은 윈도우에서 fallback 빈약 | **보완 완료, live 재검증만 남음** |
+| 3 | `try_start_session(estimated_tokens=0)` 디폴트 | daily_token cap이 사후 적용 → 첫 초과 세션은 통과 | **보완 완료, 추정값 튜닝만 남음** |
 | 4 | bull/bear ReAct agent가 `cached=False`로 우회 (`llm_factory.py:51-52`) | LLM cache 히트율이 ReAct 경로에서 0 → 비용/지연 절감 미실현 | **구조 절충**, LangChain Runnable 정식 상속으로 정리 권장 |
 | 5 | filing scheduler / cleanup 미구현 | TTL 만료 row가 자동 삭제 안 됨, 정정 공시 감지 없음 | **plan 범위 밖** (Stage 3.3 수동 통합 1차의 의도된 비범위) |
 
-가장 빠르게 운영 품질을 끌어올릴 수 있는 항목은 #1 (filing 컬렉션 reset) + #2 (yfinance suffix 어댑터 한 줄). 둘 다 1시간 미만.
+가장 빠르게 운영 품질을 끌어올릴 수 있는 항목은 #1 (filing 컬렉션 reset + 재색인). #2, #3은 이미 코드 반영이 끝났고 live 재검증만 남아 있다.
 
 #### 해결 방안
 
@@ -494,7 +494,7 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 
 **조치 (어댑터 함수 신설 + 호출부 교체, 30분)**:
 
-1. `app/external/quote_client.py`에 헬퍼 추가 (또는 `app/domain/intraday_quote.py`에 두기 — yfinance/intraday 양쪽에서 공유)
+1. `app/external/yfinance_symbol.py`에 헬퍼 추가하고, `quote_client` / `data_node`가 공통으로 사용
    ```python
    # app/external/yfinance_symbol.py (신규)
    from app.models import MarketType
@@ -514,7 +514,7 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
            return f"{symbol}{suffix}"
        return symbol
    ```
-2. `data_node._yfinance_fallback` 호출부 변경 (`data_node.py:101-128`)
+2. `data_node._yfinance_fallback` 호출부 및 `YFinanceQuoteClient` 변경
    ```python
    from sqlalchemy import select
    from app.core.db import session_scope
@@ -537,7 +537,8 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
    python -c "from app.external.yfinance_symbol import to_yfinance_symbol; \
    print(to_yfinance_symbol('247540', 'KOSDAQ'))"  # → '247540.KQ'
    ```
-4. 라이브 검증: price_cache가 비어 있는 KOSPI/KOSDAQ 종목으로 토론 시작 → `data_agent` 로그에서 yfinance fallback이 성공하는지 확인.
+4. **구현 상태**: `app/external/yfinance_symbol.py`, `app/external/quote_client.py`, `app/agents/nodes/data_node.py`까지 반영 완료.  
+   남은 것은 price_cache가 비어 있는 KOSPI/KOSDAQ 종목으로 토론 시작 → `data_agent` 로그에서 yfinance fallback이 성공하는지 live 재검증하는 일이다.
 
 **주의**: yfinance는 한국 거래소 데이터 무료 지연 제공이라 latency / fields가 일관 보장 안 됨. 본 어댑터는 *price_cache fallback* 보조 경로만 보강하는 것이며, 핵심은 watchlist 등록 직후 `sync_watchlist_prices` background task가 정상 완료되어 PG에 1년치 데이터가 적재되는 것이다.
 
@@ -548,8 +549,8 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 **조치 (사전 추정값 도입, 1-2시간)**:
 
 1. 평균 토큰 사용량 측정 — `DebateRuntimeGuard.get_usage`로 최근 N세션의 `session_input_tokens + session_output_tokens` 평균 계산해 보고, 1차 디폴트를 결정 (예: 카테고리별 평균 8k-15k).
-2. `app/config.py`에 `default_estimated_tokens_per_debate: int = 12000` 또는 카테고리별 매핑 추가.
-3. `app/api/debate.py` 또는 `app/domain/debate_service.py`에서 호출 시 주입
+2. `app/config.py`에 카테고리별 추정 토큰 기본값 추가.
+3. `app/api/debate.py`에서 `settings.estimated_tokens_for_category(payload.category.value)`를 주입.
    ```python
    # debate_service.py
    def _estimate_tokens(category: str) -> int:
@@ -563,7 +564,8 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
        estimated_tokens=_estimate_tokens(payload.category.value),
    )
    ```
-4. 라이브 검증: 한 사용자가 daily_token cap에 근접한 상태에서 토론 시도 → `daily_token_limit` 사유로 409 반환 확인.
+4. **구현 상태**: 설정값 및 API 주입까지 반영 완료.  
+   남은 것은 한 사용자가 daily_token cap에 근접한 상태에서 토론 시도 → `daily_token_limit` 사유로 409 반환되는지 live 검증하는 일이다.
 
 **대안 / 보완**: 매 LLM 응답 직후 `_record_usage`에서 daily_tokens가 cap을 넘으면 ReAct 루프 다음 노드 진입 전에 abort. 단 LangGraph 그래프 본체 수정 필요라 1차 인프라 범위 초과 — 사전 추정만 먼저.
 
@@ -631,8 +633,8 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 ##### 우선순위 요약 (해결 방안 기준)
 
 1. **즉시 (당일)**: #1 filing 컬렉션 reset + 전 watchlist symbol 재인덱스 — live 토론의 filing evidence 즉시 복구
-2. **당일 또는 다음 날**: #2 yfinance suffix 어댑터 — `app/external/yfinance_symbol.py` 신설 + 3곳 호출부 교체
-3. **단기 (1-2일)**: #3 estimated_tokens 사전 추정 + #4 `CachedChatModel`의 `BaseChatModel` 상속 재작성
+2. **당일 또는 다음 날**: #2 yfinance suffix live 재검증 + #3 daily_token cap live 재검증
+3. **단기 (1-2일)**: #4 `CachedChatModel`의 `BaseChatModel` 상속 재작성
 4. **운영 진입 직전 (별도 plan)**: #5 filing scheduler + NCP 인프라 이전
 
 ### 2. 계획 대비 완료 판정
@@ -661,7 +663,7 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 ### 4. 남은 보완 우선순위
 
 1. **즉시 (10-30분)**: filing Chroma 컬렉션 reset + watchlist 종목 재인덱스. `chromadb-utils` 또는 `chroma_client.delete_collection("filing")` 후 `EvidenceIndexingService.reindex_filing_for_symbol`. 검증컬렉션이 아니라 **실컬렉션** `filing`을 대상으로.
-2. **즉시 (5분)**: `data_node._yfinance_fallback`의 symbol → yfinance suffix 어댑터. KRX 종목코드 6자리 + KOSPI/KOSDAQ 분기로 `.KS`/`.KQ` 부착. `TickerMetadata`에 market 컬럼이 있으면 그것으로 분기.
+2. **즉시 (5분)**: `scripts/reset_filing_collection.py` + `scripts/reindex_all_filings.py`로 실컬렉션 `filing` 복구.
 3. **단기 (1-2일)**: bull/bear ReAct agent의 cached 우회 정리. `CachedChatModel`을 LangChain `BaseChatModel` 정식 상속으로 재작성하거나, ReAct agent를 cache wrapper와 분리해 별도 cache 경로(예: 동일 도구 호출 → 동일 결과 캐싱) 도입.
 4. **운영 진입 직전**: filing scheduler + cleanup (TTL 만료 row 삭제), `sync_financials_for_ticker(mode="refresh")` 호출 범위 축소(2~3분기), daily_token 사전 추정, LangGraph 공식 Redis checkpointer 도입.
 5. **운영 진입 시 별도 plan**: NCP 셀프호스트 이전, Chroma 백업/복구, 인증/TLS, fail-soft + reconcile 자동화. `plan-implementation-order.md` 마지막 행("후속 production-deployment-plan")으로 자연 이월.

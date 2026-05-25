@@ -211,15 +211,14 @@ Stage 4 이후 `uvicorn + curl` 기준 live debate 실행을 실제로 확인했
 
 ### 잔여 약점 / 운영 품질 보정 항목
 
-1. **`try_start_session`의 estimated_tokens=0 디폴트** (`debate_service.py:34`, `api/debate.py:34-41`) — caller가 항상 0을 넘기므로 daily_token cap이 실행 후에만 적용된다. 한 사용자가 daily_token 한도를 넘어서도 *해당 세션은 실행 완료*되고, 다음 세션에서야 차단된다. 1차 인프라로는 OK이지만 운영 진입 시 토큰 사전 추정(평균값) 추가 권장.
+1. **`try_start_session`의 estimated_tokens=0 디폴트** — 초기 구현에서는 caller가 0을 넘겨 daily_token cap이 실행 후에만 적용됐다. 이후 `app/config.py`에 카테고리별 추정 토큰 기본값을 추가하고, `app/api/debate.py`에서 `estimated_tokens=settings.estimated_tokens_for_category(...)`를 주입하도록 보강했다. 남은 것은 실제 카테고리별 평균 사용량으로 default 값을 튜닝하는 일이다.
 
 2. **filing 컬렉션 차원 64/768 충돌** (트러블슈팅 H) — 구조 문제가 아니라 데이터 상태 문제. `_safe_query_collection`가 fail-soft하므로 토론은 계속 진행. **운영 품질**. 즉시 보정:
    - `chroma.delete_collection("filing")` → 재생성 후 `EvidenceIndexingService.reindex_filing_for_symbol(symbol)` 전 watchlist symbol에 대해 재실행
    - 또는 `scripts/reindex_local_chroma.py`에 filing reset 옵션이 있다면 그것으로 일괄 처리
    - 검증컬렉션(`filing_validate_reindex`)은 매 검증 끝에 삭제되므로 영향 없음.
 
-3. **`data_node._yfinance_fallback`이 한국 종목 suffix 미보정** (트러블슈팅 I, `data_node.py:101-128`) — `yf.Ticker(symbol)`에 `000020` 그대로 전달 → yfinance 인식 못 함 → empty hist → fallback도 실패. **구조 미완 (약함)**:
-   - 어댑터 한 줄 추가하면 해결 (`yf_symbol = symbol + ".KS"` 또는 KOSDAQ ".KQ"); 단 PG 캐시가 있으면 fallback 자체가 호출 안 되므로 핵심 경로는 정상. price_cache 적재가 watchlist 등록 후 background로 끝나기 전 토론을 즉시 시작할 때만 영향. → 운영 품질 + 보조 경로 보강.
+3. **`data_node._yfinance_fallback`의 한국 종목 suffix 미보정** — 초기 구현은 `000020`를 그대로 yfinance에 넘겨 fallback이 빈약했다. 이후 `app/external/yfinance_symbol.py`를 추가하고, `YFinanceQuoteClient` / `data_node._yfinance_fallback`이 모두 `resolve_yfinance_symbol(symbol)`을 통해 `.KS` / `.KQ`를 부착하도록 보강했다. 남은 것은 KOSPI/KOSDAQ live fallback 1회 재검증이다.
 
 4. **`_search_news` / `_search_filings`의 score 머지가 distance 기준** (`evidence_retrieval.py:91-92`) — chroma의 distance는 작을수록 가까운 값. score 정렬은 ascending이라 정합 ✓. 단 두 컬렉션이 서로 다른 embedding 모델/차원이면 distance 분포가 비교 불가능해질 수 있음 — 현재는 둘 다 동일 `get_embedding_client()`로 768d 통일이라 OK. **유지 조건**으로 명시 필요.
 

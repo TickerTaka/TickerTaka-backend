@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
 
+from app.external.yfinance_symbol import resolve_yfinance_symbol
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +31,8 @@ class YFinanceQuoteClient(QuoteClient):
     def fetch_quote(self, symbol: str) -> QuoteSnapshot:
         import yfinance as yf
 
-        ticker = yf.Ticker(symbol)
+        yf_symbol = resolve_yfinance_symbol(symbol)
+        ticker = yf.Ticker(yf_symbol)
         hist = ticker.history(period="5d")
         if hist.empty:
             raise RuntimeError(f"{symbol} quote data unavailable")
