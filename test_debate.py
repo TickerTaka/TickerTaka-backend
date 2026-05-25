@@ -8,6 +8,7 @@ load_dotenv(".env.local")
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.debate_graph import debate_graph
 from app.agents.state import DebateState
+from app.config import get_settings
 from app.core.debate_runtime_guard import get_tracker
 
 
@@ -62,7 +63,11 @@ async def run(
 
     try:
         with tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-            async for chunk in debate_graph.astream(state):
+            settings = get_settings()
+            async for chunk in debate_graph.astream(
+                state,
+                {"recursion_limit": settings.debate_graph_recursion_limit},
+            ):
                 node = list(chunk.keys())[0]
                 data = chunk[node]
                 state = merge_state(state, data)

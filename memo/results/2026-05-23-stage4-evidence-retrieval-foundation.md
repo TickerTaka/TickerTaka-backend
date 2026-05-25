@@ -155,3 +155,23 @@
 - `scripts/validate_debate_api.py`
   - FastAPI TestClient 기반 endpoint smoke test
   - `POST /api/debates`, `GET /api/debates/{session_id}`, 404/422 검증
+
+## 이후 live 검증 및 트러블슈팅
+
+Stage 4 이후 `uvicorn + curl` 기준 live debate 실행을 실제로 확인했다.
+
+다만 그 과정에서 다음 이슈를 순차적으로 해결했다.
+
+- debate enum DB 저장값 mismatch (`FINANCIAL` / `RUNNING` -> DB enum value)
+- `OPENROUTER_API_KEY` 미설정 시 500 대신 503 정리
+- OpenRouter 모델 ID 404 (`deepseek/deepseek-r1:free` -> `openrouter/auto`)
+- Redis 미기동
+- LangGraph recursion limit 상향
+- `CachedChatModel.bind_tools()` 누락
+- ReAct agent 경로에서 cache wrapper가 LangChain Runnable이 아닌 문제
+
+최종적으로 `POST /api/debates`는 `201 Created`와 함께 `summary_content`, `key_points`, `statements`를 반환하는 상태까지 확인했다.
+
+상세 기록은 아래 별도 종합 문서를 참조한다.
+
+- `memo/results/2026-05-25-mergedb-phase3-4-integration-and-troubleshooting.md`

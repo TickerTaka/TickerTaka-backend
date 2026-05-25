@@ -37,7 +37,7 @@ def bear_agent_node(state: DebateState) -> dict:
     )
 
     try:
-        llm   = get_llm("bear", temperature=0.7)
+        llm   = get_llm("bear", temperature=0.7, cached=False)
         agent = create_react_agent(llm, _TOOLS)
         result = agent.invoke({
             "messages": [

@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     max_tokens_per_user_per_day: int = Field(default=1000000, alias="MAX_TOKENS_PER_USER_PER_DAY")
     max_debates_per_user_per_day: int = Field(default=20, alias="MAX_DEBATES_PER_USER_PER_DAY")
     debate_active_ttl_seconds: int = Field(default=1800, alias="DEBATE_ACTIVE_TTL_SECONDS")
+    debate_graph_recursion_limit: int = Field(default=64, alias="DEBATE_GRAPH_RECURSION_LIMIT")
 
     # 외부 API
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")

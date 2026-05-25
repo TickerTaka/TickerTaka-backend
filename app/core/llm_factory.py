@@ -20,6 +20,8 @@ _PROMPT_VERSION_MAP = {
 def get_llm(
     role: Literal["bull", "bear", "moderator", "fallback"] = "fallback",
     temperature: float = 0.7,
+    *,
+    cached: bool = True,
 ) -> CachedChatModel | ChatOpenAI:
     settings = get_settings()
     if not settings.openrouter_api_key:
@@ -46,6 +48,8 @@ def get_llm(
             "X-Title": "TickerTaka Debate",
         },
     )
+    if not cached:
+        return client
     return CachedChatModel(
         client,
         role=role,

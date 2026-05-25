@@ -59,6 +59,20 @@ class CachedChatModel:
         self._write(cache_key, response)
         return response
 
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "CachedChatModel":
+        bound = self._inner.bind_tools(tools, **kwargs)
+        return CachedChatModel(
+            bound,
+            role=self._role,
+            temperature=self._temperature,
+            prompt_version=self._prompt_version,
+            cache_policy=self._cache_policy,
+            redis_client=self._redis,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
     def _build_key(self, input: Any) -> str:
         serialized = _serialize_messages(input)
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()

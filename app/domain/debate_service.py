@@ -4,6 +4,7 @@ from typing import Any
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.state import DebateState
+from app.config import get_settings
 from app.core.debate_runtime_guard import DebateRuntimeGuard, get_tracker
 
 
@@ -54,7 +55,7 @@ class DebateExecutionService:
 
         try:
             with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-                async for chunk in graph_runner.astream(state):
+                async for chunk in _astream_with_config(graph_runner, state):
                     node = next(iter(chunk))
                     data = chunk[node]
                     state = merge_state(state, data)
@@ -107,3 +108,12 @@ def _get_default_graph():
     from app.agents.debate_graph import debate_graph
 
     return debate_graph
+
+
+def _astream_with_config(graph_runner, state: DebateState):
+    settings = get_settings()
+    config = {"recursion_limit": settings.debate_graph_recursion_limit}
+    try:
+        return graph_runner.astream(state, config)
+    except TypeError:
+        return graph_runner.astream(state)
