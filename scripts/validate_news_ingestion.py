@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
 from app.domain.news_ingestion import NewsIngestionService
+from app.external.embedding import DeterministicEmbeddingClient
 from app.external.article_scraper import ScrapedArticle
 from app.external.naver_news import NaverNewsItem
 from app.models import NewsCache, TickerMetadata
@@ -27,6 +28,7 @@ class ScenarioResult:
     updated: int
     skipped: int
     filtered: int
+    dedup_skipped: int
     body_failed: int
     body_saved: int
     grouped: int
@@ -97,6 +99,14 @@ class FakeArticleScraper:
         if isinstance(payload, Exception):
             raise payload
         return payload
+
+
+class NullChromaClient:
+    def upsert(self, name, documents, *, embedding_client) -> None:
+        return None
+
+    def delete(self, name, *, ids=None, where=None) -> None:
+        return None
 
 
 TITLE_VARIANTS = [
@@ -222,6 +232,7 @@ def to_result(name: str, raw_result, final_rows: int, final_content_rows: int) -
         updated=raw_result.updated_count,
         skipped=raw_result.skipped_count,
         filtered=raw_result.filtered_count,
+        dedup_skipped=raw_result.dedup_skipped_count,
         body_failed=raw_result.body_failed_count,
         body_saved=raw_result.body_saved_count,
         grouped=raw_result.grouped_count,
@@ -252,17 +263,19 @@ def run_initial_insert_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(articles),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         service.BODY_CRAWL_LIMIT = 5
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True)
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("initial_insert", raw, final_rows, final_content_rows)
-            expect(result.inserted == 15, "initial_insert: inserted should be 15")
+            expect(result.inserted == 5, "initial_insert: inserted should be 5")
             expect(result.body_saved == 5, "initial_insert: body_saved should be 5")
             expect(result.grouped == 5, "initial_insert: grouped should be 5")
-            expect(result.final_rows == 15, "initial_insert: final_rows should be 15")
-            expect(result.final_content_rows == 5, "initial_insert: final_content_rows should be 5")
+            expect(result.final_rows == 5, "initial_insert: final_rows should be 5")
+            expect(result.final_content_rows == 0, "initial_insert: final_content_rows should be 0")
             return result
         finally:
             session.rollback()
@@ -317,15 +330,20 @@ def run_duplicate_update_scenario(ticker: TestTicker) -> ScenarioResult:
                 news_client=FakeNaverNewsClient(items),
                 article_scraper=FakeArticleScraper(articles),
                 redis_client=FakeRedis(),
+                chroma_client=NullChromaClient(),
+                embedding_client=DeterministicEmbeddingClient(),
             )
             raw = service.sync_news_for_ticker(ticker.symbol, mode="refresh", force=True, limit=3)
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("duplicate_update", raw, final_rows, final_content_rows)
             expect(result.inserted == 1, "duplicate_update: inserted should be 1")
-            expect(result.updated == 1, "duplicate_update: updated should be 1")
-            expect(result.skipped == 1, "duplicate_update: skipped should be 1")
+            expect(result.updated == 0, "duplicate_update: updated should be 0")
+            expect(result.skipped == 0, "duplicate_update: skipped should be 0")
+            expect(result.filtered == 0, "duplicate_update: filtered should be 0")
+            expect(result.dedup_skipped == 2, "duplicate_update: dedup_skipped should be 2")
+            expect(result.body_saved == 1, "duplicate_update: body_saved should be 1")
             expect(result.final_rows == 3, "duplicate_update: final_rows should be 3")
-            expect(result.final_content_rows == 3, "duplicate_update: final_content_rows should be 3")
+            expect(result.final_content_rows == 1, "duplicate_update: final_content_rows should be 1")
             return result
         finally:
             session.rollback()
@@ -348,27 +366,28 @@ def run_trim_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(articles),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         service.MAX_CACHE_ROWS = 4
-        service.MAX_CONTENT_ROWS = 2
         service.BODY_CRAWL_LIMIT = 6
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=6)
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("trim_rows_and_content", raw, final_rows, final_content_rows)
             expect(result.trimmed_rows == 2, "trim_rows_and_content: trimmed_rows should be 2")
-            expect(result.trimmed_content == 2, "trim_rows_and_content: trimmed_content should be 2")
+            expect(result.trimmed_content == 0, "trim_rows_and_content: trimmed_content should be 0")
             expect(result.final_rows == 4, "trim_rows_and_content: final_rows should be 4")
-            expect(result.final_content_rows == 2, "trim_rows_and_content: final_content_rows should be 2")
+            expect(result.final_content_rows == 0, "trim_rows_and_content: final_content_rows should be 0")
             return result
         finally:
             session.rollback()
 
 
-def run_partial_insert_on_scrape_failure_scenario(ticker: TestTicker) -> ScenarioResult:
+def run_drop_on_scrape_failure_scenario(ticker: TestTicker) -> ScenarioResult:
     base = datetime.now(UTC).replace(microsecond=0)
     url = f"https://news.example.com/{ticker.symbol}/partial/failure"
-    item = build_item(ticker, url, "partial insert after scraper failure", base)
+    item = build_item(ticker, url, "drop row after scraper failure", base)
 
     with SessionLocal() as session:
         service = NewsIngestionService(
@@ -376,16 +395,18 @@ def run_partial_insert_on_scrape_failure_scenario(ticker: TestTicker) -> Scenari
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({url: RuntimeError("scrape failed")}),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
             row = session.scalar(select(NewsCache).where(NewsCache.symbol == ticker.symbol, NewsCache.source_url == url))
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
-            result = to_result("partial_insert_on_scrape_failure", raw, final_rows, final_content_rows)
-            expect(result.inserted == 1, "partial_insert_on_scrape_failure: inserted should be 1")
-            expect(result.body_failed == 1, "partial_insert_on_scrape_failure: body_failed should be 1")
-            expect(result.final_content_rows == 0, "partial_insert_on_scrape_failure: content rows should be 0")
-            expect(row is not None and row.content is None, "partial_insert_on_scrape_failure: row should exist without content")
+            result = to_result("drop_on_scrape_failure", raw, final_rows, final_content_rows)
+            expect(result.inserted == 0, "drop_on_scrape_failure: inserted should be 0")
+            expect(result.body_failed == 1, "drop_on_scrape_failure: body_failed should be 1")
+            expect(result.final_content_rows == 0, "drop_on_scrape_failure: content rows should be 0")
+            expect(row is None, "drop_on_scrape_failure: row should not be inserted")
             return result
         finally:
             session.rollback()
@@ -410,6 +431,8 @@ def run_title_gap_scenario(ticker: TestTicker) -> ScenarioResult:
                 }
             ),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         service.BODY_CRAWL_LIMIT = 2
         try:
@@ -438,6 +461,8 @@ def run_cooldown_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({}),
             redis_client=redis_client,
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="refresh", force=False, limit=1)
@@ -466,6 +491,8 @@ def run_lock_skip_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({}),
             redis_client=redis_client,
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="refresh", force=True, limit=1)
@@ -490,6 +517,8 @@ def run_ttl_accuracy_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({url: build_scraped(url, item.title, base)}),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
@@ -515,6 +544,8 @@ def run_daily_api_counter_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({url: build_scraped(url, item.title, base)}),
             redis_client=redis_client,
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
@@ -570,6 +601,7 @@ def run_whitespace_variant_scenario() -> ScenarioResult:
         inserted=0,
         updated=0,
         skipped=0,
+        dedup_skipped=0,
         filtered=0,
         body_failed=0,
         body_saved=0,
@@ -624,6 +656,8 @@ def run_body_fallback_on_storage_cut_scenario(ticker: TestTicker) -> ScenarioRes
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(scrapers),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
@@ -671,6 +705,8 @@ def run_body_fallback_within_group_scenario(ticker: TestTicker) -> ScenarioResul
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(scrapers),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
@@ -687,6 +723,7 @@ def run_body_fallback_within_group_scenario(ticker: TestTicker) -> ScenarioResul
                 result.body_quota_saved == 3,
                 "fallback: grouped 1 from 4 candidates -> quota saved 3",
             )
+            expect(result.final_content_rows == 0, "fallback: PG content should remain NULL")
             return result
         finally:
             session.rollback()
@@ -711,6 +748,8 @@ def run_body_failed_empty_content_scenario(ticker: TestTicker) -> ScenarioResult
             news_client=FakeNaverNewsClient([item]),
             article_scraper=FakeArticleScraper({url: empty_scraped}),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=1)
@@ -720,13 +759,14 @@ def run_body_failed_empty_content_scenario(ticker: TestTicker) -> ScenarioResult
                 result.body_failed == 1,
                 "body_failed_empty_content: scraper returning empty content should bump body_failed",
             )
+            expect(result.inserted == 0, "body_failed_empty_content: empty body should not insert row")
             return result
         finally:
             session.rollback()
 
 
 def run_metadata_name_match_scenario() -> ScenarioResult:
-    """본문이 없어도 metadata(제목+description)에 name_kr이 있으면 매칭되는지 단위 검증 (옵션 P1)."""
+    """본문 없는 metadata-only name match는 더 이상 허용하지 않는지 단위 검증."""
 
     class _MockTicker:
         name_kr = "SK하이닉스"
@@ -739,16 +779,16 @@ def run_metadata_name_match_scenario() -> ScenarioResult:
         "AI 메모리 전쟁 마이크론 호실적 SK하이닉스 등 한국 메모리 업체 동향"
     )
     expect(
-        NewsIngestionService._matches_ticker_reference(title, metadata_with_name, "", ticker),
-        "metadata_name_match: name_kr in metadata_text should match (P1)",
+        not NewsIngestionService._matches_ticker_reference(title, metadata_with_name, "", ticker),
+        "metadata_name_match: metadata-only name_kr should NOT match after P1 removal",
     )
 
     metadata_with_space_name = (
         "AI 메모리 전쟁 마이크론 호실적 SK 하이닉스 등 한국 메모리 업체 동향"
     )
     expect(
-        NewsIngestionService._matches_ticker_reference(title, metadata_with_space_name, "", ticker),
-        "metadata_name_match: 'SK 하이닉스' in metadata_text should match (P1 + 옵션1)",
+        not NewsIngestionService._matches_ticker_reference(title, metadata_with_space_name, "", ticker),
+        "metadata_name_match: metadata-only spaced name should NOT match after P1 removal",
     )
 
     metadata_unrelated = "AI 메모리 전쟁 마이크론 호실적 삼성전자 동향"
@@ -763,6 +803,7 @@ def run_metadata_name_match_scenario() -> ScenarioResult:
         inserted=0,
         updated=0,
         skipped=0,
+        dedup_skipped=0,
         filtered=0,
         body_failed=0,
         body_saved=0,
@@ -792,6 +833,8 @@ def run_body_quota_saved_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(scrapers),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         try:
             raw = service.sync_news_for_ticker(ticker.symbol, mode="initial", force=True, limit=4)
@@ -911,6 +954,8 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
             news_client=FakeNaverNewsClient(items),
             article_scraper=FakeArticleScraper(articles),
             redis_client=FakeRedis(),
+            chroma_client=NullChromaClient(),
+            embedding_client=DeterministicEmbeddingClient(),
         )
         service.BODY_CRAWL_LIMIT = 8
         try:
@@ -919,17 +964,16 @@ def run_filtering_policy_scenario(ticker: TestTicker) -> ScenarioResult:
             final_rows, final_content_rows = count_rows(session, ticker.symbol)
             result = to_result("filtering_policy", raw, final_rows, final_content_rows)
             saved_urls = {row.source_url for row in rows}
-            expect(result.inserted == 4, "filtering_policy: inserted should be 4 (short_body partial)")
-            expect(result.filtered == 7, "filtering_policy: filtered should be 7 (prefilter only)")
+            expect(result.inserted == 3, "filtering_policy: inserted should be 3")
+            expect(result.filtered == 8, "filtering_policy: filtered should be 8")
             expect(result.body_saved == 3, "filtering_policy: body_saved should be 3")
             expect(
                 saved_urls == {
                     urls["good"],
                     urls["symbol"],
-                    urls["short_body"],
                     urls["strong_body_ref"],
                 },
-                "filtering_policy: good/symbol/short_body(partial)/strong_body_ref should remain",
+                "filtering_policy: good/symbol/strong_body_ref should remain",
             )
             return result
         finally:
@@ -944,7 +988,7 @@ def main() -> None:
         run_initial_insert_scenario(ticker),
         run_duplicate_update_scenario(ticker),
         run_trim_scenario(ticker),
-        run_partial_insert_on_scrape_failure_scenario(ticker),
+        run_drop_on_scrape_failure_scenario(ticker),
         run_title_gap_scenario(ticker),
         run_cooldown_scenario(ticker),
         run_lock_skip_scenario(ticker),
@@ -969,6 +1013,7 @@ def main() -> None:
                     f"updated={scenario.updated}",
                     f"skipped={scenario.skipped}",
                     f"filtered={scenario.filtered}",
+                    f"dedup_skipped={scenario.dedup_skipped}",
                 ]
             )
         )

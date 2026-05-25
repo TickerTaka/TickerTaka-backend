@@ -4,12 +4,14 @@ import json
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from app.agents.debate_checkpoint import clear_checkpoint
 from app.agents.state import DebateState
 from app.agents.prompts.prompts import (
     MODERATOR_PRE_SYSTEM, MODERATOR_PRE_HUMAN,
     MODERATOR_CHECK_SYSTEM, MODERATOR_CHECK_HUMAN,
     MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN,
 )
+from app.core.debate_runtime_guard import get_tracker
 from app.core.llm_factory import get_llm
 from app.repositories.debate_repo import (
     save_statement, save_evidence,
@@ -40,6 +42,7 @@ def moderator_pre_node(state: DebateState) -> dict:
         category=state["category"],
         price_context=state["price_context"],
         financial_context=state["financial_context"],
+        evidence_context=state["evidence_context"],
     ))
     parsed = _parse(raw, {"agenda": ["쟁점1", "쟁점2", "쟁점3"]})
     return {
@@ -63,6 +66,7 @@ def moderator_check_node(state: DebateState) -> dict:
         category=state["category"],
         price_context=state["price_context"],
         financial_context=state["financial_context"],
+        evidence_context=state["evidence_context"],
     ), temp=0.1)
     parsed  = _parse(raw, {"verdict": "ok", "note": "", "corrected_fact": ""})
     verdict = parsed.get("verdict", "ok")
@@ -108,6 +112,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
         symbol=state["symbol"], symbol_name=state["symbol_name"],
         category=state["category"],
         price_context=state["price_context"],
+        evidence_context=state["evidence_context"],
         portfolio_context=port_ctx,
     ), temp=0.4)
     parsed  = _parse(raw, {"summary_content": raw, "key_points": []})
@@ -140,6 +145,12 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
+    clear_checkpoint(state["session_id"])
+    get_tracker().end_session(
+        user_id=state["user_id"],
+        symbol=state["symbol"],
+        session_id=state["session_id"],
+    )
 
     return {
         "statements": [{

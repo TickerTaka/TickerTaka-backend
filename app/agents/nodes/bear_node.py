@@ -31,12 +31,13 @@ def bear_agent_node(state: DebateState) -> dict:
         agenda="\n".join(f"- {a}" for a in state.get("agenda", [])),
         price_context=state["price_context"],
         financial_context=state["financial_context"],
+        evidence_context=state["evidence_context"],
         last_bull_statement=last_bull,
         current_round=state["current_round"],
     )
 
     try:
-        llm   = get_llm("bear", temperature=0.7)
+        llm   = get_llm("bear", temperature=0.7, cached=False)
         agent = create_react_agent(llm, _TOOLS)
         result = agent.invoke({
             "messages": [

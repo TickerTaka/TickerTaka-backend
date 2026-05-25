@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from sqlalchemy import Select, delete, distinct, select
 from sqlalchemy.orm import Session
@@ -23,6 +24,15 @@ class NewsCacheRepository:
         ).all()
         return {row.source_url: row for row in rows}
 
+    def get_by_ids(self, ids: Sequence[str | UUID]) -> dict[str, NewsCache]:
+        if not ids:
+            return {}
+        normalized_ids = [UUID(str(value)) for value in ids]
+        rows = self.session.scalars(
+            select(NewsCache).where(NewsCache.id.in_(normalized_ids))
+        ).all()
+        return {str(row.id): row for row in rows}
+
     def get_recent_by_symbol(self, symbol: str, since_hours: int = 24) -> list[NewsCache]:
         since = datetime.now(UTC) - timedelta(hours=since_hours)
         stmt: Select[tuple[NewsCache]] = (
@@ -41,18 +51,38 @@ class NewsCacheRepository:
         stmt = select(distinct(NewsCache.symbol)).order_by(NewsCache.symbol)
         return list(self.session.scalars(stmt))
 
+    def list_by_symbol(self, symbol: str) -> list[NewsCache]:
+        stmt: Select[tuple[NewsCache]] = (
+            select(NewsCache)
+            .where(NewsCache.symbol == symbol)
+            .order_by(NewsCache.published_at.desc().nullslast(), NewsCache.retrieved_at.desc())
+        )
+        return list(self.session.scalars(stmt))
+
     def delete_expired_rows(self, now: datetime | None = None) -> int:
+        return len(self.delete_expired_rows_returning_ids(now=now))
+
+    def delete_expired_rows_returning_ids(self, now: datetime | None = None) -> list[str]:
         cutoff = now or datetime.now(UTC)
-        result = self.session.execute(
-            delete(NewsCache).where(
-                NewsCache.ttl_until.is_not(None),
-                NewsCache.ttl_until < cutoff,
+        rows = list(
+            self.session.scalars(
+                select(NewsCache).where(
+                    NewsCache.ttl_until.is_not(None),
+                    NewsCache.ttl_until < cutoff,
+                )
             )
         )
+        deleted_ids: list[str] = []
+        for row in rows:
+            deleted_ids.append(str(row.id))
+            self.session.delete(row)
         self.session.flush()
-        return int(result.rowcount or 0)
+        return deleted_ids
 
     def trim_rows_for_symbol(self, symbol: str, max_rows: int) -> int:
+        return len(self.trim_rows_for_symbol_returning_ids(symbol, max_rows))
+
+    def trim_rows_for_symbol_returning_ids(self, symbol: str, max_rows: int) -> list[str]:
         rows = list(
             self.session.scalars(
                 select(NewsCache)
@@ -62,24 +92,10 @@ class NewsCacheRepository:
         )
         overflow = len(rows) - max_rows
         if overflow <= 0:
-            return 0
+            return []
+        deleted_ids: list[str] = []
         for row in rows[-overflow:]:
+            deleted_ids.append(str(row.id))
             self.session.delete(row)
         self.session.flush()
-        return overflow
-
-    def trim_content_for_symbol(self, symbol: str, max_content_rows: int) -> int:
-        rows = list(
-            self.session.scalars(
-                select(NewsCache)
-                .where(NewsCache.symbol == symbol, NewsCache.content.is_not(None))
-                .order_by(NewsCache.published_at.asc().nullslast(), NewsCache.retrieved_at.asc())
-            )
-        )
-        overflow = len(rows) - max_content_rows
-        if overflow <= 0:
-            return 0
-        for row in rows[:overflow]:
-            row.content = None
-        self.session.flush()
-        return overflow
+        return deleted_ids

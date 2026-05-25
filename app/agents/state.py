@@ -17,6 +17,7 @@ class Statement(TypedDict):
 class DebateState(TypedDict):
     # 세션 메타
     session_id:     str
+    user_id:        str
     symbol:         str
     symbol_name:    str
     category:       str       # technical | financial | market | macro | synthesis
@@ -31,6 +32,7 @@ class DebateState(TypedDict):
     agenda:            list[str]
     price_context:     str
     financial_context: str
+    evidence_context:  str
     news_chunks:       list[str]
 
     # 발언 누적 (add 리듀서)

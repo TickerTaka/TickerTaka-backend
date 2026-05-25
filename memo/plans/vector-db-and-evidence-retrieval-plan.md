@@ -4,11 +4,13 @@
 
 토론 단계에서 cache 테이블들(`news_cache`, `filing_cache`, 추후 `financial_cache`)에 적재된 텍스트를 **의미 기반(semantic)으로 검색**하여 evidence 후보를 추출한다.
 
-핵심 원칙:
-- PostgreSQL은 *원본* 저장, ChromaDB는 *의미 검색* 색인 — 둘은 1:1 동기화.
+핵심 원칙 (옵션 B 채택 반영, `news-cache-policy-revision-plan.md` 결정 사항):
+- **PostgreSQL은 메타데이터 truth, ChromaDB가 본문 + 검색 SOT** — 본문(content)은 ChromaDB document에만 보관, PG `news_cache.content`/`filing_cache.content`는 항상 NULL
+- PostgreSQL `news_cache.id` (UUID) ↔ ChromaDB `document.id` 1:1 매핑 — 본문 참조는 cache id로 ChromaDB lookup
 - 토론은 카테고리(technical/financial/market) × 3 라운드 × Bull/Bear/Judge 구조 → 각 발언당 evidence 1개 이상 강제 → 검색 품질이 토론 품질 직결.
 - BM25 같은 키워드 검색은 종목명이 너무 자주 등장하는 한국 기사 특성상 약하므로 dense embedding 우선.
 - 영구성/대용량 운영은 후속 단계, 초기 구현은 단일 ChromaDB 인스턴스로 시작.
+- ChromaDB가 본문 SOT이므로 백업/복구 절차 확보가 plan 닫힘 기준에 포함.
 
 ## 검증 완료 내용
 
@@ -22,36 +24,43 @@
 - 클라우드 운영 시 ChromaDB 호스팅 결정 (self-host vs Chroma Cloud vs 대안 — Qdrant/Weaviate)
 - 본 plan은 self-host (docker-compose) 기준
 
-## 아키텍처
+## 아키텍처 (옵션 B)
 
 ```
-PostgreSQL                          ChromaDB
-─────────────                       ───────────────
-news_cache    ───[adapter]───►      collection: news
-filing_cache  ───[adapter]───►      collection: filing
-financial_cache (선택)──────►       collection: financial
-                                    
-                                    (각 document = 1개 cache row, id = cache row UUID)
+PostgreSQL (메타데이터 truth)        ChromaDB (본문 + 검색 SOT)
+─────────────────────────────       ─────────────────────────────
+news_cache    (content = NULL) ───► collection: news
+  id, title, summary, source_url,     id = news_cache.id (UUID)
+  symbol, published_at, ttl_until     document = 본문 텍스트
+                                      embedding = 1536차원 벡터
+                                      metadata = {symbol, source_id, ...}
+
+filing_cache  (content = NULL) ───► collection: filing
+  id, filing_title, source_url, ...   동일 구조
+
+financial_cache (수치 데이터)        (임베딩 대상 아님, 후속 검토)
 ```
 
 원칙:
-- Cache row 적재 시 → 동기 또는 비동기 임베딩 upsert
+- Cache row 적재 시 → 본문 추출 성공한 row만 INSERT + 동시에 ChromaDB upsert
 - Cache row 삭제 시 → 같은 ID로 ChromaDB delete
-- Cache row content NULL 처리(보유 상한 초과) → ChromaDB document도 삭제
+- 본문 참조: 토론 evidence 검색 결과의 `id`로 ChromaDB `get(ids=[...])` 호출 → document 텍스트 retrieve
+- UI 카드 표시는 PG의 `title` + `summary` + `source_url` (redirection)
 
 ## 임베딩 대상
 
 | Cache | Document 텍스트 | 우선순위 |
 |---|---|---|
-| NewsCache | `title` + `\n\n` + `content`(있으면) 또는 `summary` | 1순위 |
-| FilingCache | `filing_title` + `\n\n` + `content`(있으면) | 1순위 |
+| NewsCache | `title` + `\n\n` + 추출된 본문 (PG에는 NULL, ChromaDB document에 저장) | 1순위 |
+| FilingCache | `filing_title` + `\n\n` + 추출된 본문 | 1순위 |
 | FinancialCache | 핵심 수치를 자연어 직렬화 (예: "2024Q3 매출 X억, 영업이익 Y억...") | 후속 |
 | PriceCache / TechnicalIndicatorCache | 임베딩 대상 아님 — 수치 검색은 SQL이 더 적합 | — |
 
 청킹 정책:
-- News/Filing 본문이 짧으면 (예: 1500자 이하) 단일 document
-- 그 이상이면 ~500 토큰 청크 + 50 토큰 overlap
-- 청크 ID는 `{cache_row_uuid}:chunk:{idx}` — 다중 vector / 동일 source 표현
+- **초기 구현은 단일 청크 우선** — 한국 기사/공시 대부분 1만자 이내, 단일 청크로 표현
+- 단일 청크면 `document.id = cache_row.id` 1:1 매핑 — cleanup/lookup 단순화
+- 본문이 1만자 초과 시에만 분할 — `{cache_row_uuid}:chunk:{idx}` + metadata에 `chunk_idx` 표기
+- 단일 청크 정책이 우선이고, 청크 분할은 예외 케이스로 처리
 
 ## 임베딩 모델
 
@@ -110,10 +119,19 @@ document fields:
   - 토론 latency 직접 영향 → 비추천
 
 초기 선택: **옵션 A** — cache sync는 이미 background task로 분리되어 응답 latency 외 영향 없음.
-비용/속도 검증 후 옵션 B로 이전 검토.
+
+**Migration path (동기 → 비동기 reindex)**:
+- watchlist 등록 직후 뉴스/가격/재무/공시가 병렬로 늘어나면 동기 임베딩이 background task 시간을 길게 만들 수 있음
+- 신호 (sync 함수 p95 > 60초, OpenAI rate limit hit) 감지 시 옵션 B로 이전
+- 이전 시 추가 도입: `embedded_at` 컬럼 또는 ChromaDB id 존재 확인 + 별도 sweep cron
+- 본 plan은 옵션 A로 시작, 이전 절차는 후속 plan에서 정의
 
 구현 위치:
-- `app/external/chroma_client.py` — ChromaDB wrapper
+- `app/external/chroma_client.py` — ChromaDB wrapper (HttpClient + token authn)
+- `app/external/embedding.py` — OpenAI 임베딩 호출 wrapper
+  - **batch embedding 지원** (`client.embeddings.create(input=[text1, text2, ...])`) — 여러 row를 한 번에 처리해 latency/비용 절감
+  - **retry + exponential backoff** (rate limit 429 / 5xx 대응) — `tenacity` 또는 직접 구현
+  - **fail-soft** — ChromaDB upsert 실패해도 PG 적재는 성공으로 처리, 후속 reconcile 스크립트로 backfill
 - `app/domain/evidence_indexing.py` — cache row → document 변환 + upsert
 - `NewsIngestionService.sync_news_for_ticker` 끝에 `evidence_indexer.upsert_news(rows)` 호출
 - `FilingIngestionService.sync_filings_for_ticker`도 동일
@@ -138,27 +156,39 @@ document fields:
    {"symbol": "005930"}
    {"published_at": {"$gte": <7 days ago>}}  # 카테고리에 따라 윈도우 조정
 
-5. 결과 후처리
-   - 중복 source 제거
+5. Source mix / quota 정책 (category별):
+   - technical: news 우선 (3+) + financial 보조
+   - financial: filing + financial_cache 우선 (3+) + news 보조
+   - market: news 우선 (4+) — filing은 거의 안 나옴, 부족 시 news fallback
+   - 카테고리별 source 부족 시 다른 source로 fallback (예: market에서 filing 0건이면 news 추가)
+   - 출처 quota는 후속 phase에서 운영 신호 보고 조정
+
+6. 결과 후처리
+   - 중복 source 제거 (같은 source_id 여러 청크 → 1개)
    - 출처 다양성 ranking (news clustering 등)
    - LangGraph context에 주입
 
-6. 발언 시 evidence_id로 PostgreSQL 원본 lookup → 화면에 표시
+7. 발언 시 evidence_id (= cache_row.id)로:
+   - **PG에서 메타데이터 lookup** (title, summary, source_url) — UI 카드 표시용
+   - **ChromaDB에서 본문 텍스트 retrieve** — LLM evidence 컨텍스트 주입용 (`collection.get(ids=[evidence_id])`)
 ```
 
 ## TTL / 삭제 동기화
 
 PostgreSQL과 ChromaDB는 1:1이어야 함. 동기화 지점:
 
-- **삭제**:
+- **삭제 동기화**:
   - cache row 삭제 (TTL 만료, row 상한 초과) → 같은 ID로 `collection.delete(ids=[...])`
   - cleanup sweep에서 SQL delete 직후 동일 ID 리스트로 ChromaDB delete 호출
-- **content NULL 처리**:
-  - cache row의 `content`가 NULL이 되어도 메타데이터는 남음
-  - 그러나 본문이 없으면 의미 검색 가치가 없음 → ChromaDB document는 삭제
-  - 다음 sync에서 본문 보강되면 다시 임베딩
+  - repository의 `delete_expired_rows_returning_ids` / `trim_rows_for_symbol_returning_ids` 인터페이스로 삭제된 ID 회수 → scheduler가 ChromaDB delete 호출
+- **fail 정책**:
+  - PG delete 성공 + ChromaDB delete 실패 → **fail-soft** (로그 기록 후 진행, drift 발생 가능)
+  - drift 복구는 별도 `scripts/reconcile_chroma_news_cache.py` 운영 스크립트로 처리
+    - PG row 없는데 ChromaDB document 남은 케이스 (orphan): ChromaDB delete
+    - ChromaDB document 없는데 PG row 있는 케이스 (옵션 B에선 거의 없어야 함, sync 실패 시 발생): 본 plan은 fail-soft라 후속 sync에서 자연 복구
+  - reconcile 스크립트는 cron으로 일 1회 실행 또는 수동
 - **content 갱신**:
-  - 정정 공시나 본문 보강으로 content가 바뀌면 ChromaDB document upsert로 덮어쓰기
+  - 정정 공시나 본문 보강으로 content가 바뀌면 ChromaDB document upsert로 덮어쓰기 (옵션 B에선 PG content는 항상 NULL이므로 변경 없음, ChromaDB만 갱신)
 
 ## 환경 변수 / 외부 의존성
 
@@ -314,9 +344,41 @@ Phase 2와 동일 구조, collection만 `filing`.
 
 ### Phase 4. Retrieval API
 
+**호출자는 a543ff1 커밋에서 이미 준비됨** — `app/agents/tools/evidence_tools.py`의 `search_evidence(query, symbol, top_k)` 함수가 현재 더미(`return []`). 본 Phase는 그 더미를 실제 ChromaDB 검색으로 대체하는 작업.
+
 목표:
 - 토론 도메인이 호출하는 `retrieve_evidence(symbol, category, k)` 함수
-- LangGraph node에서 사용
+- 또는 기존 `evidence_tools.search_evidence`의 더미 자리에 직접 채워 넣기 (시그니처 호환 유지)
+- LangGraph bull/bear 노드에서 사용 (현재 노드 코드 무수정으로 적용 가능)
+
+기존 구현 활용:
+- `evidence_tools.search_evidence`의 시그니처(`query, symbol, top_k=3`)는 그대로 유지
+- 반환 형태는 `list[dict]` — `{source_type, excerpt, source_url, news_cache_id, filing_cache_id, ...}` 등 evidence 영구화 페이로드와 호환
+- `app/repositories/debate_repo.py`의 `save_evidence`가 다음 외래 키들을 받음:
+  - `news_cache_id`, `filing_cache_id`, `price_cache_id`, `financial_cache_id`, `technical_indicator_cache_id`
+  - 즉 retrieval 결과의 metadata에 cache row id를 담아주면 evidence 영구화가 자동 동작
+
+retrieval 결과 형식 (debate_repo와 호환):
+```python
+{
+    "source_type": "NEWS",                  # SourceType ENUM
+    "excerpt": "본문 청크 (ChromaDB document)",
+    "source_url": "https://...",
+    "source_title": "기사 제목",
+    "source_label": "언론사명",
+    "news_cache_id": "uuid",                # ChromaDB metadata.source_id
+    # filing의 경우 filing_cache_id 등
+}
+```
+
+## 검증/보완 메모 (2026-05-22)
+
+1. 현재 문서는 여전히 옵션 A 흔적이 남아 있다. `News/Filing` 본문이 PostgreSQL에 있다는 가정 대신, 최신 결정은 `ChromaDB가 본문 SOT`이므로 `news-cache-policy-revision-plan.md` 기준으로 아키텍처 설명을 조정해야 한다.
+2. ChromaDB collection id 정책은 `cache_row_uuid` 또는 `uuid:chunk:n` 두 방식을 모두 열어두고 있는데, 옵션 B에서 "본문 보유 기사 10건"을 단일 청크 우선으로 운영한다면 초기 구현은 `row id = document id` 1:1로 단순화하는 것이 구현/cleanup 모두 쉽다.
+3. embedding provider를 OpenAI direct로 적어두었는데, 비용/운영 관점에서 `batch embedding` 지원 여부와 rate limit 실패 시 retry/backoff 정책이 빠져 있다. 초기 구현 전 이 부분을 wrapper 설계에 넣는 편이 좋다.
+4. `동기 임베딩`을 초기 선택으로 둔 것은 현재 background task 구조와 맞지만, watchlist 등록 직후 뉴스/가격/재무/공시가 병렬로 늘어나면 task 시간이 길어질 수 있다. 따라서 "동기 upsert + 추후 비동기 reindex 전환 가능" 정도의 migration path 메모가 있으면 좋다.
+5. retrieval 단계의 `top 5 / top 3 / top 2`는 출발점으로 좋지만, category별 source mix를 강제할지 여부가 아직 없다. 예를 들어 market category에서 filing이 거의 안 나올 수 있으므로, source quota를 둘지 후처리에서 fallback을 둘지 결정이 필요하다.
+6. Chroma 백업을 운영 항목으로 적어둔 것은 맞지만, 옵션 B 채택 후에는 이 백업이 단순 권장이 아니라 필수다. 구현 plan의 닫힘 기준에도 "백업/복구 검증 1회"를 포함하는 게 현실적이다.
 
 산출물:
 - `app/domain/evidence_retrieval.py`
@@ -355,12 +417,32 @@ Phase 2와 동일 구조, collection만 `filing`.
 
 ## 결론
 
-확정 내용:
-- ChromaDB self-host (docker-compose), 1:1 동기화로 PostgreSQL 보완
+확정 내용 (옵션 B 채택 반영):
+- ChromaDB self-host (NCP 서버 + Docker), **본문 + 검색 SOT** 역할
+- PostgreSQL은 메타데이터 truth, `content`는 항상 NULL
+- `news_cache.id` (UUID) ↔ ChromaDB `document.id` 1:1 매핑 (단일 청크 우선)
 - collection 단위는 데이터 타입(news/filing), symbol은 metadata filter
-- 임베딩 모델 OpenAI `text-embedding-3-small`로 시작
-- 청킹은 1500자 초과 시 ~500 토큰 + 50 overlap
-- 인덱싱은 cache sync 직후 동기 upsert (옵션 A)
-- TTL/삭제는 cache cleanup과 동시 ChromaDB delete
-- 검색은 카테고리별 query → top-K → metadata filter → LangGraph context 주입
+- 임베딩 모델 OpenAI `text-embedding-3-small`로 시작, batch + retry/backoff 필수
+- 청킹은 단일 청크 우선, 1만자 초과 시에만 분할
+- 인덱싱은 cache sync 직후 동기 upsert (옵션 A) — 부담 시 비동기 reindex로 migration
+- TTL/삭제는 cache cleanup과 동시 ChromaDB delete (fail-soft + reconcile 스크립트)
+- 검색은 카테고리별 query → top-K → metadata filter → source quota/fallback → LangGraph context 주입
+- 본문 retrieval은 ChromaDB `get(ids=[evidence_id])` — PG에는 본문 없음
 - Phase 1~5 순차 구현, Phase 4부터는 토론 도메인 plan과 연계
+
+## 닫힘 기준 (plan 종료 시점에 검증되어야 할 항목)
+
+본 plan은 코드 구현만으로 닫히지 않는다 — 옵션 B 채택으로 ChromaDB가 본문 SOT가 되었기 때문:
+
+1. `app/external/chroma_client.py` + `app/external/embedding.py` 구현 + 단위 검증
+2. `app/domain/evidence_indexing.py` 구현 + News/Filing 적재 흐름 통합
+3. 카테고리별 retrieval 함수 + source quota/fallback 검증
+4. cleanup 동기화 + reconcile 스크립트 1회 실행 확인
+5. **ChromaDB 백업/복구 절차 1회 검증** (운영 핵심 — 셀프 호스트 SOT):
+   - `/var/lib/tickertaka/chroma` 디렉토리를 NCP Object Storage에 백업
+   - 별도 환경에서 복구 → 컬렉션 document 수/검색 결과 동일성 확인
+6. 라이브 시나리오: SK하이닉스 등 watchlist 등록 → ChromaDB upsert 확인 → 검색 결과 의미 일관성 점검
+7. **`evidence_tools.search_evidence` 더미 제거 + 토론 라이브에서 evidence 흐름 검증**:
+   - bull/bear 노드가 evidence를 받아 발언
+   - moderator_check가 evidence 부재로 환각 판정하지 않음
+   - moderator_summary가 `debate_repo.save_evidence`로 영구화 (`news_cache_id` 등 외래 키 포함)

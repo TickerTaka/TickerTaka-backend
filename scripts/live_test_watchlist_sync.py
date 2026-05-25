@@ -48,7 +48,6 @@ class ExtraFormatter(logging.Formatter):
         "body_attempts",
         "body_saved",
         "trimmed_rows",
-        "trimmed_content",
         "elapsed_ms",
     )
 
@@ -168,7 +167,7 @@ def run_sync_cycle() -> None:
     content_rows = sum(1 for r in rows if r.content)
     sources = sorted({r.source_name for r in rows if r.source_name})
     print(f"        total_rows         = {len(rows)}")
-    print(f"        content_not_null   = {content_rows}")
+    print(f"        content_not_null   = {content_rows} / {len(rows)}  (option B expects 0)")
     print(f"        distinct_sources   = {len(sources)} -> {sources}")
     print()
     print("--- 최근 5건 ---")
@@ -178,7 +177,7 @@ def run_sync_cycle() -> None:
         print(f"- [{published}] {row.source_name or '(unknown)'}")
         print(f"  title  : {row.title}")
         print(f"  url    : {row.source_url}")
-        print(f"  content: {content_len}자")
+        print(f"  content: {content_len}자 (option B expects 0)")
 
     print()
     print("적재된 row는 DB에 그대로 남아있습니다.")

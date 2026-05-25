@@ -54,9 +54,8 @@ def print_rows(rows: list[NewsCache]) -> None:
                 "source_name": row.source_name,
                 "source_url": row.source_url,
                 "published_at": row.published_at.isoformat() if row.published_at else None,
-                "has_content": row.content is not None,
+                "content_is_null": row.content is None,
                 "summary_len": len(row.summary) if row.summary else 0,
-                "content_len": len(row.content) if row.content else 0,
             }
         )
 
@@ -110,8 +109,8 @@ def main() -> None:
                 "grouped": result.grouped_count,
                 "body_saved": result.body_saved_count,
                 "trimmed_rows": result.trimmed_rows_count,
-                "trimmed_content": result.trimmed_content_count,
                 "elapsed_ms": result.elapsed_ms,
+                "policy": "option_b_pg_content_null",
             }
         )
         print_rows(rows)

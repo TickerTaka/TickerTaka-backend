@@ -4,29 +4,29 @@ from datetime import date
 from langchain_core.tools import tool
 import yfinance as yf
 
+from app.domain.intraday_quote import IntradayQuoteService
+
 
 @tool
 def get_stock_price(symbol: str) -> dict:
     """현재 주가, 등락률, 52주 고저, 거래량을 반환합니다."""
     try:
+        quote = IntradayQuoteService().get_latest_quote(symbol)
         ticker = yf.Ticker(symbol)
         hist   = ticker.history(period="5d")
         info   = ticker.info
         if hist.empty:
             return {"error": f"{symbol} 데이터 없음"}
 
-        latest = hist.iloc[-1]
-        prev   = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
-        change = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
-
         return {
-            "close":        round(float(latest["Close"]), 2),
-            "change_rate":  round(float(change), 2),
-            "volume":       int(latest["Volume"]),
+            "close":        round(float(quote.price), 2),
+            "change_rate":  quote.change_rate,
+            "volume":       quote.volume,
             "week52_high":  info.get("fiftyTwoWeekHigh"),
             "week52_low":   info.get("fiftyTwoWeekLow"),
-            "source_label": f"yfinance — {symbol} 일봉 ({date.today()})",
+            "source_label": f"yfinance 지연시세 — {symbol} ({date.today()})",
             "source_url":   None,
+            "is_delayed":   quote.is_delayed,
         }
     except Exception as e:
         return {"error": str(e)}

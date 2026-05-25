@@ -4,36 +4,37 @@ uvicorn[standard]==0.32.0
 python-multipart==0.0.12
 requests==2.32.3
 httpx==0.27.2
-sse-starlette
-slowapi
+sse-starlette==2.1.3
+slowapi==0.1.9
 
 # DB
 sqlalchemy[asyncio]==2.0.35
 alembic==1.13.3
 psycopg2-binary==2.9.9
-asyncpg
+asyncpg==0.29.0
 
 # AI
 langgraph==0.2.40
 langchain-core==0.3.10
-langchain-openai
-langchain-community
-langchain-huggingface
-langchain-chroma
-langchain
+langchain-openai==0.2.1
+langchain-community==0.3.1
+langchain-huggingface==0.1.0
+langchain-chroma==0.1.4
+langchain==0.3.1
 
 # RAG
-sentence-transformers
-chromadb
-rank-bm25
+sentence-transformers==3.2.1
+chromadb==0.5.23
+rank-bm25==0.2.2
 
 # 캐시/큐
 redis==7.4.0
-celery[redis]
+celery[redis]==5.4.0
 
 # 데이터
 yfinance==0.2.43
 pandas==2.2.3
+pykrx==1.0.45
 beautifulsoup4==4.12.3
 trafilatura==2.0.0
 
@@ -41,11 +42,11 @@ trafilatura==2.0.0
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-pyjwt
+pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
 
 # 재시도
-tenacity
+tenacity==9.0.0
 
 # 테스트
 pytest==8.3.3

@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+
+from app.models import MarketType
+
+
+@dataclass(slots=True)
+class DailyPriceRecord:
+    symbol: str
+    price_date: date
+    open_price: float | None
+    high_price: float | None
+    low_price: float | None
+    close_price: float
+    volume: int | None
+
+
+class PyKrxClient:
+    """Thin wrapper around pykrx for daily OHLCV history."""
+
+    SUPPORTED_MARKETS = {MarketType.KOSPI, MarketType.KOSDAQ}
+
+    def fetch_daily_prices(
+        self,
+        symbol: str,
+        *,
+        start_date: date,
+        end_date: date,
+        market: MarketType,
+    ) -> list[DailyPriceRecord]:
+        if market not in self.SUPPORTED_MARKETS:
+            raise ValueError(f"pykrx unsupported market: {market}")
+
+        try:
+            from pykrx import stock
+        except ImportError as exc:  # pragma: no cover - depends on local env
+            raise RuntimeError("pykrx is required for price cache ingestion") from exc
+
+        frame = stock.get_market_ohlcv_by_date(
+            fromdate=start_date.strftime("%Y%m%d"),
+            todate=end_date.strftime("%Y%m%d"),
+            ticker=symbol,
+        )
+        if frame.empty:
+            return []
+
+        records: list[DailyPriceRecord] = []
+        for index, row in frame.iterrows():
+            records.append(
+                DailyPriceRecord(
+                    symbol=symbol,
+                    price_date=index.date(),
+                    open_price=float(row["시가"]) if row.get("시가") is not None else None,
+                    high_price=float(row["고가"]) if row.get("고가") is not None else None,
+                    low_price=float(row["저가"]) if row.get("저가") is not None else None,
+                    close_price=float(row["종가"]),
+                    volume=int(row["거래량"]) if row.get("거래량") is not None else None,
+                )
+            )
+        return records

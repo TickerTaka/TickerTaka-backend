@@ -11,7 +11,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.redis import build_redis_client, make_key
+from app.domain.evidence_indexing import EvidenceIndexingService
 from app.external.article_scraper import ArticleScraper, ScrapedArticle
+from app.external.chroma_client import ChromaClient, NEWS_COLLECTION_NAME
+from app.external.embedding import EmbeddingClient, get_embedding_client
 from app.external.naver_news import NaverNewsClient, NaverNewsItem
 from app.models import NewsCache, TickerMetadata
 from app.repositories.news_cache_repository import NewsCacheRepository
@@ -46,6 +50,7 @@ class SyncNewsResult:
     body_attempts_count: int = 0
     body_saved_count: int = 0
     filtered_count: int = 0
+    dedup_skipped_count: int = 0
     trimmed_rows_count: int = 0
     trimmed_content_count: int = 0
     elapsed_ms: int = 0
@@ -62,12 +67,11 @@ class NewsCandidate:
 class NewsIngestionService:
     """Implements the news_cache ingestion policy."""
 
-    INITIAL_FETCH_COUNT = 20
+    INITIAL_FETCH_COUNT = 30
     REFRESH_FETCH_COUNT = 5
-    BODY_CRAWL_LIMIT = 5
+    BODY_CRAWL_LIMIT = 10
     BODY_ATTEMPTS_PER_GROUP = 3
-    MAX_CACHE_ROWS = 100
-    MAX_CONTENT_ROWS = 10
+    MAX_CACHE_ROWS = 10
     MAX_ARTICLE_AGE_DAYS = 7
     MIN_TITLE_LENGTH = 8
     MIN_CONTENT_LENGTH = 120
@@ -83,13 +87,17 @@ class NewsIngestionService:
         news_client: NaverNewsClient | None = None,
         article_scraper: ArticleScraper | None = None,
         redis_client: redis.Redis | None = None,
+        chroma_client: ChromaClient | None = None,
+        embedding_client: EmbeddingClient | None = None,
     ) -> None:
         settings = get_settings()
         self.session = session
         self.repo = NewsCacheRepository(session)
         self.news_client = news_client or NaverNewsClient()
         self.article_scraper = article_scraper or ArticleScraper()
-        self.redis_client = redis_client or self._build_redis_client(settings.redis_url)
+        self.redis_client = redis_client or build_redis_client(settings.redis_url)
+        self.chroma_client = chroma_client
+        self.embedding_client = embedding_client
 
     def sync_news_for_ticker(
         self,
@@ -146,27 +154,21 @@ class NewsIngestionService:
 
             for candidate in candidates:
                 scraped = body_urls.get(candidate.normalized_url)
+                if candidate.existing is not None:
+                    result.dedup_skipped_count += 1
+                    continue
                 if not self._passes_storage_filters(ticker, candidate, scraped):
                     result.filtered_count += 1
                     continue
-                if candidate.existing is None:
-                    row = self._build_news_row(symbol, candidate, scraped)
-                    self.repo.save(row)
-                    result.inserted_count += 1
-                    if row.content:
-                        result.body_saved_count += 1
-                else:
-                    if candidate.existing.content is None and scraped and scraped.content:
-                        candidate.existing.content = scraped.content
-                        candidate.existing.summary = scraped.summary or candidate.existing.summary
-                        candidate.existing.source_name = scraped.source_name or candidate.existing.source_name
-                        result.updated_count += 1
-                        result.body_saved_count += 1
-                    else:
-                        result.skipped_count += 1
+                row = self._build_news_row(symbol, candidate, scraped)
+                self.repo.save(row)
+                self._upsert_chroma_row(row, scraped)
+                result.inserted_count += 1
+                result.body_saved_count += 1
 
-            result.trimmed_rows_count = self.repo.trim_rows_for_symbol(symbol, self.MAX_CACHE_ROWS)
-            result.trimmed_content_count = self.repo.trim_content_for_symbol(symbol, self.MAX_CONTENT_ROWS)
+            trimmed_ids = self.repo.trim_rows_for_symbol_returning_ids(symbol, self.MAX_CACHE_ROWS)
+            result.trimmed_rows_count = len(trimmed_ids)
+            self._delete_chroma_documents(trimmed_ids)
             self._set_last_run(symbol, started)
             self.session.flush()
         finally:
@@ -186,12 +188,51 @@ class NewsIngestionService:
                 "body_quota_saved": result.body_quota_saved_count,
                 "body_attempts": result.body_attempts_count,
                 "body_saved": result.body_saved_count,
+                "dedup_skipped": result.dedup_skipped_count,
                 "trimmed_rows": result.trimmed_rows_count,
                 "trimmed_content": result.trimmed_content_count,
                 "elapsed_ms": result.elapsed_ms,
             },
         )
         return result
+
+    def _upsert_chroma_row(self, row: NewsCache, scraped: ScrapedArticle | None) -> None:
+        if scraped is None or not scraped.content or not scraped.content.strip():
+            return
+        try:
+            client = self._get_chroma_client()
+            embedding_client = self._get_embedding_client()
+            client.upsert(
+                NEWS_COLLECTION_NAME,
+                documents=[
+                    EvidenceIndexingService.build_news_document(
+                        row,
+                        content=scraped.content,
+                    )
+                ],
+                embedding_client=embedding_client,
+            )
+        except Exception:
+            logger.exception("direct chroma upsert failed for news row %s", row.id)
+
+    def _delete_chroma_documents(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        try:
+            client = self._get_chroma_client()
+            client.delete(NEWS_COLLECTION_NAME, ids=ids)
+        except Exception:
+            logger.exception("direct chroma delete failed for %s ids", len(ids))
+
+    def _get_chroma_client(self) -> ChromaClient:
+        if self.chroma_client is None:
+            self.chroma_client = ChromaClient()
+        return self.chroma_client
+
+    def _get_embedding_client(self) -> EmbeddingClient:
+        if self.embedding_client is None:
+            self.embedding_client = get_embedding_client()
+        return self.embedding_client
 
     def _build_candidates(self, symbol: str, items: list[NaverNewsItem]) -> list[NewsCandidate]:
         urls = [self.normalize_url(item.original_link or item.link) for item in items if (item.original_link or item.link)]
@@ -234,7 +275,9 @@ class NewsIngestionService:
         selected_groups: list[list[NewsCandidate]] = []
         group_keys: list[tuple[set[str], datetime | None]] = []
         recent_titles: list[tuple[set[str], bool, datetime | None]] = [
-            (self.normalize_title(row.title), row.content is not None, row.published_at)
+            # Option B: PG content is always NULL, but existing rows still mean
+            # "this topic already produced a valid body and was persisted".
+            (self.normalize_title(row.title), True, row.published_at)
             for row in recent_rows
             if row.title
         ]
@@ -290,22 +333,6 @@ class NewsIngestionService:
                 if len(selected_groups[matched]) < self.BODY_ATTEMPTS_PER_GROUP:
                     selected_groups[matched].append(candidate)
 
-        null_candidates = [c for c in candidates if c.existing is not None and c.existing.content is None]
-        null_candidates.sort(
-            key=lambda c: c.existing.published_at or epoch_floor,
-            reverse=True,
-        )
-        for candidate in null_candidates:
-            candidate_published_at = (
-                candidate.existing.published_at if candidate.existing else candidate.item.published_at
-            )
-            if find_matching_group(candidate.title_tokens, candidate_published_at) is not None:
-                continue
-            if len(selected_groups) >= self.BODY_CRAWL_LIMIT:
-                continue
-            selected_groups.append([candidate])
-            group_keys.append((candidate.title_tokens, candidate_published_at))
-
         return selected_groups
 
     def _build_news_row(
@@ -320,7 +347,7 @@ class NewsIngestionService:
         return NewsCache(
             symbol=symbol,
             title=candidate.item.title,
-            content=scraped.content if scraped else None,
+            content=None,
             summary=(scraped.summary if scraped and scraped.summary else candidate.item.description) or None,
             source_name=(scraped.source_name if scraped and scraped.source_name else candidate.item.source_name),
             source_url=candidate.normalized_url,
@@ -376,18 +403,18 @@ class NewsIngestionService:
         candidate: NewsCandidate,
         scraped: ScrapedArticle | None,
     ) -> bool:
+        if scraped is None or not scraped.content or not scraped.content.strip():
+            return False
+
         title_text = self._normalize_text(candidate.item.title)
         metadata_text = self._metadata_text(candidate)
-        body_text = self._normalize_text(scraped.content) if scraped and scraped.content else ""
+        body_text = self._normalize_text(scraped.content)
 
         if not self._matches_ticker_reference(title_text, metadata_text, body_text, ticker):
             return False
 
-        if scraped is not None:
-            if not scraped.content:
-                return False
-            if len(body_text) < self.MIN_CONTENT_LENGTH:
-                return False
+        if len(body_text) < self.MIN_CONTENT_LENGTH:
+            return False
 
         return True
 
@@ -461,9 +488,6 @@ class NewsIngestionService:
         if cls._contains_symbol_reference(combined_text, ticker.symbol):
             return True
 
-        if not body_text and cls._contains_exact_name_reference(metadata_text, ticker.name_kr):
-            return True
-
         body_match_count = cls._count_exact_name_reference(body_text, ticker.name_kr)
         if body_match_count >= 2:
             return True
@@ -504,16 +528,6 @@ class NewsIngestionService:
             if abs(first_published_at - second_published_at) > timedelta(hours=6):
                 return False
         return True
-
-    @staticmethod
-    def _build_redis_client(redis_url: str) -> redis.Redis | None:
-        if redis is None:
-            return None
-        try:
-            return redis.Redis.from_url(redis_url, decode_responses=True)
-        except Exception:
-            logger.exception("failed to create redis client")
-            return None
 
     def _acquire_lock(self, symbol: str) -> str | None:
         # fail-closed: Redis lock is required by the ingestion policy.
@@ -574,12 +588,12 @@ class NewsIngestionService:
 
     @staticmethod
     def _lock_key(symbol: str) -> str:
-        return f"news-sync:lock:{symbol}"
+        return make_key("news-sync", "lock", symbol)
 
     @staticmethod
     def _last_run_key(symbol: str) -> str:
-        return f"news-sync:last-run:{symbol}"
+        return make_key("news-sync", "last-run", symbol)
 
     @staticmethod
     def _daily_api_count_key(now: datetime) -> str:
-        return f"naver-api-count:{now.astimezone(KST).date().isoformat()}"
+        return make_key("naver-api-count", now.astimezone(KST).date().isoformat())
