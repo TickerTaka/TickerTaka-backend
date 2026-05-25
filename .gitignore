@@ -44,3 +44,6 @@ chromadata/
 *.aof
 
 docs/_build/
+
+.claude/*
+.claude/
