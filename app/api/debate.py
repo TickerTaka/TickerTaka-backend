@@ -11,6 +11,7 @@ from app.core.db import get_db
 from app.domain.debate_service import DebateExecutionService, DebateStartRejectedError
 from app.models import AgentStatement, DebateSession, DebateStatus, ModeratorSummary, TickerMetadata
 from app.schemas.debate import DebateCreateRequest, DebateSessionResponse, DebateStatementResponse
+from app.schemas.market_data import DebateListItem, DebateListResponse
 
 router = APIRouter(prefix="/api/debates", tags=["debates"])
 
@@ -58,6 +59,46 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
         ) from exc
 
     return _build_session_response(db, session_row.id)
+
+
+@router.get("", response_model=DebateListResponse)
+def list_debates(
+    user_id: UUID | None = None,
+    symbol: str | None = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+) -> DebateListResponse:
+    limit = max(1, min(limit, 100))
+    stmt = (
+        select(DebateSession, TickerMetadata.name_kr, ModeratorSummary.summary_content)
+        .join(TickerMetadata, TickerMetadata.symbol == DebateSession.symbol)
+        .outerjoin(ModeratorSummary, ModeratorSummary.session_id == DebateSession.id)
+    )
+    if user_id is not None:
+        stmt = stmt.where(DebateSession.user_id == user_id)
+    if symbol:
+        stmt = stmt.where(DebateSession.symbol == symbol)
+    rows = db.execute(stmt.order_by(DebateSession.started_at.desc()).limit(limit)).all()
+    items: list[DebateListItem] = []
+    for session_row, symbol_name, summary_content in rows:
+        items.append(
+            DebateListItem(
+                session_id=session_row.id,
+                user_id=session_row.user_id,
+                symbol=session_row.symbol,
+                symbol_name=symbol_name,
+                category=str(
+                    session_row.category.value
+                    if hasattr(session_row.category, "value")
+                    else session_row.category
+                ),
+                status=str(session_row.status.value if hasattr(session_row.status, "value") else session_row.status),
+                started_at=session_row.started_at,
+                completed_at=session_row.completed_at,
+                summary_content=summary_content,
+            )
+        )
+    return DebateListResponse(items=items)
 
 
 @router.get("/{session_id}", response_model=DebateSessionResponse)
