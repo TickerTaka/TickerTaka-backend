@@ -10,8 +10,8 @@ slowapi==0.1.9
 # DB
 sqlalchemy[asyncio]==2.0.35
 alembic==1.13.3
-psycopg2-binary==2.9.9
-asyncpg==0.29.0
+psycopg2-binary==2.9.12
+asyncpg==0.31.0
 
 # AI
 langgraph==0.2.40
@@ -28,7 +28,7 @@ chromadb==0.5.23
 rank-bm25==0.2.2
 
 # 캐시/큐
-redis==7.4.0
+redis==5.3.1
 celery[redis]==5.4.0
 
 # 데이터
@@ -46,7 +46,7 @@ pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
 
 # 재시도
-tenacity==9.0.0
+tenacity==8.5.0
 
 # 테스트
 pytest==8.3.3
