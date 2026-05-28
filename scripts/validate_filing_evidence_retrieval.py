@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import zipfile as _zipfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -9,6 +11,7 @@ from sqlalchemy import func, select
 
 from app.core.db import SessionLocal
 from app.domain.evidence_indexing import EvidenceIndexingService
+from app.external.dart.client import DartClient as _RealDartClient
 from app.external.chroma_client import ChromaClient, FILING_COLLECTION_NAME
 from app.external.embedding import DeterministicEmbeddingClient
 from app.models import FilingCache, TickerMetadata
@@ -28,14 +31,26 @@ class ValidationResult:
 
 
 class FakeDartClient:
+    """Fake DART client that returns in-memory document.xml zips."""
+
     def __init__(self, payloads: dict[str, str]) -> None:
         self.payloads = payloads
+        self._delegate = _RealDartClient.__new__(_RealDartClient)
 
-    def fetch_filing_text(self, receipt_no: str) -> str:
-        payload = self.payloads.get(receipt_no)
-        if payload is None:
+    def fetch_document_xml(self, receipt_no: str) -> bytes:
+        html = self.payloads.get(receipt_no)
+        if html is None:
             raise RuntimeError(f"missing fake filing for {receipt_no}")
-        return payload
+        buffer = io.BytesIO()
+        with _zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("document.html", html.encode("utf-8"))
+        return buffer.getvalue()
+
+    def extract_document_text_v2(self, zip_bytes: bytes) -> str:
+        return _RealDartClient.extract_document_text_v2(self._delegate, zip_bytes)
+
+    def build_filing_chunks(self, zip_bytes: bytes, **kwargs) -> list:
+        return _RealDartClient.build_filing_chunks(self._delegate, zip_bytes, **kwargs)
 
 
 def get_empty_cache_symbol(session) -> str:
@@ -87,7 +102,19 @@ def main() -> None:
                 embedding_client=embeddings,
                 dart_client=FakeDartClient(
                     {
-                        receipt_no: "검증용 공시 본문입니다. 실적과 자금조달 계획을 설명합니다. " * 20,
+                        receipt_no: """
+                        <html>
+                          <body>
+                            <h1>검증 공시</h1>
+                            <p>검증용 공시 본문입니다. 실적과 자금조달 계획을 설명합니다.</p>
+                            <table>
+                              <tr><th>구분</th><th>당기</th><th>전기</th></tr>
+                              <tr><td>매출액</td><td>267,627억</td><td>302,231억</td></tr>
+                              <tr><td>영업이익</td><td>6,567억</td><td>43,376억</td></tr>
+                            </table>
+                          </body>
+                        </html>
+                        """,
                     }
                 ),
             )
@@ -96,8 +123,9 @@ def main() -> None:
                 collection_name=FILING_VALIDATE_COLLECTION,
             )
 
-        payload = chroma.get(FILING_VALIDATE_COLLECTION, ids=[row_id])
-        fetched_id = payload["ids"][0] if payload.get("ids") else None
+        payload = chroma.get(FILING_VALIDATE_COLLECTION, where={"source_id": row_id})
+        fetched_ids = payload.get("ids") or []
+        fetched_id = fetched_ids[0] if fetched_ids else None
         print(
             json.dumps(
                 asdict(

@@ -123,11 +123,16 @@ class EvidenceRetrievalService:
         documents = self._first_list(result.get("documents"))
         metadatas = self._first_list(result.get("metadatas"))
         distances = self._first_list(result.get("distances"))
-        rows = self.filing_repo.get_by_ids(ids)
+        source_ids = [
+            self._source_id_for_hit(item_id=item_id, metadata=metadata)
+            for item_id, metadata in zip(ids, metadatas, strict=False)
+        ]
+        rows = self.filing_repo.get_by_ids(source_ids)
 
         hits: list[RetrievedEvidence] = []
         for item_id, document, metadata, distance in zip(ids, documents, metadatas, distances, strict=False):
-            row = rows.get(str(item_id))
+            source_id = self._source_id_for_hit(item_id=item_id, metadata=metadata)
+            row = rows.get(str(source_id))
             if row is None:
                 continue
             hits.append(self._build_filing_hit(row=row, document=document, metadata=metadata or {}, distance=distance))
@@ -199,6 +204,14 @@ class EvidenceRetrievalService:
         if isinstance(value, list):
             return list(value)
         return []
+
+    @staticmethod
+    def _source_id_for_hit(*, item_id: Any, metadata: Any) -> Any:
+        if isinstance(metadata, dict) and metadata.get("source_id"):
+            return metadata["source_id"]
+        if isinstance(item_id, str) and ":s" in item_id:
+            return item_id.split(":s", 1)[0]
+        return item_id
 
 
 def search_evidence_for_symbol(

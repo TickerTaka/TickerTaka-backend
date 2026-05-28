@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
 from io import BytesIO
+import re
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 from zipfile import BadZipFile, ZipFile
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -15,6 +17,9 @@ from app.config import get_settings
 from app.core.redis import get_redis, make_key
 from app.external.dart.corp_code import CorpCodeProvider
 from app.external.dart.financial_account_map import FINANCIAL_ACCOUNT_NAME_MAP
+
+if TYPE_CHECKING:
+    from app.external.chroma_client import ChromaDocument
 
 
 REPORT_CODES = {
@@ -25,6 +30,36 @@ REPORT_CODES = {
 }
 KST = ZoneInfo("Asia/Seoul")
 _MIN_FILING_TEXT_LEN = 50
+
+
+def _split_text(text: str, max_chars: int) -> list[str]:
+    """Split text on line boundaries with an approximate character limit."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    lines = text.split("\n")
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > max_chars and current:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _span_to_int(value: str | int | None) -> int:
+    try:
+        parsed = int(value or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(parsed, 1)
 
 
 @dataclass(slots=True, frozen=True)
@@ -202,6 +237,25 @@ class DartClient:
         )
         return response.content
 
+    def _extract_document_html(self, zip_bytes: bytes) -> str:
+        """Extract the largest DART HTML/XML document from a document.xml zip."""
+        try:
+            with ZipFile(BytesIO(zip_bytes)) as archive:
+                names = [
+                    name
+                    for name in archive.namelist()
+                    if name.lower().endswith((".html", ".htm", ".xml"))
+                ]
+                if not names:
+                    return ""
+                html_names = [name for name in names if name.lower().endswith((".html", ".htm"))]
+                candidates = html_names or names
+                selected_name = max(candidates, key=lambda name: archive.getinfo(name).file_size)
+                raw = archive.read(selected_name)
+        except (BadZipFile, KeyError, OSError):
+            return ""
+        return self._decode_document_bytes(raw)
+
     def extract_document_text(self, zip_bytes: bytes) -> str:
         try:
             with ZipFile(BytesIO(zip_bytes)) as archive:
@@ -232,13 +286,211 @@ class DartClient:
         lines = [line.strip() for line in extracted.splitlines()]
         return "\n".join(line for line in lines if line)
 
+    @staticmethod
+    def _expand_table_to_grid(table: Tag) -> list[list[str]]:
+        """Expand rowspan/colspan table cells into a logical 2D grid."""
+        grid: dict[tuple[int, int], str] = {}
+        row_idx = 0
+        for tr in table.find_all("tr"):
+            if tr.find_parent("table") is not table:
+                continue
+            col_idx = 0
+            for cell in tr.find_all(["td", "th"], recursive=False):
+                while (row_idx, col_idx) in grid:
+                    col_idx += 1
+                text = " ".join(cell.get_text(" ", strip=True).split())
+                rowspan = _span_to_int(cell.get("rowspan", 1))
+                colspan = _span_to_int(cell.get("colspan", 1))
+                for r in range(rowspan):
+                    for c in range(colspan):
+                        grid[(row_idx + r, col_idx + c)] = text
+                col_idx += colspan
+            row_idx += 1
+
+        if not grid:
+            return []
+        max_row = max(r for r, _ in grid) + 1
+        max_col = max(c for _, c in grid) + 1
+        return [[grid.get((r, c), "") for c in range(max_col)] for r in range(max_row)]
+
+    @staticmethod
+    def _serialize_grid(grid: list[list[str]]) -> str:
+        """Serialize a logical table grid into RAG-friendly row text."""
+        if not grid:
+            return ""
+
+        prefix = ""
+        row_start = 0
+        first_row_values = [cell.strip() for cell in grid[0] if cell.strip()]
+        if len(first_row_values) == 1 and len(grid) > 1:
+            prefix = f"[{first_row_values[0]}] "
+            row_start = 1
+
+        remaining = grid[row_start:]
+        if not remaining:
+            return prefix.strip()
+
+        if len(remaining) == 1:
+            cells = [cell.strip() for cell in remaining[0] if cell.strip() and cell.strip() != "-"]
+            return (prefix + " | ".join(cells)).strip()
+
+        headers = [header.strip() for header in remaining[0]]
+        lines: list[str] = []
+
+        for row in remaining[1:]:
+            parts: list[str] = []
+            for index, value in enumerate(row):
+                value = value.strip()
+                if not value or value == "-":
+                    continue
+                header = headers[index] if index < len(headers) else ""
+                parts.append(f"{header}: {value}" if header else value)
+            if parts:
+                lines.append(prefix + " | ".join(parts))
+
+        if not lines:
+            for row in remaining:
+                cells = [cell.strip() for cell in row if cell.strip() and cell.strip() != "-"]
+                if cells:
+                    lines.append(prefix + " | ".join(cells))
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_footnotes(table: Tag) -> list[str]:
+        """Collect footnotes that immediately follow a table."""
+        footnote_pattern = re.compile(r"^\(\*\d*\)|^\(주\d*\)|^※|^\*\s")
+        footnotes: list[str] = []
+        sibling = table.next_sibling
+        count = 0
+        while sibling is not None and count < 10:
+            if hasattr(sibling, "name") and sibling.name == "table":
+                break
+            text = ""
+            if hasattr(sibling, "get_text"):
+                text = sibling.get_text(" ", strip=True)
+            elif isinstance(sibling, str):
+                text = sibling.strip()
+            if text and footnote_pattern.match(text):
+                footnotes.append(text)
+            sibling = sibling.next_sibling
+            count += 1
+        return footnotes
+
+    def serialize_table_full(self, table: Tag) -> str:
+        grid = self._expand_table_to_grid(table)
+        text = self._serialize_grid(grid)
+        footnotes = self._extract_footnotes(table)
+        if footnotes:
+            text += "\n[각주]\n" + "\n".join(footnotes)
+        return text
+
+    def extract_document_text_v2(self, zip_bytes: bytes) -> str:
+        """Convert a DART filing document into structure-preserving RAG text."""
+        html = self._extract_document_html(zip_bytes)
+        if not html:
+            return ""
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return ""
+
+        for tag in soup.find_all(["script", "style", "head"]):
+            tag.decompose()
+
+        body = soup.find("body") or soup
+        nested_table_ids: set[int] = set()
+        for table in body.find_all("table"):
+            for nested in table.find_all("table"):
+                nested_table_ids.add(id(nested))
+
+        seen_table_ids: set[int] = set()
+        sections: list[str] = []
+
+        for element in body.find_all(["h1", "h2", "h3", "h4", "p", "table"]):
+            if element.name in ("h1", "h2", "h3", "h4"):
+                if element.find_parent("table"):
+                    continue
+                heading = element.get_text(" ", strip=True)
+                if heading:
+                    sections.append(f"## {heading}")
+            elif element.name == "p":
+                if element.find_parent("table"):
+                    continue
+                text = element.get_text(" ", strip=True)
+                if text:
+                    sections.append(text)
+            elif element.name == "table":
+                if id(element) in nested_table_ids or id(element) in seen_table_ids:
+                    continue
+                seen_table_ids.add(id(element))
+                table_text = self.serialize_table_full(element)
+                if table_text.strip():
+                    sections.append(table_text)
+
+        result = "\n".join(sections)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
+
+    def build_filing_chunks(
+        self,
+        zip_bytes: bytes,
+        *,
+        symbol: str,
+        filing_id: str,
+        filing_title: str,
+        disclosed_at: str,
+        max_chunk_chars: int = 1200,
+    ) -> list[ChromaDocument]:
+        """Build section-level Chroma documents for a DART filing."""
+        from app.external.chroma_client import ChromaDocument
+
+        text = self.extract_document_text_v2(zip_bytes)
+        if not text.strip():
+            return []
+
+        raw_sections = re.split(r"\n## ", text)
+        all_chunks: list[ChromaDocument] = []
+
+        for section_idx, section_text in enumerate(raw_sections):
+            section_text = section_text.strip()
+            if not section_text:
+                continue
+
+            if section_idx == 0 and not text.startswith("## "):
+                section_title = filing_title
+                section_body = section_text
+            else:
+                first_line, _, rest = section_text.partition("\n")
+                section_title = first_line.strip().lstrip("#").strip() or filing_title
+                section_body = rest.strip() or section_text
+
+            for chunk_idx, chunk_text in enumerate(_split_text(section_body, max_chunk_chars)):
+                if not chunk_text.strip():
+                    continue
+                doc_id = f"{filing_id}:s{section_idx}:c{chunk_idx}"
+                document = f"{filing_title}\n{section_title}\n\n{chunk_text}".strip()
+                metadata: dict[str, str | int] = {
+                    "symbol": symbol,
+                    "source_type": "filing",
+                    "source_id": filing_id,
+                    "filing_title": filing_title,
+                    "section": section_title,
+                    "chunk_index": chunk_idx,
+                }
+                if disclosed_at:
+                    metadata["disclosed_at"] = disclosed_at
+                all_chunks.append(ChromaDocument(id=doc_id, document=document, metadata=metadata))
+
+        return all_chunks
+
     def fetch_filing_text(self, receipt_no: str) -> str:
         try:
             zip_bytes = self.fetch_document_xml(receipt_no)
         except requests.RequestException as exc:
             raise DartApiError(f"DART document.xml request failed: receipt_no={receipt_no}") from exc
 
-        text = self.extract_document_text(zip_bytes)
+        text = self.extract_document_text_v2(zip_bytes)
         if len(text.strip()) < _MIN_FILING_TEXT_LEN:
             raise DartApiError(f"DART document.xml text was empty or too short: receipt_no={receipt_no}")
         return text

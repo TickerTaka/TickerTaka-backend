@@ -12,13 +12,19 @@ from app.external.chroma_client import (
     FILING_COLLECTION_NAME,
     NEWS_COLLECTION_NAME,
 )
-from app.external.dart import DartApiError, DartClient
+from app.external.dart import DartClient
 from app.external.embedding import EmbeddingClient, get_embedding_client
 from app.models import FilingCache, NewsCache
 from app.repositories.filing_cache_repository import FilingCacheRepository
 from app.repositories.news_cache_repository import NewsCacheRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _build_summary(text: str, max_chars: int = 400) -> str:
+    """Use the leading normalized filing text as a lightweight summary."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " ".join(lines)[:max_chars]
 
 
 @dataclass(slots=True)
@@ -132,8 +138,9 @@ class EvidenceIndexingService:
                 continue
 
             try:
-                filing_text = self.dart_client.fetch_filing_text(row.dart_receipt_no)
-            except DartApiError:
+                zip_bytes = self.dart_client.fetch_document_xml(row.dart_receipt_no)
+                filing_text = self.dart_client.extract_document_text_v2(zip_bytes)
+            except Exception:
                 logger.exception("filing reindex fetch failed for %s", row.dart_receipt_no)
                 result.failed_rows += 1
                 continue
@@ -142,7 +149,22 @@ class EvidenceIndexingService:
                 result.skipped_rows += 1
                 continue
 
-            documents.append(self.build_filing_document(row, content=filing_text))
+            self.filing_repo.update_summary(
+                dart_receipt_no=row.dart_receipt_no,
+                summary=_build_summary(filing_text),
+            )
+            chunks = self.dart_client.build_filing_chunks(
+                zip_bytes,
+                symbol=row.symbol,
+                filing_id=str(row.id),
+                filing_title=row.filing_title,
+                disclosed_at=row.disclosed_at.isoformat() if row.disclosed_at else "",
+            )
+            if not chunks:
+                result.skipped_rows += 1
+                continue
+
+            documents.extend(chunks)
             result.indexed_rows += 1
 
         if documents:

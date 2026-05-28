@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -79,6 +79,14 @@ class FilingCacheRepository:
         row = self.session.execute(stmt).first()
         self.session.flush()
         return row[0] if row else None
+
+    def update_summary(self, *, dart_receipt_no: str, summary: str) -> None:
+        self.session.execute(
+            update(FilingCache)
+            .where(FilingCache.dart_receipt_no == dart_receipt_no)
+            .values(summary=summary, retrieved_at=func.now())
+        )
+        self.session.flush()
 
     def delete_expired_rows(self, now: datetime | None = None) -> int:
         return len(self.delete_expired_rows_returning_ids(now=now))
