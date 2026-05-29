@@ -12,6 +12,7 @@ from app.domain.watchlist_service import (
     TickerNotFoundError,
     UserNotFoundError,
     WatchlistAlreadyExistsError,
+    WatchlistNotFoundError,
     WatchlistService,
     sync_watchlist_filings,
     sync_watchlist_financials,
@@ -88,3 +89,18 @@ def list_watchlists(user_id: UUID, db: Session = Depends(get_db)) -> WatchlistLi
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return WatchlistListResponse(items=[_to_item_response(item) for item in items])
+
+
+@router.delete("/{user_id}/{symbol}")
+def delete_watchlist(user_id: UUID, symbol: str, db: Session = Depends(get_db)) -> dict[str, str]:
+    service = WatchlistService(db)
+    try:
+        service.delete_watchlist(user_id, symbol)
+        db.commit()
+    except UserNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except WatchlistNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {"status": "deleted", "user_id": str(user_id), "symbol": symbol}

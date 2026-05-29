@@ -51,6 +51,14 @@ class WatchlistService:
             raise UserNotFoundError(f"user not found: {user_id}")
         return self.repo.list_by_user(user_id)
 
+    def delete_watchlist(self, user_id: UUID, symbol: str) -> None:
+        if self.repo.get_user(user_id) is None:
+            raise UserNotFoundError(f"user not found: {user_id}")
+        item = self.repo.get_by_user_and_symbol(user_id, symbol)
+        if item is None:
+            raise WatchlistNotFoundError(f"watchlist not found: {user_id}/{symbol}")
+        self.repo.delete(item)
+
 
 def sync_watchlist_news(symbol: str) -> None:
     try:

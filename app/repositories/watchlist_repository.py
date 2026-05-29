@@ -45,3 +45,7 @@ class WatchlistRepository:
         self.session.flush()
         self.session.refresh(watchlist, attribute_names=["ticker"])
         return watchlist
+
+    def delete(self, watchlist: Watchlist) -> None:
+        self.session.delete(watchlist)
+        self.session.flush()
