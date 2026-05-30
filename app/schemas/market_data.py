@@ -90,6 +90,39 @@ class NewsListResponse(BaseModel):
     items: list[NewsItem]
 
 
+class FilingItem(BaseModel):
+    id: UUID
+    symbol: str
+    filing_title: str
+    filing_type: str | None = None
+    summary: str | None = None
+    source_url: str
+    disclosed_at: datetime | None = None
+    retrieved_at: datetime
+
+
+class FilingListResponse(BaseModel):
+    items: list[FilingItem]
+
+
+class WatchlistFeedItem(BaseModel):
+    """Unified news + filing feed item for a user's watchlist."""
+
+    id: UUID
+    symbol: str
+    symbol_name: str | None = None
+    kind: str  # "news" | "filing"
+    title: str
+    summary: str | None = None
+    source_name: str | None = None
+    source_url: str
+    published_at: datetime | None = None
+
+
+class WatchlistFeedResponse(BaseModel):
+    items: list[WatchlistFeedItem]
+
+
 class MarketIndexItem(BaseModel):
     market: str
     name: str
