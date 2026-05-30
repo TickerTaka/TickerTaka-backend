@@ -2,8 +2,29 @@
 """에이전트 단독 실행 테스트"""
 import asyncio
 import uuid
+import sys
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from dotenv import load_dotenv
 load_dotenv(".env.local")
+import logging
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("chromadb").setLevel(logging.CRITICAL)
+
+# --no-db 플래그: DB 저장 없이 에이전트 로직만 테스트
+NO_DB = "--no-db" in sys.argv
+if NO_DB:
+    sys.argv.remove("--no-db")
+    # DB 저장 함수를 모두 no-op으로 패치
+    import unittest.mock as mock
+    _noop = mock.AsyncMock(return_value=None)
+    import app.repositories.debate_repo as _repo
+    _repo.save_statement      = mock.AsyncMock(return_value=1)
+    _repo.save_evidence       = _noop
+    _repo.save_moderator_summary = _noop
+    _repo.update_session_status  = _noop
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.debate_graph import debate_graph
@@ -17,7 +38,7 @@ async def run(
     symbol_name: str = "삼성전자",
     category:    str = "financial",
     session_id:  str | None = None,
-    user_id:     str = "demo-user",
+    user_id:     str = "00000000-0000-0000-0000-000000000001",
 ):
     session_id = session_id or str(uuid.uuid4())
     print(f"\n{'='*60}")
@@ -37,29 +58,34 @@ async def run(
         return
 
     state: DebateState = load_checkpoint(session_id) or {
-        "session_id":         session_id,
-        "user_id":            user_id,
-        "symbol":             symbol,
-        "symbol_name":        symbol_name,
-        "category":           category,
-        "user_portfolio":     {},
-        "current_round":      "opening",
-        "round_order":        0,
-        "max_rounds":         3,
-        "agenda":             [],
-        "price_context":      "",
-        "financial_context":  "",
-        "evidence_context":   "",
-        "news_chunks":        [],
-        "statements":         [],
-        "moderator_flag":     "ok",
-        "intervention_note":  "",
+        "session_id":          session_id,
+        "user_id":             user_id,
+        "symbol":              symbol,
+        "symbol_name":         symbol_name,
+        "category":            category,
+        "user_portfolio":      {},
+        "current_round":       "claim",
+        "round_order":         0,
+        "max_rounds":          12,  # 3 주제 × 4 턴
+        "current_topic_index": 0,
+        "current_turn":        1,
+        "agenda":              [],
+        "price_context":       "",
+        "financial_context":   "",
+        "evidence_context":    "",
+        "news_chunks":         [],
+        "statements":          [],
+        "moderator_flag":      "ok",
+        "intervention_note":   "",
         "hallucination_count": 0,
-        "summary_content":    "",
-        "key_points":         [],
+        "summary_content":     "",
+        "key_points":          [],
     }
 
     icons = {"bull": "📈", "bear": "📉", "moderator": "⚖️"}
+    import time
+    total_start = time.time()
+    node_times  = {}
 
     try:
         with tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
@@ -70,6 +96,10 @@ async def run(
             ):
                 node = list(chunk.keys())[0]
                 data = chunk[node]
+                elapsed = time.time() - total_start
+                node_times[node] = node_times.get(node, 0) + 1
+                print(f"⏱  [{node}] +{elapsed:.1f}s")
+
                 state = merge_state(state, data)
                 save_checkpoint(state)
 
@@ -82,7 +112,9 @@ async def run(
                 for stmt in data.get("statements", []):
                     role  = stmt["agent_role"]
                     icon  = icons.get(role, "🤖")
-                    print(f"{icon} [{role.upper()} / {stmt['round'].upper()}]")
+                    topic = stmt.get("topic_index")
+                    topic_str = f"주제{topic+1} / " if topic is not None else ""
+                    print(f"{icon} [{role.upper()} / {topic_str}{stmt['round'].upper()}]")
                     print(stmt["content"])
                     if stmt.get("evidences"):
                         print(f"  └─ 근거 {len(stmt['evidences'])}개")
@@ -96,7 +128,8 @@ async def run(
     finally:
         tracker.end_session(user_id=user_id, symbol=symbol, session_id=session_id)
 
-    print("\n✅ 완료")
+    total = time.time() - total_start
+    print(f"\n✅ 완료 — 총 소요시간: {total:.1f}s")
 
 
 if __name__ == "__main__":
@@ -105,5 +138,5 @@ if __name__ == "__main__":
     symbol_name = sys.argv[2] if len(sys.argv) > 2 else "삼성전자"
     category    = sys.argv[3] if len(sys.argv) > 3 else "financial"
     session_id  = sys.argv[4] if len(sys.argv) > 4 else None
-    user_id     = sys.argv[5] if len(sys.argv) > 5 else "demo-user"
+    user_id     = sys.argv[5] if len(sys.argv) > 5 else "00000000-0000-0000-0000-000000000001"
     asyncio.run(run(symbol, symbol_name, category, session_id, user_id))

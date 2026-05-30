@@ -24,10 +24,9 @@ def get_llm(
     cached: bool = True,
 ) -> CachedChatModel | ChatOpenAI:
     settings = get_settings()
-    if not settings.openrouter_api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is required to execute live debates")
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY is required to execute live debates")
 
-    # 현재 사용 가능한 무료 모델 — rate limit 시 순서대로 시도
     model_map = {
         "bull":      settings.bull_model,
         "bear":      settings.bear_model,
@@ -39,14 +38,9 @@ def get_llm(
     client = ChatOpenAI(
         model=model_id,
         temperature=temperature,
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url,
-        max_retries=3,          # openai 클라이언트 내장 재시도
+        api_key=settings.openai_api_key,
+        max_retries=3,
         timeout=60,
-        default_headers={
-            "HTTP-Referer": "https://tickertaka.app",
-            "X-Title": "TickerTaka Debate",
-        },
     )
     if not cached:
         return client

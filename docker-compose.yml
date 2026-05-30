@@ -49,7 +49,7 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
       CHROMA_TELEMETRY_ENABLED: "FALSE"
     ports:
-      - "8080:8000"
+      - "8081:8000"
     volumes:
       - chromadata:/chroma/chroma
 

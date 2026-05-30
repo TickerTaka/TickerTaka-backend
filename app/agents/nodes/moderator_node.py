@@ -46,10 +46,14 @@ def moderator_pre_node(state: DebateState) -> dict:
     ))
     parsed = _parse(raw, {"agenda": ["쟁점1", "쟁점2", "쟁점3"]})
     return {
-        "agenda": parsed.get("agenda", []),
-        "moderator_flag": "ok",
-        "intervention_note": "",
+        "agenda":              parsed.get("agenda", []),
+        "moderator_flag":      "ok",
+        "intervention_note":   "",
         "hallucination_count": 0,
+        "current_topic_index": 0,
+        "current_turn":        1,
+        "current_round":       "claim",
+        "round_order":         0,
     }
 
 
@@ -75,20 +79,24 @@ def moderator_check_node(state: DebateState) -> dict:
     hallucination_count = state.get("hallucination_count", 0)
     extra = []
 
-    if verdict in ("intervene", "hallucination"):
-        if verdict == "hallucination":
+    if verdict == "hallucination":
+        if True:
             hallucination_count += 1
         msg = f"[사회자 개입] {note}"
         if parsed.get("corrected_fact"):
             msg += f"\n정정: {parsed['corrected_fact']}"
         extra = [{
-            "agent_role": "moderator", "round": state["current_round"],
-            "round_order": state["round_order"] + 1, "content": msg,
-            "model_used": "deepseek/deepseek-r1:free", "evidences": [],
+            "agent_role":  "moderator",
+            "round":       last["round"],   # 검증 대상 발언의 round 사용
+            "round_order": state["round_order"] + 1,
+            "topic_index": last.get("topic_index", state.get("current_topic_index", 0)),
+            "content":     msg,
+            "model_used":  "gpt-4o-mini",
+            "evidences":   [],
         }]
 
     return {
-        "moderator_flag":      "intervene" if verdict != "ok" else "ok",
+        "moderator_flag":      "intervene" if verdict == "hallucination" else "ok",
         "intervention_note":   note,
         "hallucination_count": hallucination_count,
         "statements":          extra,
@@ -119,10 +127,36 @@ async def moderator_summary_node(state: DebateState) -> dict:
     summary = parsed.get("summary_content", raw)
     points  = parsed.get("key_points", [])
 
+    # 새 round 이름 → DB enum 호환 매핑
+    _round_map = {
+        "claim":            "opening",
+        "counter_rebuttal": "closing",
+    }
+
+    # debate_session upsert (FK 충족)
+    try:
+        from app.core.database import get_pool  # noqa
+        _pool = await get_pool()
+        async with _pool.acquire() as conn:
+            # app_user upsert
+            await conn.execute("""
+                INSERT INTO app_user (id, email, password_hash)
+                VALUES ($1::uuid, $2, 'test')
+                ON CONFLICT (id) DO NOTHING
+            """, state["user_id"], f"{state['user_id']}@test.local")
+            # debate_session upsert
+            await conn.execute("""
+                INSERT INTO debate_session (id, user_id, symbol, category, status)
+                VALUES ($1::uuid, $2::uuid, $3, $4, 'running')
+                ON CONFLICT (id) DO NOTHING
+            """, state["session_id"], state["user_id"], state["symbol"], state["category"])
+    except Exception as e:
+        logger.warning(f"[moderator_summary] session upsert 실패 (무시): {e}")
+
     # DB 저장
     for stmt in state["statements"]:
         stmt_id = await save_statement(
-            session_id=state["session_id"], round_=stmt["round"],
+            session_id=state["session_id"], round_=_round_map.get(stmt["round"], stmt["round"]),
             round_order=stmt["round_order"], agent_role=stmt["agent_role"],
             content=stmt["content"], model_name=stmt.get("model_used", ""),
         )
@@ -141,7 +175,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
     await save_statement(
         session_id=state["session_id"], round_="summary",
         round_order=state["round_order"] + 1, agent_role="moderator",
-        content=summary, model_name="deepseek/deepseek-r1:free",
+        content=summary, model_name="gpt-4o-mini",
     )
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
@@ -156,7 +190,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "statements": [{
             "agent_role": "moderator", "round": "summary",
             "round_order": state["round_order"] + 1,
-            "content": summary, "model_used": "deepseek/deepseek-r1:free", "evidences": [],
+            "content": summary, "model_used": "gpt-4o-mini", "evidences": [],
         }],
         "summary_content": summary,
         "key_points":      points,

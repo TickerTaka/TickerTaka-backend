@@ -26,18 +26,18 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     embedding_model: str = Field(default="jhgan/ko-sroberta-multitask", alias="EMBEDDING_MODEL")
 
-    # OpenRouter
+    # OpenRouter (하위 호환용 — 더 이상 LLM 호출에 사용하지 않음)
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         alias="OPENROUTER_BASE_URL",
     )
 
-    # 무료 모델 ID
-    bull_model:      str = Field(default="meta-llama/llama-3.3-70b-instruct:free", alias="BULL_MODEL")
-    bear_model:      str = Field(default="meta-llama/llama-3.3-70b-instruct:free", alias="BEAR_MODEL")
-    moderator_model: str = Field(default="deepseek/deepseek-r1:free",              alias="MODERATOR_MODEL")
-    fallback_model:  str = Field(default="openrouter/free",                        alias="FALLBACK_MODEL")
+    # 모델 ID (GPT-4o-mini)
+    bull_model:      str = Field(default="gpt-4o-mini", alias="BULL_MODEL")
+    bear_model:      str = Field(default="gpt-4o-mini", alias="BEAR_MODEL")
+    moderator_model: str = Field(default="gpt-4o-mini", alias="MODERATOR_MODEL")
+    fallback_model:  str = Field(default="gpt-4o-mini", alias="FALLBACK_MODEL")
     llm_cache_enabled: bool = Field(default=True, alias="LLM_CACHE_ENABLED")
     llm_cache_ttl_seconds: int = Field(default=86400, alias="LLM_CACHE_TTL_SECONDS")
     max_tokens_per_user_per_day: int = Field(default=1000000, alias="MAX_TOKENS_PER_USER_PER_DAY")
@@ -62,12 +62,12 @@ class Settings(BaseSettings):
     jwt_secret:       str = Field(default="dev-secret-key-min-32-characters!!", alias="JWT_SECRET")
     jwt_expire_hours: int = Field(default=24, alias="JWT_EXPIRE_HOURS")
 
-    @field_validator("openrouter_api_key")
+    @field_validator("openai_api_key")
     @classmethod
     def warn_missing_key(cls, v):
         if not v:
             import warnings
-            warnings.warn("OPENROUTER_API_KEY 미설정 — LLM 기능 비활성화됩니다")
+            warnings.warn("OPENAI_API_KEY 미설정 — LLM 기능 비활성화됩니다")
         return v
 
     def estimated_tokens_for_category(self, category: str) -> int:
