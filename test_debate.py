@@ -1,5 +1,8 @@
 # test_debate.py
-"""에이전트 단독 실행 테스트"""
+"""
+에이전트 단독 실행 테스트
+터미널 실행 예시 python test_debate.py 005930 삼성전자 financial
+"""
 import asyncio
 import uuid
 import sys
@@ -34,7 +37,7 @@ from app.core.debate_runtime_guard import get_tracker
 
 
 async def run(
-    symbol:      str = "005930.KS",
+    symbol:      str = "005930",
     symbol_name: str = "삼성전자",
     category:    str = "financial",
     session_id:  str | None = None,
@@ -134,7 +137,7 @@ async def run(
 
 if __name__ == "__main__":
     import sys
-    symbol      = sys.argv[1] if len(sys.argv) > 1 else "005930.KS"
+    symbol      = sys.argv[1] if len(sys.argv) > 1 else "005930"
     symbol_name = sys.argv[2] if len(sys.argv) > 2 else "삼성전자"
     category    = sys.argv[3] if len(sys.argv) > 3 else "financial"
     session_id  = sys.argv[4] if len(sys.argv) > 4 else None
