@@ -117,10 +117,44 @@
 
 ## PER/PBR 정책
 
-- `financial_cache`는 **재무제표 원숫자 + ROE + debt_ratio**까지만 저장
-- `PER`, `PBR`은 가격이 바뀌면 함께 바뀌므로 `financial_cache`의 고정 저장값으로 다루지 않음
-- 이번 단계 구현에서는 `PER`, `PBR`을 `NULL`로 유지
-- 후속 단계에서 `price_cache + financial_cache`를 조합하는 별도 계산 정책이 정해질 때만 보강
+- `financial_cache`는 **재무제표 원숫자 + ROE + debt_ratio**를 기본 저장값으로 유지
+- `PER`, `PBR`은 가격 의존값이라 분기 수집 시점에는 여전히 `NULL`로 시작
+- 이후 **price sync 직후** 최신 종가 기준으로 `financial_cache`의 최신 분기 row에 `PER/PBR`을 갱신한다
+- 구현은 `PyKrxClient.get_market_fundamental` 경로를 사용해 상장주식수 병목 없이 `PER/PBR/EPS/BPS`를 가져오는 방식으로 해결
+
+### 현재 구현된 cadence
+
+- 재무 원천 데이터: 분기 1회 (`financial_cache`)
+- 가격 원천 데이터: 거래일 1회 종가 (`price_cache`)
+- `PER/PBR` 저장값: **가격 sync 직후 거래일 1회 재계산**
+- 장중 상세/토론용 현재가: `intraday_quote`에서 별도 처리 (저장값과 분리)
+
+### 구현 위치
+
+- `app/domain/financial_ratios.py`
+  - `compute_per()`
+  - `compute_pbr()`
+- `app/external/krx_client.py`
+  - `MarketFundamentalRecord`
+  - `fetch_latest_market_fundamental()`
+- `app/domain/price_ingestion.py`
+  - 가격 적재 + 지표 계산 후 `_sync_latest_valuation_metrics()` 수행
+- `app/repositories/financial_cache_repository.py`
+  - `get_latest_row()`
+  - `update_latest_valuation()`
+
+### 검증
+
+- `scripts/validate_price_ingestion.py`
+  - fake `price_client`가 fundamental(`PER=12.34`, `PBR=1.23`)을 반환하도록 보강
+  - price sync 후 최신 `financial_cache` row의 `per/pbr`이 갱신되는지 함께 확인
+
+로컬 실행:
+
+```bash
+source venv/bin/activate
+python -m scripts.validate_price_ingestion
+```
 
 ## 다음
 
@@ -229,3 +263,117 @@ filing 수동 병합 + Stage 4 인프라 진입 이후, Stage 3.1/3.2 산출물�
 ### 판정
 
 Stage 3.1/3.2의 구조는 그대로 유효. filing 통합 과정에서 financial 흐름에 회귀를 일으킨 변경 없음. live 검증은 여전히 부분적이지만 plan 보완 메모(2026-05-23) 권장 사항 일부는 mergedb 시점에 이미 반영됨(`dart-api-count`, retry, `refresh_corp_code_map.py`). 나머지는 운영 품질 단계 작업으로 자연 이월.
+
+---
+
+## 검증/보완 메모 (2026-05-30, PER/PBR A안 구현 반영 후 검토)
+
+위 "PER/PBR 정책"에서 후속으로 미뤄두었던 valuation 갱신을 **A안(price sync 직후 거래일 1회 재계산)**으로 실제 구현한 뒤, 변경 파일을 코드 레벨에서 다시 점검했다. 대상:
+
+- `app/domain/financial_ratios.py` — `compute_per()`, `compute_pbr()`
+- `app/external/krx_client.py` — `MarketFundamentalRecord`, `fetch_latest_market_fundamental()`
+- `app/repositories/financial_cache_repository.py` — `get_latest_row()`, `update_latest_valuation()`
+- `app/domain/price_ingestion.py` — `_sync_latest_valuation_metrics()`
+- `scripts/validate_price_ingestion.py` — fake fundamental 반영 검증
+
+### 정합성 확인 (OK)
+
+- `compute_per` / `compute_pbr`가 `eps/bps in (None, 0)` 분기로 0 division 방지 — 기존 `compute_roe` 패턴과 일관 (`financial_ratios.py:16-25`)
+- `fetch_latest_market_fundamental`: `lookback_days=10`으로 주말/연휴 휴장 커버, `frame.empty → None` 반환, `_to_optional_float`가 pykrx의 NaN/None을 안전 변환 (`krx_client.py:74-117`)
+- `_sync_latest_valuation_metrics`가 지표 계산 후 / trim·`_set_last_sync` 전에 호출되고, 직후 `session.commit()`(`price_ingestion.py:105`)으로 영속화됨 — 트랜잭션 경계 정상
+- `financial_repo`가 `__init__`에서 주입(`price_ingestion.py:52`), import·호출 시그니처 일치 — 컴파일 통과와 부합
+- `update_latest_valuation`이 최신 분기 row 없을 때 `False` 반환으로 graceful skip (`financial_cache_repository.py:86-88`) — 분기 재무 미적재 종목에서 예외 안 남
+- fundamental fetch 실패를 `try/except`로 잡아 로그만 남기고 return (`price_ingestion.py:152-154`) — "보조 기능 실패가 가격 적재 본체를 깨면 안 된다" 정책 부분 충족(단 아래 보완 3 참고)
+- pykrx `PER/PBR` 우선 + `None`일 때만 `compute_*` fallback (`price_ingestion.py:164-165`) — 상장주식수 병목 우회라는 설계 의도와 정합
+
+### 보완 필요 / 누락
+
+1. **(HIGH·데이터 품질) 적자/자본잠식 종목 PER·PBR이 `0`으로 저장됨** — pykrx `get_market_fundamental_by_date`는 EPS ≤ 0인 종목의 `PER`을 `NULL`이 아니라 **`0.0`으로 반환**한다(자본잠식 시 `PBR`도 동일). 현재 코드는 `fundamental.per if fundamental.per is not None else ...`(`price_ingestion.py:164`) 분기라, `0.0`은 `not None`이므로 **그대로 0이 저장**된다. 결과적으로 적자 종목이 "PER 0 = 초저평가"로 오해될 수 있고, 토론 `data_node`의 `_fmt_finance`에도 `PER 0`으로 흘러간다.
+   **권장**: `fetch_latest_market_fundamental`(또는 `_sync_latest_valuation_metrics`)에서 `per/pbr ≤ 0`을 `None`으로 정규화. EPS/BPS가 음수면 valuation 자체가 N/A라는 의미를 살려야 한다.
+
+2. **(HIGH·회귀) financial 재적재가 PER/PBR을 NULL로 덮어씀** — `FinancialCacheRepository.upsert_many`의 `set_` 절에 `per`/`pbr`이 포함(`financial_cache_repository.py:49-50`)되어 있고, `financial_ingestion`은 항상 `"per": None, "pbr": None`을 전달(`financial_ingestion.py:98-99`)한다. 따라서 **`financial_cache_scheduler`의 refresh sweep이 price sweep보다 나중에 돌면, 직전 price sync가 채운 최신 분기 row의 PER/PBR이 다시 NULL로 리셋**되고 다음 price sync까지 빈 값이 된다. watchlist 4-task enqueue 순서가 `news → price → financial`(`watchlist.py:71-74`)이라 **신규 등록 직후에도 financial이 가장 나중에 돌아 PER/PBR이 항상 NULL로 시작**한다.
+   **권장**: ① `upsert_many`의 `set_`에서 `per`/`pbr`을 제외해 "가격 경로 전용 컬럼"으로 분리하거나, ② `COALESCE(EXCLUDED.per, financial_cache.per)`로 기존 값 보존. ①이 단순하고 의미상 정확(분기 수집은 valuation을 모름).
+
+3. **(MED·견고성) valuation의 DB 호출이 `try` 밖** — `_sync_latest_valuation_metrics`의 `try/except`는 `fetch_latest_market_fundamental`만 감싼다. 이후 `price_repo.list_recent` / `update_latest_valuation`(내부 `flush`)(`price_ingestion.py:159-166`)는 `try` 밖이라, **DB 측 예외가 나면 가격 적재 트랜잭션 전체가 실패**한다. 보완 1·2의 정책상 valuation은 보조 기능이므로, 본체를 깨지 않아야 한다.
+   **권장**: 메서드 전체를 best-effort로(외부 + DB 갱신까지 `try`로) 감싸고 실패 시 로그만 남긴다.
+
+4. **(MED·관측성) PER/PBR이 `SyncPriceResult`에 노출되지 않음** — 결과 dataclass에 valuation 필드가 없어(`price_ingestion.py:23-32`), 검증 스크립트의 "per/pbr 출력" 기대치는 `financial_cache`를 **별도 조회**해야만 확인된다. 스케줄러 `PriceSweepResult`도 valuation 갱신 건수를 집계하지 못해, 운영에서 "오늘 몇 종목 PER 갱신됐나"를 알 수 없다.
+   **권장**: `SyncPriceResult`에 `per`/`pbr`(또는 `valuation_updated: bool`) 추가, `PriceSweepResult`에 누적 카운터 추가.
+
+5. **(NOTE·설계) 분기 row에 시점성(point-in-time) valuation을 얹는 의미 불일치** — PER/PBR은 "오늘 종가" 기준값인데 이를 **최신 분기 재무 row**에 저장한다. fiscal period와 valuation 시점이 어긋나며, 신규 분기 데이터가 DART로 들어온 직후 ~ 첫 price sync 전까지 **NULL 윈도우**가 생긴다(보완 2와 연동). `data_node`가 `None`을 N/A로 처리하므로 토론은 안전하지만, 프론트 상세 화면에서 "PER 없음"이 잠깐 노출될 수 있다. 장기적으로는 valuation을 분기 row가 아니라 `price_cache`(일자별) 또는 별도 `valuation_cache`에 두는 편이 의미상 깨끗하다 — 후속 판단.
+
+6. **(LOW·정합) 종가 소스 이원화** — pykrx의 `PER/PBR`은 KRX 자체 종가 기준으로 계산된 값이고, fallback `compute_*`는 우리 `price_cache` 최신 `close_price` 기준(`price_ingestion.py:163-165`)이다. 두 경로가 서로 다른 날짜/종가를 쓸 수 있어 미세 불일치 가능. 대부분 KRX 값을 그대로 쓰므로 영향은 작다.
+
+7. **(LOW·테스트) 엣지 케이스 미검증** — `validate_price_ingestion.py`는 happy path(`PER=12.34`, `PBR=1.23`) 1건만 fake로 검증한다. ① fundamental `None`(상폐/신규 종목), ② 최신 분기 row 없음(`update_latest_valuation → False`), ③ 적자 종목 `PER=0`(보완 1) 경로는 미검증.
+   **권장**: 위 3개 fake 분기를 validate에 추가.
+
+### 다음 단계 권고
+
+- 1순위(즉시): 보완 1(적자 `PER=0 → None` 정규화) + 보완 2(financial 재적재 NULL 덮어쓰기 차단). 이 둘은 잘못된 값이 토론·프론트로 흘러가는 **데이터 정확성** 문제라 우선.
+- 2순위: 보완 3(valuation DB 호출 best-effort) — 가격 적재가 valuation 때문에 실패하는 회귀 방지.
+- 3순위: 보완 4(결과 노출) + 보완 7(엣지 테스트) — 관측성·검증 보강.
+- 후속: 보완 5(valuation 저장 위치 재설계)는 Stage 4 토론 품질 작업과 함께 판단.
+- 라이브: `pykrx` 설치 환경에서 `python -m scripts.validate_price_ingestion` 통과 확인 + 실제 적자 종목 1개로 `PER` 저장값이 `0`이 아닌 `NULL`로 들어가는지 라이브 점검(보완 1 회귀 테스트).
+
+### 판정
+
+A안 구조 자체(price sync 직후 pykrx fundamental로 최신 분기 row의 PER/PBR 갱신)는 설계 의도대로 연결되었고 컴파일·인터페이스 정합도 확인됨. 다만 **적자 종목 PER=0 저장(보완 1)**과 **financial 재적재 시 NULL 덮어쓰기(보완 2)** 두 건은 출력값 정확성에 직접 영향을 주므로 라이브 검증 전에 정리하는 것을 권장한다. 나머지는 견고성·관측성 보강으로 후속 이월 가능.
+
+### 후속 반영 (2026-05-30)
+
+- `app/domain/financial_ratios.py`에서 `compute_per()` / `compute_pbr()`가 `price <= 0`, `eps/bps <= 0`이면 `None`을 반환하도록 강화했다.
+- `app/domain/price_ingestion.py`에서 `normalize_positive_ratio()`를 적용해 pykrx가 돌려주는 `per/pbr == 0` 값을 그대로 저장하지 않고 `None`으로 정규화한다.
+- `_sync_latest_valuation_metrics()` 전체를 best-effort `try/except`로 감싸 fundamental 조회뿐 아니라 `list_recent()` / `update_latest_valuation()`의 DB 예외도 가격 적재 본체를 깨지 않도록 바꿨다.
+- `FinancialCacheRepository.upsert_many()`의 `set_` 절에서 `per/pbr`를 제거해, financial 재적재가 price sync가 채운 valuation 값을 `NULL`로 덮어쓰지 않도록 수정했다.
+- `scripts/validate_price_ingestion.py`에 적자 케이스 fake(`per=0`, `pbr=0`, `eps<0`, `bps<0`)를 추가해 `loss_case_per=None`, `loss_case_pbr=None` 경로를 검증하도록 보강했다.
+
+### 최종 판정
+
+2026-05-30 보완 적용 후, 본 메모의 HIGH 항목 1~3은 코드 반영 완료. 남은 것은 관측성(`SyncPriceResult` 노출)과 장기 저장 모델(`valuation_cache` 분리 여부) 같은 후속 품질/설계 보강이다.
+
+---
+
+## 검증/보완 메모 (2026-05-30, 보완 반영분 재검증)
+
+위 "후속 반영 (2026-05-30)"에 기재된 보완 4건이 실제 코드에 반영되었는지 재검토하고, 검증 스크립트를 다시 실행했다.
+
+### 코드 재확인 (반영 OK)
+
+- **보완 1 (적자 valuation 0 저장 차단)** — 반영 확인.
+  - `financial_ratios.py:17,23`: `compute_per`/`compute_pbr`가 `price <= 0`·`eps/bps <= 0`에서 `None` 반환.
+  - `financial_ratios.py:28-31`: `normalize_positive_ratio()` 신설(`value <= 0 → None`).
+  - `price_ingestion.py:160-166`: pykrx의 `per/pbr`을 `normalize_positive_ratio`로 거른 뒤, `None`일 때만 `compute_*` fallback. → pykrx가 적자 종목에 돌려주는 `0.0`이 그대로 저장되지 않음.
+- **보완 2 (financial 재적재 NULL 덮어쓰기 차단)** — 반영 확인.
+  - `financial_cache_repository.py:42-53`: `upsert_many`의 `set_` 절에서 `per`/`pbr` 제거됨. → 분기 재적재(refresh/cleanup sweep)가 price sync가 채운 valuation을 더 이상 NULL로 덮지 않음. valuation은 `update_latest_valuation()` 단일 경로로만 쓰여 책임이 명확해짐.
+- **보완 3 (valuation DB 호출 best-effort)** — 반영 확인.
+  - `price_ingestion.py:146-170`: `_sync_latest_valuation_metrics` 전체 본문이 `try`로 감싸짐. `list_recent()`/`update_latest_valuation()`(내부 flush)의 DB 예외도 잡아 로그만 남기고 return → 가격 적재 본체 트랜잭션을 깨지 않음.
+- **보완 7 (엣지 케이스 테스트)** — 부분 반영. `validate_price_ingestion.py:212-225`에 적자 케이스(`per=0`, `pbr=0`, `eps=-100`, `bps=-1000`) fake 추가. (fundamental `None` / 최신 분기 row 없음 경로는 여전히 미검증 — LOW로 잔존.)
+
+### 검증 실행 결과 (live)
+
+`wsl Ubuntu / venv` 환경에서 실제 실행함(이전 회차는 셸에 sqlalchemy 부재로 미실행이었음).
+
+```
+$ python -m scripts.validate_price_ingestion
+{'fetched': 140, 'inserted': 140, 'updated': 0, 'indicators': 140,
+ 'per': 12.34, 'pbr': 1.23, 'trimmed_price_rows': 0, 'trimmed_indicator_rows': 0}
+{'loss_case_fetched': 140, 'loss_case_per': None, 'loss_case_pbr': None}
+
+$ python -m compileall app scripts -q
+COMPILE_OK
+```
+
+- 일반 케이스: `per=12.34`, `pbr=1.23` 정상 갱신.
+- 적자 케이스: `loss_case_per=None`, `loss_case_pbr=None` → **보완 1 회귀 테스트 통과**(0이 아닌 NULL).
+- `compileall` 통과.
+
+### 잔존 항목 (후속 이월)
+
+- **보완 4 (관측성)**: `SyncPriceResult`에 valuation 필드가 여전히 없어, 검증·스케줄러가 PER/PBR 갱신 건수를 결과 객체로는 알 수 없음. 현재는 `financial_cache` 직접 조회로만 확인. — MED, 후속.
+- **보완 5 (저장 위치 재설계)**: 시점성 valuation을 분기 row에 얹는 의미 불일치 + 신규 분기 직후 NULL 윈도우는 구조 이슈로 잔존. `valuation_cache` 분리 여부는 Stage 4 품질 작업과 함께 판단. — NOTE.
+- **보완 6 (종가 소스 이원화)** / **보완 7 잔여 엣지**: LOW, 영향 작음.
+- **라이브(실 pykrx/실 PG)**: 여전히 fake 검증. 실제 적자 종목으로 `PER` 저장값이 NULL인지 1회 라이브 점검은 미수행.
+
+### 판정
+
+후속 반영 4건 중 HIGH 3건(보완 1·2·3)은 코드·실행 검증 모두 통과. fake 기준이지만 적자 회귀 테스트가 NULL로 닫혔고 컴파일도 정상이다. 출력값 정확성에 직접 영향을 주던 항목은 이 회차로 정리 완료. 남은 보완 4~7은 관측성·설계·라이브 검증 영역으로, 동작 정확성을 막지 않으므로 후속 품질 단계로 이월한다.

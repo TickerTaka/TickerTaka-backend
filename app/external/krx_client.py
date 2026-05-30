@@ -17,6 +17,16 @@ class DailyPriceRecord:
     volume: int | None
 
 
+@dataclass(slots=True)
+class MarketFundamentalRecord:
+    symbol: str
+    price_date: date
+    eps: float | None
+    bps: float | None
+    per: float | None
+    pbr: float | None
+
+
 class PyKrxClient:
     """Thin wrapper around pykrx for daily OHLCV history."""
 
@@ -60,3 +70,48 @@ class PyKrxClient:
                 )
             )
         return records
+
+    def fetch_latest_market_fundamental(
+        self,
+        symbol: str,
+        *,
+        end_date: date,
+        market: MarketType,
+        lookback_days: int = 10,
+    ) -> MarketFundamentalRecord | None:
+        if market not in self.SUPPORTED_MARKETS:
+            raise ValueError(f"pykrx unsupported market: {market}")
+
+        try:
+            from pykrx import stock
+        except ImportError as exc:  # pragma: no cover - depends on local env
+            raise RuntimeError("pykrx is required for price cache ingestion") from exc
+
+        start_date = max(date(2000, 1, 1), end_date.fromordinal(end_date.toordinal() - lookback_days))
+        frame = stock.get_market_fundamental_by_date(
+            fromdate=start_date.strftime("%Y%m%d"),
+            todate=end_date.strftime("%Y%m%d"),
+            ticker=symbol,
+        )
+        if frame.empty:
+            return None
+
+        latest_index = frame.index[-1]
+        row = frame.iloc[-1]
+        return MarketFundamentalRecord(
+            symbol=symbol,
+            price_date=latest_index.date(),
+            eps=_to_optional_float(row.get("EPS")),
+            bps=_to_optional_float(row.get("BPS")),
+            per=_to_optional_float(row.get("PER")),
+            pbr=_to_optional_float(row.get("PBR")),
+        )
+
+
+def _to_optional_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None

@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.redis import build_redis_client, make_key
+from app.domain.financial_ratios import compute_pbr, compute_per, normalize_positive_ratio
 from app.domain.technical_indicator import build_indicator_rows
 from app.external.krx_client import DailyPriceRecord, PyKrxClient
 from app.models import PriceCache, TickerMetadata
+from app.repositories.financial_cache_repository import FinancialCacheRepository
 from app.repositories.price_cache_repository import PriceCacheRepository
 from app.repositories.technical_indicator_cache_repository import TechnicalIndicatorCacheRepository
 
@@ -47,6 +49,7 @@ class PriceIngestionService:
         self.session = session
         self.price_repo = PriceCacheRepository(session)
         self.indicator_repo = TechnicalIndicatorCacheRepository(session)
+        self.financial_repo = FinancialCacheRepository(session)
         self.price_client = price_client or PyKrxClient()
         self.redis_client = redis_client or build_redis_client(get_settings().redis_url)
 
@@ -95,6 +98,7 @@ class PriceIngestionService:
 
             indicator_count = self.sync_technical_indicators_for_ticker(symbol)
             result.indicators_count = indicator_count
+            self._sync_latest_valuation_metrics(symbol, market=ticker.market, end_date=end_date)
 
             result.trimmed_price_rows = self.price_repo.trim_rows_for_symbol(symbol, self.MAX_CACHE_ROWS)
             result.trimmed_indicator_rows = self.indicator_repo.trim_rows_for_symbol(symbol, self.MAX_CACHE_ROWS)
@@ -137,6 +141,33 @@ class PriceIngestionService:
             )
             previous_close = record.close_price
         return rows
+
+    def _sync_latest_valuation_metrics(self, symbol: str, *, market, end_date: date) -> None:
+        try:
+            fundamental = self.price_client.fetch_latest_market_fundamental(
+                symbol,
+                end_date=end_date,
+                market=market,
+            )
+            if fundamental is None:
+                return
+
+            latest_price_row = self.price_repo.list_recent(symbol, limit=1)
+            if not latest_price_row:
+                return
+
+            close_price = float(latest_price_row[0].close_price)
+            per = normalize_positive_ratio(fundamental.per)
+            if per is None:
+                per = compute_per(close_price, fundamental.eps)
+
+            pbr = normalize_positive_ratio(fundamental.pbr)
+            if pbr is None:
+                pbr = compute_pbr(close_price, fundamental.bps)
+
+            self.financial_repo.update_latest_valuation(symbol, per=per, pbr=pbr)
+        except Exception:
+            logger.exception("price valuation sync failed for %s", symbol)
 
     def _lock_key(self, symbol: str) -> str:
         return make_key("price-sync", "lock", symbol)

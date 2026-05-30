@@ -81,9 +81,9 @@ class FinancialIngestionService:
             rows = []
             retrieved_at = datetime.now(UTC)
             for record in records:
-                # PER/PBR are price-dependent valuation metrics. We keep them
-                # out of the initial financial cache sync and leave them NULL
-                # until a later price-joined calculation policy is finalized.
+                # PER/PBR are recalculated by the price sync path. Financial
+                # ingest initializes them as NULL and the repository preserves
+                # any existing valuation values on later re-syncs.
                 rows.append(
                     {
                         "symbol": symbol,
