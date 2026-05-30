@@ -342,6 +342,7 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 
 - `mergedb`에서 hc filing 수동 병합 1차 완료
 - Stage 3 핵심 범위 완료
+- `price_cache` sync 직후 `financial_cache` 최신 분기 row의 `PER/PBR` 거래일 1회 재계산 경로 추가
 - Stage 4 runtime 인프라 1차 완료
 - `uvicorn + curl` 기준 debate API end-to-end 동작 확인
 
@@ -677,3 +678,20 @@ Stage 3은 **핵심 구현 범위 기준 완료**로 본다.
 | Stage 4 live | **품질 보정 단계 진입** — 구조 미완 없음(약한 항목 1건만 어댑터 1줄). `filing` 차원 충돌과 yfinance suffix는 *코드 구조의 결함이 아니라 데이터 상태 / 경계 어댑터 누락*이라 별도 plan 작성 없이 일과 내 처리 가능 |
 
 검증자 입장에서의 한 줄 요약: **"Stage 3 완료 + Stage 4 1차 구현 완료, 남은 작업은 live 품질 보정"이라는 본 보고서의 자기 판정은 코드/검증 스크립트/plan과 모두 정합한다.**
+
+---
+
+## 추가 반영 (2026-05-30, PER/PBR A안 보완)
+
+Stage 3의 PER/PBR A안 구현 후 검토 메모에서 지적된 값 정확성 이슈를 바로 반영했다.
+
+- 적자/자본잠식 종목에서 pykrx가 반환하는 `per/pbr == 0`은 이제 `None`으로 정규화된다. 따라서 토론/프론트에 `PER 0 = 초저평가` 같은 오해 소지가 있는 값이 그대로 노출되지 않는다.
+- financial 재적재가 `per/pbr`를 `NULL`로 덮어쓰던 문제는 `FinancialCacheRepository.upsert_many()`의 update 절에서 `per/pbr`를 제거해 해결했다. 현재 valuation 값은 price sync 경로 전용으로 보존된다.
+- valuation 동기화는 fundamental fetch뿐 아니라 `list_recent()` / `update_latest_valuation()`까지 모두 best-effort 예외 격리로 감싸 가격 적재 본체를 깨지 않도록 정리했다.
+- 검증 스크립트 `python -m scripts.validate_price_ingestion`가 happy path와 함께 적자 케이스(`loss_case_per=None`, `loss_case_pbr=None`)까지 출력하도록 확장됐다.
+
+판정은 유지된다.
+
+- Stage 3: 완료
+- Stage 4: 1차 구현 완료
+- 남은 작업: live 품질 보정 단계

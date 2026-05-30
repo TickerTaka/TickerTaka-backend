@@ -60,7 +60,7 @@
 
 ### `financial-cache-ingestion-plan.md`
 - Phase 0 (corp_code) + Phase 1~3 → **단계 3.2에서 닫힘**
-- Phase 4 (PER/PBR — price 의존) → **후속 valuation phase**로 분리
+- Phase 4 (PER/PBR — price 의존) → **price sync 직후 거래일 1회 재계산으로 구현 완료**
 - 현재 단계 3.2의 닫힘 기준은 **재무 원숫자 + ROE/debt_ratio + scheduler**
 
 ### `filing-cache-ingestion-plan.md`
@@ -109,7 +109,7 @@
         │                       │ corp_code 매핑 공유 │
         │                       └─────────────────────┘
         │
-        │ 후속 valuation phase 의존
+        │ price sync 직후 PER/PBR 재계산
         └──► financial-cache Phase 4 (별도)
                   │
                   ▼
@@ -235,7 +235,7 @@
 - corp_code 매핑 도입 (filing과 공유) — `app/external/dart/corp_code.py`
 - 분기 단위 (변동 빈도 가장 낮음 → corp_code 인프라 안정화에 적합)
 - 5년 백필 (~20분기)
-- ROE/debt_ratio 즉시 계산, PER/PBR은 가격 의존이라 후속 valuation phase로 분리
+- ROE/debt_ratio 즉시 계산, PER/PBR은 가격 sync 직후 최신 분기 row에 재계산
 
 **이 단계 완료 시 상태**:
 - ✅ 닫히는 Phase: `financial-cache Phase 0-4`
