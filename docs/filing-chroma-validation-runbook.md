@@ -267,13 +267,13 @@ redis==7.0.1
 원래 코드의 DB URL은 다음과 같다.
 
 ```text
-postgresql://stock_user:tickertaka@101.79.19.53:5432/stock_debate
+postgresql://USERNAME:PASSWORD@HOST:5432/DBNAME
 ```
 
 임시 실행에서는 psycopg v3 드라이버를 쓰기 위해 아래처럼 바꿔 넣었다.
 
 ```text
-postgresql+psycopg://stock_user:tickertaka@101.79.19.53:5432/stock_debate
+postgresql+psycopg://USERNAME:PASSWORD@HOST:5432/DBNAME
 ```
 
 ---
@@ -448,7 +448,7 @@ kill 89311
 
 ```bash
 PYTHONPATH=. \
-DATABASE_URL='postgresql+psycopg://stock_user:tickertaka@101.79.19.53:5432/stock_debate' \
+DATABASE_URL='postgresql+psycopg://USERNAME:PASSWORD@HOST:5432/DBNAME' \
 CHROMA_URL='http://127.0.0.1:8080' \
 /private/tmp/tickertaka-sync-venv/bin/python \
 scripts/validate_chroma_connection.py
@@ -496,7 +496,7 @@ PYTHONPATH=. 를 붙여 프로젝트 루트를 import path에 추가했다.
 
 ```bash
 PYTHONPATH=. \
-DATABASE_URL='postgresql+psycopg://stock_user:tickertaka@101.79.19.53:5432/stock_debate' \
+DATABASE_URL='postgresql+psycopg://USERNAME:PASSWORD@HOST:5432/DBNAME' \
 CHROMA_URL='http://127.0.0.1:8080' \
 /private/tmp/tickertaka-sync-venv/bin/python \
 scripts/validate_filing_evidence_retrieval.py

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # DB
     database_url: str = Field(
-        default="postgresql+asyncpg://stock_user:tickertaka@101.79.19.53:5432/stock_debate",
+        default="postgresql+asyncpg://USERNAME:PASSWORD@HOST:5432/DBNAME",
         alias="DATABASE_URL",
     )
     redis_url:   str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
