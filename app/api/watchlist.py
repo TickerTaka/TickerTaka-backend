@@ -23,6 +23,7 @@ from app.domain.watchlist_service import (
     sync_watchlist_financials,
     sync_watchlist_news,
     sync_watchlist_prices,
+    sync_watchlist_valuation,
 )
 from app.models import FilingCache, NewsCache, TickerMetadata
 from app.schemas.market_data import WatchlistFeedItem, WatchlistFeedResponse
@@ -77,9 +78,10 @@ def create_watchlist(
 
     try:
         background_tasks.add_task(sync_watchlist_news, watchlist.symbol)
-        background_tasks.add_task(sync_watchlist_prices, watchlist.symbol)
         background_tasks.add_task(sync_watchlist_financials, watchlist.symbol)
+        background_tasks.add_task(sync_watchlist_prices, watchlist.symbol)
         background_tasks.add_task(sync_watchlist_filings, watchlist.symbol)
+        background_tasks.add_task(sync_watchlist_valuation, watchlist.symbol)
         sync_enqueued = True
     except Exception:
         logger.exception("failed to enqueue watchlist sync for %s", watchlist.symbol)

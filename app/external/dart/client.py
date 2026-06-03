@@ -30,6 +30,12 @@ REPORT_CODES = {
 }
 KST = ZoneInfo("Asia/Seoul")
 _MIN_FILING_TEXT_LEN = 50
+_EPS_ACCOUNT_NAMES = {
+    "기본주당이익",
+    "희석주당이익",
+    "보통주기본주당이익",
+    "주당순이익",
+}
 
 
 def _split_text(text: str, max_chars: int) -> list[str]:
@@ -62,6 +68,24 @@ def _span_to_int(value: str | int | None) -> int:
     return max(parsed, 1)
 
 
+def _to_optional_float(value) -> float | None:
+    try:
+        if value in (None, "", "-"):
+            return None
+        return float(str(value).replace(",", ""))
+    except Exception:
+        return None
+
+
+def _to_optional_int(value) -> int | None:
+    try:
+        if value in (None, "", "-"):
+            return None
+        return int(str(value).replace(",", ""))
+    except Exception:
+        return None
+
+
 @dataclass(slots=True, frozen=True)
 class DartFilingItem:
     corp_code: str
@@ -88,6 +112,14 @@ class FinancialStatementRecord:
     total_liabilities: float | None
     total_equity: float | None
     source_url: str
+
+
+@dataclass(slots=True)
+class DartValuationInputs:
+    fiscal_year: int
+    fiscal_quarter: int
+    eps: float | None
+    shares_outstanding: int | None
 
 
 class DartClient:
@@ -120,6 +152,58 @@ class DartClient:
                 if record is not None:
                     records.append(record)
         return records
+
+    def fetch_valuation_inputs(
+        self,
+        *,
+        corp_code: str,
+        year: int,
+        quarter: int,
+        fs_div_priority: tuple[str, ...] = ("CFS", "OFS"),
+    ) -> DartValuationInputs | None:
+        reprt_code = REPORT_CODES.get(quarter)
+        if reprt_code is None:
+            return None
+
+        payload = None
+        for fs_div in fs_div_priority:
+            response = self._get(
+                "https://opendart.fss.or.kr/api/fnlttSinglAcnt.json",
+                params={
+                    "crtfc_key": self.settings.dart_api_key,
+                    "corp_code": corp_code,
+                    "bsns_year": str(year),
+                    "reprt_code": reprt_code,
+                    "fs_div": fs_div,
+                },
+            )
+            data = response.json()
+            if data.get("status") == "000" and data.get("list"):
+                payload = data
+                break
+
+        eps = None
+        if payload:
+            for row in payload["list"]:
+                account_name = str(row.get("account_nm", "")).strip()
+                if account_name in _EPS_ACCOUNT_NAMES:
+                    eps = _to_optional_float(row.get("thstrm_amount"))
+                    if eps is not None:
+                        break
+
+        shares_outstanding = self._fetch_shares_outstanding(
+            corp_code=corp_code,
+            year=year,
+            reprt_code=reprt_code,
+        )
+        if eps is None and shares_outstanding is None:
+            return None
+        return DartValuationInputs(
+            fiscal_year=year,
+            fiscal_quarter=quarter,
+            eps=eps,
+            shares_outstanding=shares_outstanding,
+        )
 
     def _fetch_single_period(
         self,
@@ -184,6 +268,59 @@ class DartClient:
             total_equity=mapped["total_equity"],
             source_url=source_url,
         )
+
+    def _fetch_shares_outstanding(
+        self,
+        *,
+        corp_code: str,
+        year: int,
+        reprt_code: str,
+    ) -> int | None:
+        report_candidates = [(year, reprt_code)]
+        if reprt_code != REPORT_CODES[4]:
+            report_candidates.append((year, REPORT_CODES[4]))
+        report_candidates.append((year - 1, REPORT_CODES[4]))
+
+        seen: set[tuple[int, str]] = set()
+        for candidate_year, candidate_reprt_code in report_candidates:
+            if candidate_year <= 0:
+                continue
+            key = (candidate_year, candidate_reprt_code)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            response = self._get(
+                "https://opendart.fss.or.kr/api/stockTotqySttus.json",
+                params={
+                    "crtfc_key": self.settings.dart_api_key,
+                    "corp_code": corp_code,
+                    "bsns_year": str(candidate_year),
+                    "reprt_code": candidate_reprt_code,
+                },
+            )
+            payload = response.json()
+            if payload.get("status") != "000" or not payload.get("list"):
+                continue
+
+            preferred_rows = []
+            fallback_rows = []
+            for row in payload["list"]:
+                label = " ".join(
+                    str(row.get(key, "")).strip()
+                    for key in ("se", "stock_knd", "isu_knd_nm")
+                ).strip()
+                if "보통" in label or "의결권 있는 주식" in label:
+                    preferred_rows.append(row)
+                else:
+                    fallback_rows.append(row)
+
+            for row in preferred_rows + fallback_rows:
+                for field_key in ("istc_totqy", "distb_stock_co", "stock_totqy"):
+                    parsed = _to_optional_int(row.get(field_key))
+                    if parsed and parsed > 0:
+                        return parsed
+        return None
 
     def list_filings(
         self,

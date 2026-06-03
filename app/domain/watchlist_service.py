@@ -115,6 +115,18 @@ def sync_watchlist_financials(symbol: str) -> None:
         logger.exception("watchlist background financial sync failed for %s", symbol)
 
 
+def sync_watchlist_valuation(symbol: str) -> None:
+    try:
+        with session_scope() as session:
+            PriceIngestionService(session).sync_latest_valuation_for_ticker(symbol)
+            logger.info(
+                "watchlist background valuation sync finished",
+                extra={"symbol": symbol},
+            )
+    except Exception:
+        logger.exception("watchlist background valuation sync failed for %s", symbol)
+
+
 def sync_watchlist_filings(symbol: str) -> None:
     try:
         from app.domain.evidence_indexing import EvidenceIndexingService
