@@ -157,6 +157,9 @@ class NewsIngestionService:
                 if candidate.existing is not None:
                     result.dedup_skipped_count += 1
                     continue
+                if self._has_recent_similar_topic(candidate, recent_rows):
+                    result.dedup_skipped_count += 1
+                    continue
                 if not self._passes_storage_filters(ticker, candidate, scraped):
                     result.filtered_count += 1
                     continue
@@ -165,6 +168,7 @@ class NewsIngestionService:
                 self._upsert_chroma_row(row, scraped)
                 result.inserted_count += 1
                 result.body_saved_count += 1
+                recent_rows.insert(0, row)
 
             trimmed_ids = self.repo.trim_rows_for_symbol_returning_ids(symbol, self.MAX_CACHE_ROWS)
             result.trimmed_rows_count = len(trimmed_ids)
@@ -446,6 +450,18 @@ class NewsIngestionService:
 
     def _metadata_text(self, candidate: NewsCandidate) -> str:
         return self._normalize_text(f"{candidate.item.title} {candidate.item.description}")
+
+    def _has_recent_similar_topic(self, candidate: NewsCandidate, recent_rows: list[NewsCache]) -> bool:
+        tokens = candidate.title_tokens
+        published_at = candidate.item.published_at
+        for row in recent_rows:
+            if not row.title:
+                continue
+            existing_tokens = self.normalize_title(row.title)
+            existing_published_at = row.published_at
+            if self._titles_similar(tokens, existing_tokens, published_at, existing_published_at):
+                return True
+        return False
 
     @staticmethod
     def _contains_hangul(value: str) -> bool:
