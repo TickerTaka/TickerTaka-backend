@@ -748,3 +748,47 @@ MCP를 실제로 쓰려면 MCP 클라이언트/서버 라이브러리(예: `mcp`
   **배치 실행·리포트 산출·결과 영속화까지 닫혀야 평가 증적으로 강해진다.**
 - 결론적으로 이 계획 문서는 **그대로 유효**하며, 단지 RAGAS 관련 전제는  
   **"미구현" → "1차 병합 완료, 완결 증적은 미완"** 으로 업데이트해서 읽으면 된다.
+
+---
+
+# 1차 작업 진행 기록 — #1 5대 설계문서 (2026-06-07)
+
+우선순위 #1(5대 설계문서)의 초안을 `memo/design/`에 5종 생성했고, **실제 코드와 대조해 4건을 보정**했다. 닫힘기준("문서 5종 전부 존재 + 코드 경로 1:1 대응")의 전반부는 충족됐고, 정합성 보정으로 후반부도 강화했다.
+
+## BB. 생성된 문서 (5/5)
+
+| 문서 | 파일 | 상태 |
+|---|---|---|
+| 유스케이스 명세서 | `memo/design/use-case-specification.md` | ✅ |
+| 컴포넌트 설계서 | `memo/design/component-design.md` | ✅ |
+| 인터페이스 정의서 | `memo/design/interface-definition.md` | ✅ |
+| 시퀀스 다이어그램 | `memo/design/sequence-diagram.md` | ✅ |
+| ERD | `memo/design/erd.md` | ✅ |
+
+→ **5종 전부 존재** → 평가서 항목4 "누락 캡 1" 해제 조건의 1차 요건 충족.
+
+## CC. 코드 대조로 보정한 4건 (정합성)
+
+| # | 보정 내용 | 근거 | 적용 문서 |
+|---|---|---|---|
+| 1 | **`debate_note` 테이블 누락** 추가 (14→15종, 평가서 "15개 테이블"과 일치) | `app/models/debate.py:206` `__tablename__="debate_note"`, `(user_id,session_id)` unique | erd.md, component-design.md |
+| 2 | **토론 LLM = OpenAI `gpt-4o-mini` 직접 호출**로 정정(문서엔 "OpenRouter"로 오기). OpenRouter는 RAGAS 평가 LLM(`gpt-oss-120b:free`)에만 사용 | `llm_factory.py:38–41` `api_key=openai_api_key`·base_url 없음 / `debate_evaluation.py:45` | sequence-diagram.md, component-design.md, use-case-specification.md |
+| 3 | **시퀀스에 `moderator_pre`+`moderator_check` 검증 루프 추가**(기존엔 단순 bull→bear→moderator로 항목1 강점 누락) | `debate_graph.py:60–66` 엣지·`_router` | sequence-diagram.md |
+| 4 | **`GET /api/market/indexes` 누락** 추가 | `market_data.py:265` | interface-definition.md |
+
+> ERD의 관계선(evidence→news/filing/price/financial/technical cache FK 5종 `SET NULL`, caches→ticker_metadata 1:N, moderator_summary `session_id` unique=1:1)은 코드와 **일치 확인**.
+
+## DD. #1 정밀 보강 진행 (2026-06-07)
+
+**완료 — ERD/시퀀스 코드 기준 정밀화:**
+- **ERD**(`erd.md`): 속성 포함 mermaid로 교체(15개 엔터티 PK/FK/주요 컬럼), **Enum 카탈로그**(9종, 코드 위치 명시), **제약·인덱스 절**(unique 10종 = PG 중복방어선, `cache_key` 부분 unique + `cached_from_session_id` self-ref 토론캐시), 관계표에 CASCADE/SET NULL 명시.
+- **시퀀스**(`sequence-diagram.md`):
+  - 토론 실행 — RuntimeGuard 단일비행 락(409 거절)·fail-open, checkpoint load/save(매 노드, 24h fail-soft), astream→merge_state 루프, `_router` 5단 분기 우선순위(환각2회/end/주제3개/intervene/턴), 상태키, 실패 시 `update_session_status(failed)` 경로까지 반영.
+  - 관심종목 — 404/409 검증 분기, BackgroundTasks 5종(news/financial/price/filing/valuation) + `sync_enqueued` 처리 명시.
+
+**완료 — 인터페이스 정의서 스키마 1:1화(`interface-definition.md`):**
+- `app/schemas/{watchlist,market_data,debate}.py`의 모든 Pydantic 모델을 요청/응답·필드·타입·제약(min/max, 기본값, nullable)까지 1:1 반영.
+- 쿼리 파라미터 정확화(`q≤100`, `limit` 엔드포인트별 기본/상한: tickers·news·filings=20/100, prices=260/1000, feed=20→1–100 cap).
+- `DebateListItem`(목록 경량) vs `DebateSessionResponse`(statements 포함 full) 구분 명시, enum `DebateCategory` 값 명시.
+
+→ **#1 5대 설계문서 트랙 사실상 종료**(5종 존재 + 코드 1:1 정합 + ERD/시퀀스/인터페이스 정밀화 완료). **다음은 #2(에러핸들링).**
