@@ -1,4 +1,4 @@
-from app.external.dart.client import DartApiError, DartClient, DartFilingItem, FinancialStatementRecord
+from app.external.dart.client import DartApiError, DartClient, DartFilingItem, DartValuationInputs, FinancialStatementRecord
 from app.external.dart.corp_code import CorpCodeProvider
 
 __all__ = [
@@ -6,5 +6,6 @@ __all__ = [
     "DartApiError",
     "DartClient",
     "DartFilingItem",
+    "DartValuationInputs",
     "FinancialStatementRecord",
 ]

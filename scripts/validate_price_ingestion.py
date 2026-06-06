@@ -37,6 +37,8 @@ class FakeSession:
                     "symbol": symbol,
                     "fiscal_year": 2025,
                     "fiscal_quarter": 4,
+                    "net_income": 5000000000.0,
+                    "total_equity": 50000000000.0,
                     "per": None,
                     "pbr": None,
                 },
@@ -147,11 +149,14 @@ class FakePriceClient:
     pbr: float | None = 1.23
     eps: float | None = 5000.0
     bps: float | None = 50000.0
+    listed_shares: int | None = 1000000
 
     def fetch_daily_prices(self, symbol: str, *, start_date: date, end_date: date, market) -> list[DailyPriceRecord]:
         return [row for row in self.records if start_date <= row.price_date <= end_date]
 
     def fetch_latest_market_fundamental(self, symbol: str, *, end_date: date, market, lookback_days: int = 10):
+        if self.per is None and self.pbr is None and self.eps is None and self.bps is None:
+            return None
         return type(
             "Fundamental",
             (),
@@ -162,6 +167,21 @@ class FakePriceClient:
                 "bps": self.bps,
                 "per": self.per,
                 "pbr": self.pbr,
+            },
+        )()
+
+    def fetch_latest_market_cap(self, symbol: str, *, end_date: date, market, lookback_days: int = 30):
+        if self.listed_shares is None:
+            return None
+        return type(
+            "MarketCap",
+            (),
+            {
+                "symbol": symbol,
+                "price_date": end_date,
+                "close_price": None,
+                "market_cap": None,
+                "listed_shares": self.listed_shares,
             },
         )()
 
@@ -221,6 +241,21 @@ def main() -> None:
                 "loss_case_fetched": loss_result.fetched_count,
                 "loss_case_per": loss_session.saved_financial_rows[0].per,
                 "loss_case_pbr": loss_session.saved_financial_rows[0].pbr,
+            }
+        )
+
+        derived_session = FakeSession(symbol)
+        derived_service = price_module.PriceIngestionService(
+            derived_session,
+            price_client=FakePriceClient(records, per=None, pbr=None, eps=None, bps=None, listed_shares=1000000),
+            redis_client=FakeRedis(),
+        )
+        derived_result = derived_service.sync_prices_for_ticker(symbol, force=True, backfill_days=200)
+        print(
+            {
+                "derived_case_fetched": derived_result.fetched_count,
+                "derived_case_per": derived_session.saved_financial_rows[0].per,
+                "derived_case_pbr": derived_session.saved_financial_rows[0].pbr,
             }
         )
     finally:

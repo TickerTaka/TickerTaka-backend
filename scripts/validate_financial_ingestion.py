@@ -51,6 +51,17 @@ class FakeFinancialRepo:
             self.rows = self.rows[-max_rows:]
         return overflow
 
+    def update_latest_valuation(self, symbol: str, *, per: float | None, pbr: float | None) -> bool:
+        return True
+
+
+class FakePriceRepo:
+    def __init__(self, session) -> None:
+        pass
+
+    def list_recent(self, symbol: str, limit: int = 1):
+        return []
+
 
 class FakeCorpCodeProvider:
     def get_corp_code(self, symbol: str) -> str | None:
@@ -83,8 +94,10 @@ def main() -> None:
     ]
 
     original_repo = financial_module.FinancialCacheRepository
+    original_price_repo = financial_module.PriceCacheRepository
     try:
         financial_module.FinancialCacheRepository = FakeFinancialRepo
+        financial_module.PriceCacheRepository = FakePriceRepo
         service = financial_module.FinancialIngestionService(
             FakeSession(symbol),
             dart_client=FakeDartClient(rows),
@@ -101,6 +114,7 @@ def main() -> None:
         )
     finally:
         financial_module.FinancialCacheRepository = original_repo
+        financial_module.PriceCacheRepository = original_price_repo
 
 
 if __name__ == "__main__":
