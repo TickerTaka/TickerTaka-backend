@@ -32,11 +32,12 @@ class DebateState(TypedDict):
     current_turn:        int   # 1=bull주장, 2=bear반박, 3=bull재반박
 
     # Data Agent가 채우는 컨텍스트
-    agenda:            list[str]
-    price_context:     str
-    financial_context: str
-    evidence_context:  str
-    news_chunks:       list[str]
+    agenda:             list[str]
+    price_context:      str
+    financial_context:  str
+    evidence_context:   str
+    news_chunks:        list[str]
+    initial_evidences:  list[dict]   # data_agent가 검색한 raw evidences (RAGAS 평가용)
 
     # 발언 누적 (add 리듀서)
     statements: Annotated[list[Statement], operator.add]

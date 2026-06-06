@@ -49,6 +49,14 @@ async def data_agent_node(state: DebateState) -> dict:
         "price_context":     _fmt_price(symbol, price, tech, events),
         "financial_context": _fmt_finance(finance),
         "evidence_context":  format_evidence_context(evidences),
+        # ChromaDB 없으면 PostgreSQL news/filings로 폴백 (RAGAS 평가에도 동일 적용)
+        "initial_evidences": evidences or [
+            {"excerpt": n.get("summary") or n.get("title", ""), "source_title": n.get("title", "")}
+            for n in news if n.get("summary") or n.get("title")
+        ] + [
+            {"excerpt": f.get("summary") or f.get("filing_title", ""), "source_title": f.get("filing_title", "")}
+            for f in filings if f.get("summary") or f.get("filing_title")
+        ],
         "news_chunks":       [ev.get("source_title", "") + " " + (ev.get("excerpt") or "") for ev in evidences]
                            or [n.get("title","") + " " + (n.get("summary") or "") for n in news]
                            + [f.get("filing_title","") + " " + (f.get("summary") or "") for f in filings],
@@ -118,7 +126,7 @@ def _fmt_finance(rows) -> str:
             f"영업이익(영익) {fmt_val(opi)}{chg(opi, prev_opi)} / "
             f"당기순이익(순익) {fmt_val(ni)}{chg(ni, prev_ni)} "
             f"| PER {r.get('per','N/A')} PBR {r.get('pbr','N/A')} "
-            f"ROE {f'{float(r[\"roe\"])*100:.2f}%' if r.get('roe') else 'N/A'}"
+            f"ROE {str(round(float(r['roe'])*100, 2))+'%' if r.get('roe') else 'N/A'}"
         )
     return "\n".join(lines)
 

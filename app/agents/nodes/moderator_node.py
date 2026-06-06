@@ -2,7 +2,10 @@
 from __future__ import annotations
 import json
 import logging
+import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.prebuilt import create_react_agent
+from app.agents.tools.moderator_tools import get_financial_data, get_price_data
 
 from app.agents.debate_checkpoint import clear_checkpoint
 from app.agents.state import DebateState
@@ -63,15 +66,24 @@ def moderator_check_node(state: DebateState) -> dict:
         return {"moderator_flag": "ok", "intervention_note": ""}
 
     last = state["statements"][-1]
+    # moderator 자신의 발언은 검증 생략
+    if last["agent_role"] == "moderator":
+        return {"moderator_flag": "ok", "intervention_note": ""}
+
     logger.info(f"[moderator_check] {last['agent_role']} 검증")
 
-    raw    = _call(MODERATOR_CHECK_SYSTEM, MODERATOR_CHECK_HUMAN.format(
-        agent_role=last["agent_role"], content=last["content"],
-        category=state["category"],
-        price_context=state["price_context"],
-        financial_context=state["financial_context"],
-        evidence_context=state["evidence_context"],
-    ), temp=0.1)
+    try:
+        raw = _call(MODERATOR_CHECK_SYSTEM, MODERATOR_CHECK_HUMAN.format(
+            agent_role=last["agent_role"],
+            symbol=state["symbol"],
+            content=last["content"],
+            price_context=state["price_context"],
+            financial_context=state["financial_context"],
+        ), temp=0.0)
+    except Exception as e:
+        logger.error(f"[moderator_check] 오류: {e}")
+        return {"moderator_flag": "ok", "intervention_note": ""}
+
     parsed  = _parse(raw, {"verdict": "ok", "note": "", "corrected_fact": ""})
     verdict = parsed.get("verdict", "ok")
     note    = parsed.get("note", "")
@@ -80,14 +92,13 @@ def moderator_check_node(state: DebateState) -> dict:
     extra = []
 
     if verdict == "hallucination":
-        if True:
-            hallucination_count += 1
+        hallucination_count += 1
         msg = f"[사회자 개입] {note}"
         if parsed.get("corrected_fact"):
             msg += f"\n정정: {parsed['corrected_fact']}"
         extra = [{
             "agent_role":  "moderator",
-            "round":       last["round"],   # 검증 대상 발언의 round 사용
+            "round":       last["round"],
             "round_order": state["round_order"] + 1,
             "topic_index": last.get("topic_index", state.get("current_topic_index", 0)),
             "content":     msg,
@@ -186,6 +197,28 @@ async def moderator_summary_node(state: DebateState) -> dict:
         session_id=state["session_id"],
     )
 
+    # RAGAS 사후 평가 — 백그라운드 실행 (토론 흐름 차단 안 함)
+    try:
+        asyncio.create_task(
+            _run_summary_eval(state["session_id"], state["statements"], summary)
+        )
+        from app.domain.evidence_retrieval import build_category_query
+        eq = build_category_query(
+            symbol=state["symbol"],
+            symbol_name=state["symbol_name"],
+            category=state["category"],
+        )
+        asyncio.create_task(
+            _run_evidence_eval(
+                state["session_id"],
+                state.get("initial_evidences", []),
+                eq,
+                state.get("agenda", []),
+            )
+        )
+    except Exception as e:
+        logger.warning(f"[moderator_summary] RAGAS 평가 태스크 등록 실패 (무시): {e}")
+
     return {
         "statements": [{
             "agent_role": "moderator", "round": "summary",
@@ -196,3 +229,26 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "key_points":      points,
         "current_round":   "summary",
     }
+
+
+async def _run_summary_eval(session_id: str, statements: list, summary: str) -> None:
+    """사회자 요약 품질 RAGAS 평가 — 백그라운드 태스크"""
+    try:
+        from app.domain.debate_evaluation import evaluate_summary_async
+        await evaluate_summary_async(session_id, statements, summary)
+    except Exception as e:
+        logger.error(f"[eval] 요약 평가 실패: {e}")
+
+
+async def _run_evidence_eval(
+    session_id: str,
+    initial_evidences: list,
+    evidence_query: str,
+    agenda: list,
+) -> None:
+    """검색 근거 품질 RAGAS 평가 — 백그라운드 태스크"""
+    try:
+        from app.domain.debate_evaluation import evaluate_evidence_async
+        await evaluate_evidence_async(session_id, initial_evidences, evidence_query, agenda)
+    except Exception as e:
+        logger.error(f"[eval] 근거 품질 평가 실패: {e}")

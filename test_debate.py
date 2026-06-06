@@ -134,6 +134,12 @@ async def run(
     total = time.time() - total_start
     print(f"\n✅ 완료 — 총 소요시간: {total:.1f}s")
 
+    # RAGAS 백그라운드 태스크가 완료될 때까지 대기 (최대 120초)
+    tasks = [t for t in asyncio.all_tasks() if not t.done() and t != asyncio.current_task()]
+    if tasks:
+        print(f"\n⏳ RAGAS 평가 대기 중... ({len(tasks)}개 태스크)")
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 if __name__ == "__main__":
     import sys
