@@ -37,19 +37,66 @@ def _parse(text: str, fallback: dict) -> dict:
         return fallback
 
 
+def _default_agenda() -> list[str]:
+    return ["쟁점1", "쟁점2", "쟁점3"]
+
+
+def _build_summary_fallback(state: DebateState) -> tuple[str, list[str]]:
+    agenda = state.get("agenda") or _default_agenda()
+    non_moderator = [
+        stmt for stmt in state.get("statements", [])
+        if stmt.get("agent_role") in ("bull", "bear") and stmt.get("content")
+    ]
+    key_points: list[str] = [
+        f"{topic}에 대한 찬반 논거가 제시되었으며, 상세 근거는 개별 발언을 참고해야 합니다."
+        for topic in agenda[:3]
+    ]
+
+    summary = (
+        "사회자 요약 생성 중 LLM 호출이 실패하여 축약 요약으로 대체했습니다. "
+        f"{state['symbol_name']}({state['symbol']})에 대해 {len(non_moderator)}건의 찬반 발언이 기록되었고, "
+        "최종 판단 전 개별 발언과 근거를 다시 확인해야 합니다."
+    )
+    return summary, key_points
+
+
+def _coerce_agenda(value) -> list[str]:
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        if items:
+            return items[:3]
+    return _default_agenda()
+
+
+def _schedule_background_task(coro, *, label: str) -> None:
+    task = asyncio.create_task(coro)
+
+    def _log_task_result(done_task: asyncio.Task) -> None:
+        try:
+            done_task.result()
+        except Exception as exc:
+            logger.error("[%s] 백그라운드 태스크 실패: %s", label, exc)
+
+    task.add_done_callback(_log_task_result)
+
+
 # ── 1. 의제 설계 ───────────────────────────────────────────
 def moderator_pre_node(state: DebateState) -> dict:
     logger.info("[moderator_pre] 의제 설계")
-    raw    = _call(MODERATOR_PRE_SYSTEM, MODERATOR_PRE_HUMAN.format(
-        symbol=state["symbol"], symbol_name=state["symbol_name"],
-        category=state["category"],
-        price_context=state["price_context"],
-        financial_context=state["financial_context"],
-        evidence_context=state["evidence_context"],
-    ))
-    parsed = _parse(raw, {"agenda": ["쟁점1", "쟁점2", "쟁점3"]})
+    try:
+        raw = _call(MODERATOR_PRE_SYSTEM, MODERATOR_PRE_HUMAN.format(
+            symbol=state["symbol"], symbol_name=state["symbol_name"],
+            category=state["category"],
+            price_context=state["price_context"],
+            financial_context=state["financial_context"],
+            evidence_context=state["evidence_context"],
+        ))
+    except Exception as e:
+        logger.warning("[moderator_pre] LLM 호출 실패, 기본 의제로 진행: %s", e)
+        raw = json.dumps({"agenda": _default_agenda()}, ensure_ascii=False)
+    parsed = _parse(raw, {"agenda": _default_agenda()})
     return {
-        "agenda":              parsed.get("agenda", []),
+        "agenda":              _coerce_agenda(parsed.get("agenda")),
         "moderator_flag":      "ok",
         "intervention_note":   "",
         "hallucination_count": 0,
@@ -118,6 +165,7 @@ def moderator_check_node(state: DebateState) -> dict:
 # ── 3. 최종 요약 + DB 저장 ────────────────────────────────
 async def moderator_summary_node(state: DebateState) -> dict:
     logger.info("[moderator_summary] 요약 + DB 저장")
+    used_fallback_summary = False
 
     all_stmts = "\n\n".join(
         f"[{s['agent_role'].upper()} / {s['round']}]\n{s['content']}"
@@ -126,17 +174,22 @@ async def moderator_summary_node(state: DebateState) -> dict:
     portfolio = state.get("user_portfolio", {})
     port_ctx  = f"\n[평균 매수가] {portfolio.get('avg_price',0):,}원\n" if portfolio else ""
 
-    raw    = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
-        all_statements=all_stmts,
-        symbol=state["symbol"], symbol_name=state["symbol_name"],
-        category=state["category"],
-        price_context=state["price_context"],
-        evidence_context=state["evidence_context"],
-        portfolio_context=port_ctx,
-    ), temp=0.4)
-    parsed  = _parse(raw, {"summary_content": raw, "key_points": []})
-    summary = parsed.get("summary_content", raw)
-    points  = parsed.get("key_points", [])
+    try:
+        raw = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
+            all_statements=all_stmts,
+            symbol=state["symbol"], symbol_name=state["symbol_name"],
+            category=state["category"],
+            price_context=state["price_context"],
+            evidence_context=state["evidence_context"],
+            portfolio_context=port_ctx,
+        ), temp=0.4)
+        parsed = _parse(raw, {"summary_content": raw, "key_points": []})
+        summary = parsed.get("summary_content", raw)
+        points = parsed.get("key_points", [])
+    except Exception as e:
+        logger.warning("[moderator_summary] LLM 호출 실패, fallback summary 사용: %s", e)
+        summary, points = _build_summary_fallback(state)
+        used_fallback_summary = True
 
     # 새 round 이름 → DB enum 호환 매핑
     _round_map = {
@@ -172,16 +225,19 @@ async def moderator_summary_node(state: DebateState) -> dict:
             content=stmt["content"], model_name=stmt.get("model_used", ""),
         )
         for ev in stmt.get("evidences", []):
-            await save_evidence(
-                statement_id=stmt_id,
-                source_type=ev.get("source_type", "OTHER"),
-                excerpt=ev.get("excerpt", ""),
-                source_url=ev.get("source_url"),
-                source_label=ev.get("source_label"),
-                source_title=ev.get("source_title"),
-                news_cache_id=ev.get("news_cache_id"),
-                filing_cache_id=ev.get("filing_cache_id"),
-            )
+            try:
+                await save_evidence(
+                    statement_id=stmt_id,
+                    source_type=ev.get("source_type", "OTHER"),
+                    excerpt=ev.get("excerpt", ""),
+                    source_url=ev.get("source_url"),
+                    source_label=ev.get("source_label"),
+                    source_title=ev.get("source_title"),
+                    news_cache_id=ev.get("news_cache_id"),
+                    filing_cache_id=ev.get("filing_cache_id"),
+                )
+            except Exception as e:
+                logger.warning("[moderator_summary] evidence 저장 실패, statement는 유지: %s", e)
 
     await save_statement(
         session_id=state["session_id"], round_="summary",
@@ -199,22 +255,27 @@ async def moderator_summary_node(state: DebateState) -> dict:
 
     # RAGAS 사후 평가 — 백그라운드 실행 (토론 흐름 차단 안 함)
     try:
-        asyncio.create_task(
-            _run_summary_eval(state["session_id"], state["statements"], summary)
-        )
+        if not used_fallback_summary:
+            _schedule_background_task(
+                _run_summary_eval(state["session_id"], state["statements"], summary),
+                label="eval-summary",
+            )
+        else:
+            logger.info("[moderator_summary] fallback summary 사용으로 summary RAGAS 평가는 건너뜀")
         from app.domain.evidence_retrieval import build_category_query
         eq = build_category_query(
             symbol=state["symbol"],
             symbol_name=state["symbol_name"],
             category=state["category"],
         )
-        asyncio.create_task(
+        _schedule_background_task(
             _run_evidence_eval(
                 state["session_id"],
                 state.get("initial_evidences", []),
                 eq,
                 state.get("agenda", []),
-            )
+            ),
+            label="eval-evidence",
         )
     except Exception as e:
         logger.warning(f"[moderator_summary] RAGAS 평가 태스크 등록 실패 (무시): {e}")

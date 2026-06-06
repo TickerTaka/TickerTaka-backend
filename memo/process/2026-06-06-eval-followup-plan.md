@@ -792,3 +792,35 @@ MCP를 실제로 쓰려면 MCP 클라이언트/서버 라이브러리(예: `mcp`
 - `DebateListItem`(목록 경량) vs `DebateSessionResponse`(statements 포함 full) 구분 명시, enum `DebateCategory` 값 명시.
 
 → **#1 5대 설계문서 트랙 사실상 종료**(5종 존재 + 코드 1:1 정합 + ERD/시퀀스/인터페이스 정밀화 완료). **다음은 #2(에러핸들링).**
+
+## EE. #2 에러핸들링 진행 기록 (2026-06-07)
+
+**완료 — moderator SPOF 완화 + 보조 실패 비전파:**
+- `moderator_pre`:
+  - LLM 호출 실패 시 기본 의제 3개(`쟁점1~3`)로 진행
+  - agenda 파싱 결과가 비정상이면 `_coerce_agenda()`로 기본 의제 보정
+- `moderator_summary`:
+  - LLM 호출 실패 시 `_build_summary_fallback()`으로 fallback summary / key_points 생성
+  - summary 저장 및 session 완료 경로는 계속 진행
+- fallback summary가 사용되면 summary RAGAS 평가는 건너뛰고 evidence 평가만 유지
+- `save_evidence()`:
+  - 개별 evidence 저장 실패는 warning만 남기고 statement/summary/session 완료 경로 유지
+- RAGAS 사후평가:
+  - `_schedule_background_task()`를 통해 `asyncio.create_task()` 등록
+  - 등록 실패 및 실행 중 예외 모두 로그로만 남고 토론 본체 성공 경로에 비전파
+
+**검증:**
+- `python3 -m compileall app/agents/nodes/moderator_node.py` 통과
+- `python -m py_compile app/agents/nodes/moderator_node.py` 통과
+- 현재 코드 기준으로 다음이 닫힘:
+  - `moderator_pre` LLM 실패 → 기본 agenda로 진행
+  - `moderator_summary` LLM 실패 → fallback summary 저장
+  - evidence 일부 저장 실패 → summary/session 완료 유지
+  - RAGAS 평가 실패 → 본체 토론 완료 유지
+
+**판정:**
+- 계획서의 #2 닫힘 기준("moderator 호출 실패 시 토론 전체가 즉시 500/503으로 죽지 않음", "fallback 또는 graceful summary 반환", "MCP publish 실패가 debate success 경로를 깨지 않음") 중
+  - **moderator fallback / graceful summary / RAGAS fail-soft**는 충족
+  - **MCP publish fail-soft**는 아직 MCP 트랙 미착수라 유보
+- 따라서 **#2는 현재 범위 기준 사실상 종료**, 다음 우선순위는 **#3 MCP 도입**.
+- 단, fail-soft 범위는 **moderator/보조기능까지**이며, `save_statement`/`save_moderator_summary`/`update_session_status` 같은 핵심 DB 저장 실패는 여전히 본체 실패로 본다.
