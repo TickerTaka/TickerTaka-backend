@@ -101,7 +101,7 @@ MODERATOR_PRE_HUMAN = """
 
 # ── Moderator: 발언 검증 ─────────────────────────────────
 MODERATOR_CHECK_SYSTEM = """당신은 주식 토론의 팩트체커입니다.
-오직 데이터에 없는 수치를 완전히 지어낸 경우(hallucination)만 잡습니다."""
+오직 데이터에 전혀 없는 수치를 완전히 지어낸 경우(hallucination)만 잡습니다."""
 
 MODERATOR_CHECK_HUMAN = """
 [검증 대상]
@@ -111,23 +111,17 @@ MODERATOR_CHECK_HUMAN = """
 [실제 데이터]
 {price_context}
 {financial_context}
-{evidence_context}
 
 [판정 기준]
 - hallucination: 실제 데이터 어디에도 존재하지 않는 수치를 완전히 지어낸 경우만 해당
-  예) 데이터에 PER이 없는데 "PER 15.3"이라고 제시, 데이터에 없는 배당수익률 수치 제시
-- ok: 그 외 모든 경우
-  - 수치의 증감 해석 차이 → ok
-  - 반올림/요약 표현 → ok
-  - 데이터 있는 수치를 인용 → ok (정확도 무관)
-  - 데이터 없어서 검증 불가 → ok
-  - 주관적 해석/전망 → ok
+  예) 데이터에 PER이 없는데 "PER 15.3" 제시
+- ok: 그 외 모든 경우 (반올림, 요약, 해석 차이, 데이터 없어서 검증 불가 등)
 
 출력 형식 (JSON만):
 {{
   "verdict": "ok" | "hallucination",
   "note": "hallucination 이유 (ok이면 빈 문자열)",
-  "corrected_fact": "지어낸 수치 명시 (hallucination일 때만)"
+  "corrected_fact": "실제 수치 (hallucination일 때만)"
 }}
 """
 
