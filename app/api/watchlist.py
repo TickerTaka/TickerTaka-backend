@@ -25,7 +25,8 @@ from app.domain.watchlist_service import (
     sync_watchlist_prices,
     sync_watchlist_valuation,
 )
-from app.models import FilingCache, NewsCache, TickerMetadata
+from app.models import EvidenceAnalysis, FilingCache, NewsCache, TickerMetadata
+from app.repositories.evidence_analysis_repository import EvidenceAnalysisRepository
 from app.schemas.market_data import WatchlistFeedItem, WatchlistFeedResponse
 from app.schemas.watchlist import (
     WatchlistCreateRequest,
@@ -100,13 +101,26 @@ def list_watchlists(user_id: UUID, db: Session = Depends(get_db)) -> WatchlistLi
     return WatchlistListResponse(items=[_to_item_response(item) for item in items])
 
 
-@router.get("/{user_id}/feed", response_model=WatchlistFeedResponse)
+@router.get(
+    "/{user_id}/feed",
+    response_model=WatchlistFeedResponse,
+    summary="관심종목 뉴스+공시 피드 (감성분석 포함)",
+    description=(
+        "사용자 관심종목들의 뉴스와 공시를 발행일 내림차순으로 합쳐 내려준다.\n\n"
+        "각 항목에는 감성분석(`evidence_analysis`) 결과가 함께 실린다:\n"
+        "- `sentiment`: positive / negative / neutral / mixed (방향)\n"
+        "- `impact_score`: -2(강한 악재) ~ +2(강한 호재) (강도)\n"
+        "- `confidence`, `analysis_summary`, `key_points`, `risks`\n\n"
+        "아직 분석되지 않은 항목은 위 필드가 모두 null/빈 배열이다. "
+        "프론트는 `sentiment`로 색, `impact_score`로 강도를 표시하면 된다."
+    ),
+)
 def get_watchlist_feed(
     user_id: UUID,
     limit: int = 20,
     db: Session = Depends(get_db),
 ) -> WatchlistFeedResponse:
-    """Combined news + filings feed for the user's watchlist symbols."""
+    """관심종목 뉴스+공시 통합 피드. 항목별 감성분석(sentiment/impact_score 등)을 join해 반환한다."""
     service = WatchlistService(db)
     try:
         items = service.list_watchlists(user_id)
@@ -140,6 +154,23 @@ def get_watchlist_feed(
         )
     )
 
+    # 감성분석(evidence_analysis) 결과를 source_id 로 join
+    analysis_repo = EvidenceAnalysisRepository(db)
+    news_analysis = analysis_repo.get_by_sources("news", [n.id for n in news_rows])
+    filing_analysis = analysis_repo.get_by_sources("filing", [f.id for f in filing_rows])
+
+    def _analysis_fields(analysis: EvidenceAnalysis | None) -> dict:
+        if analysis is None:
+            return {}
+        return {
+            "sentiment": analysis.sentiment,
+            "impact_score": analysis.impact_score,
+            "confidence": float(analysis.confidence) if analysis.confidence is not None else None,
+            "analysis_summary": analysis.summary,
+            "key_points": list(analysis.key_points or []),
+            "risks": list(analysis.risks or []),
+        }
+
     feed: list[WatchlistFeedItem] = []
     for n in news_rows:
         feed.append(
@@ -153,6 +184,7 @@ def get_watchlist_feed(
                 source_name=n.source_name,
                 source_url=n.source_url,
                 published_at=n.published_at or n.retrieved_at,
+                **_analysis_fields(news_analysis.get(str(n.id))),
             )
         )
     for f in filing_rows:
@@ -167,6 +199,7 @@ def get_watchlist_feed(
                 source_name="DART",
                 source_url=f.source_url,
                 published_at=f.disclosed_at or f.retrieved_at,
+                **_analysis_fields(filing_analysis.get(str(f.id))),
             )
         )
     feed.sort(key=lambda it: it.published_at or _MIN_DT, reverse=True)

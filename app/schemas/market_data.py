@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TickerSearchItem(BaseModel):
@@ -106,17 +106,70 @@ class FilingListResponse(BaseModel):
 
 
 class WatchlistFeedItem(BaseModel):
-    """Unified news + filing feed item for a user's watchlist."""
+    """관심종목 뉴스+공시 통합 피드 항목. 감성분석 결과가 있으면 함께 내려준다."""
 
     id: UUID
     symbol: str
     symbol_name: str | None = None
-    kind: str  # "news" | "filing"
+    kind: str = Field(description='항목 종류. "news" 또는 "filing".', examples=["filing"])
     title: str
     summary: str | None = None
     source_name: str | None = None
     source_url: str
     published_at: datetime | None = None
+
+    # ── 감성분석(evidence_analysis) 결과 — 아직 분석 전이면 모두 null ──
+    sentiment: str | None = Field(
+        default=None,
+        description='감성 방향. "positive" | "negative" | "neutral" | "mixed". 분석 전이면 null.',
+        examples=["negative"],
+    )
+    impact_score: int | None = Field(
+        default=None,
+        description="투자 영향도(강도). -2(강한 악재) ~ +2(강한 호재), 0=중립. 분석 전이면 null.",
+        ge=-2,
+        le=2,
+        examples=[-1],
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="판단 신뢰도 0.0~1.0.",
+        examples=[0.78],
+    )
+    analysis_summary: str | None = Field(
+        default=None,
+        description="감성분석이 생성한 요약(원문 summary와 별개일 수 있음).",
+    )
+    key_points: list[str] = Field(
+        default_factory=list,
+        description="긍/부정 판단의 핵심 근거 문장/키워드.",
+    )
+    risks: list[str] = Field(
+        default_factory=list,
+        description="주의해야 할 리스크 문장/키워드.",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "c2a3c70c-6d95-4f97-a31e-1cf28ffefe67",
+                "symbol": "454910",
+                "symbol_name": "두산로보틱스",
+                "kind": "filing",
+                "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+                "summary": "연결 기준 매출액 17.6% 증가, 영업이익 26.6% 감소.",
+                "source_name": "DART",
+                "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260428800563",
+                "published_at": "2026-04-28T16:00:00+09:00",
+                "sentiment": "negative",
+                "impact_score": -1,
+                "confidence": 0.78,
+                "analysis_summary": "영업이익이 전년 동기 대비 감소해 단기 실적 둔화.",
+                "key_points": ["영업이익 26.6% 감소"],
+                "risks": ["수익성 악화"],
+            }
+        }
+    )
 
 
 class WatchlistFeedResponse(BaseModel):
