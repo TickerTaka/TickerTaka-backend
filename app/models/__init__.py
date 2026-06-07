@@ -23,6 +23,7 @@ from app.models.debate import (
     Evidence,
     ModeratorSummary,
 )
+from app.models.evidence_analysis import EvidenceAnalysis
 from app.models.ticker import MarketType, TickerMetadata
 from app.models.user import AppUser
 from app.models.watchlist import Watchlist
@@ -41,6 +42,7 @@ __all__ = [
     "DebateStatus",
     "Evidence",
     "EventTimeline",
+    "EvidenceAnalysis",
     "FilingCache",
     "FinancialCache",
     "MarketType",

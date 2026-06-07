@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.external.dart import DartClient, DartFilingItem
 from app.models import TickerMetadata
 from app.repositories.filing_cache_repository import FilingCacheRepository
@@ -27,9 +28,9 @@ class SyncFilingResult:
 class FilingIngestionService:
     """Loads DART filing metadata into filing_cache for watchlist symbols."""
 
-    LOOKBACK_DAYS = 30
     CACHE_TTL_DAYS = 7
     PAGE_COUNT = 100
+    VALID_MODES = {"initial", "refresh"}
 
     def __init__(
         self,
@@ -40,16 +41,19 @@ class FilingIngestionService:
         self.session = session
         self.repo = FilingCacheRepository(session)
         self.dart_client = dart_client or DartClient()
+        self.settings = get_settings()
 
     def sync_filings_for_ticker(
         self,
         symbol: str,
         *,
+        mode: str = "initial",
         lookback_days: int | None = None,
         limit: int | None = None,
     ) -> SyncFilingResult:
         started = datetime.now(UTC)
         result = SyncFilingResult()
+        effective_lookback_days = self._resolve_lookback_days(mode=mode, lookback_days=lookback_days)
 
         ticker = self.session.get(TickerMetadata, symbol)
         if ticker is None:
@@ -64,12 +68,13 @@ class FilingIngestionService:
             return result
 
         today = datetime.now(KST).date()
-        begin_date = today - timedelta(days=lookback_days or self.LOOKBACK_DAYS)
+        begin_date = today - timedelta(days=effective_lookback_days)
         items = self.dart_client.list_filings(
             corp_code,
             begin_date=begin_date,
             end_date=today,
-            page_count=limit or self.PAGE_COUNT,
+            page_count=self.PAGE_COUNT,
+            max_items=limit,
         )
         result.fetched_count = len(items)
 
@@ -102,6 +107,8 @@ class FilingIngestionService:
             extra={
                 "symbol": normalized_symbol,
                 "corp_code": corp_code,
+                "mode": mode,
+                "lookback_days": effective_lookback_days,
                 "fetched": result.fetched_count,
                 "inserted": result.inserted_count,
                 "updated": result.updated_count,
@@ -110,6 +117,17 @@ class FilingIngestionService:
             },
         )
         return result
+
+    def _resolve_lookback_days(self, *, mode: str, lookback_days: int | None) -> int:
+        if mode not in self.VALID_MODES:
+            raise ValueError(f"unsupported filing sync mode: {mode}")
+        if lookback_days is not None:
+            if lookback_days < 1:
+                raise ValueError("lookback_days must be at least 1")
+            return lookback_days
+        if mode == "initial":
+            return self.settings.filing_initial_lookback_days
+        return self.settings.filing_refresh_lookback_days
 
     @staticmethod
     def _is_valid_item(item: DartFilingItem) -> bool:

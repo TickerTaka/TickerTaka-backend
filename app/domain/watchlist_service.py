@@ -112,7 +112,7 @@ def sync_watchlist_filings(symbol: str) -> None:
         from app.domain.evidence_indexing import EvidenceIndexingService
 
         with session_scope() as session:
-            filing_result = FilingIngestionService(session).sync_filings_for_ticker(symbol)
+            filing_result = FilingIngestionService(session).sync_filings_for_ticker(symbol, mode="initial")
             index_result = EvidenceIndexingService(session).reindex_filing_for_symbol(symbol)
             logger.info(
                 "watchlist background filing sync finished",

@@ -193,32 +193,46 @@ class DartClient:
         end_date: date,
         page_count: int = 100,
         last_report_only: bool = False,
+        max_items: int | None = None,
     ) -> list[DartFilingItem]:
         if not self.settings.dart_api_key:
             raise DartApiError("DART_API_KEY is required")
+        if max_items is not None and max_items < 1:
+            raise ValueError("max_items must be at least 1")
 
-        response = self._get(
-            "https://opendart.fss.or.kr/api/list.json",
-            params={
-                "crtfc_key": self.settings.dart_api_key,
-                "corp_code": corp_code,
-                "bgn_de": begin_date.strftime("%Y%m%d"),
-                "end_de": end_date.strftime("%Y%m%d"),
-                "last_reprt_at": "Y" if last_report_only else "N",
-                "sort": "date",
-                "sort_mth": "desc",
-                "page_no": 1,
-                "page_count": page_count,
-            },
-        )
-        payload = response.json()
-        status = str(payload.get("status") or "")
-        if status == "013":
-            return []
-        if status != "000":
-            message = payload.get("message") or "unknown DART API error"
-            raise DartApiError(f"DART list.json failed: status={status} message={message}")
-        return [self._to_filing_item(item) for item in payload.get("list", [])]
+        items: list[DartFilingItem] = []
+        page_no = 1
+        while True:
+            response = self._get(
+                "https://opendart.fss.or.kr/api/list.json",
+                params={
+                    "crtfc_key": self.settings.dart_api_key,
+                    "corp_code": corp_code,
+                    "bgn_de": begin_date.strftime("%Y%m%d"),
+                    "end_de": end_date.strftime("%Y%m%d"),
+                    "last_reprt_at": "Y" if last_report_only else "N",
+                    "sort": "date",
+                    "sort_mth": "desc",
+                    "page_no": page_no,
+                    "page_count": page_count,
+                },
+            )
+            payload = response.json()
+            status = str(payload.get("status") or "")
+            if status == "013":
+                return items
+            if status != "000":
+                message = payload.get("message") or "unknown DART API error"
+                raise DartApiError(f"DART list.json failed: status={status} message={message}")
+
+            items.extend(self._to_filing_item(item) for item in payload.get("list", []))
+            if max_items is not None and len(items) >= max_items:
+                return items[:max_items]
+
+            total_pages = max(int(payload.get("total_page") or 1), 1)
+            if page_no >= total_pages:
+                return items
+            page_no += 1
 
     @staticmethod
     def build_viewer_url(receipt_no: str) -> str:
@@ -330,6 +344,12 @@ class DartClient:
         if not remaining:
             return prefix.strip()
 
+        # 모든 셀이 동일한 값인 행은 rowspan 전용 헤더 행 → 스킵
+        while remaining and len({c.strip() for c in remaining[0] if c.strip()}) <= 1:
+            remaining = remaining[1:]
+        if not remaining:
+            return prefix.strip()
+
         if len(remaining) == 1:
             cells = [cell.strip() for cell in remaining[0] if cell.strip() and cell.strip() != "-"]
             return (prefix + " | ".join(cells)).strip()
@@ -344,6 +364,8 @@ class DartClient:
                 if not value or value == "-":
                     continue
                 header = headers[index] if index < len(headers) else ""
+                if header and header == value:
+                    continue
                 parts.append(f"{header}: {value}" if header else value)
             if parts:
                 lines.append(prefix + " | ".join(parts))

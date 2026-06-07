@@ -14,6 +14,7 @@ from app.external.chroma_client import (
 )
 from app.external.embedding import EmbeddingClient, get_embedding_client
 from app.models import FilingCache, NewsCache, SourceType
+from app.repositories.evidence_analysis_repository import EvidenceAnalysisRepository
 from app.repositories.filing_cache_repository import FilingCacheRepository
 from app.repositories.news_cache_repository import NewsCacheRepository
 
@@ -39,6 +40,11 @@ class RetrievedEvidence:
     score: float
     news_cache_id: str | None = None
     filing_cache_id: str | None = None
+    sentiment: str | None = None
+    impact_score: int | None = None
+    analysis_summary: str | None = None
+    key_points: list[str] | None = None
+    risks: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -53,6 +59,16 @@ class RetrievedEvidence:
             payload["news_cache_id"] = self.news_cache_id
         if self.filing_cache_id:
             payload["filing_cache_id"] = self.filing_cache_id
+        if self.sentiment is not None:
+            payload["sentiment"] = self.sentiment
+        if self.impact_score is not None:
+            payload["impact_score"] = self.impact_score
+        if self.analysis_summary:
+            payload["analysis_summary"] = self.analysis_summary
+        if self.key_points is not None:
+            payload["key_points"] = self.key_points
+        if self.risks is not None:
+            payload["risks"] = self.risks
         return payload
 
 
@@ -71,6 +87,7 @@ class EvidenceRetrievalService:
         self.embedding_client = embedding_client or get_embedding_client()
         self.news_repo = NewsCacheRepository(session)
         self.filing_repo = FilingCacheRepository(session)
+        self.analysis_repo = EvidenceAnalysisRepository(session)
         self.news_collection_name = news_collection_name
         self.filing_collection_name = filing_collection_name
 
@@ -103,13 +120,22 @@ class EvidenceRetrievalService:
         metadatas = self._first_list(result.get("metadatas"))
         distances = self._first_list(result.get("distances"))
         rows = self.news_repo.get_by_ids(ids)
+        analyses = self._safe_get_analyses("news", list(rows.keys()))
 
         hits: list[RetrievedEvidence] = []
         for item_id, document, metadata, distance in zip(ids, documents, metadatas, distances, strict=False):
             row = rows.get(str(item_id))
             if row is None:
                 continue
-            hits.append(self._build_news_hit(row=row, document=document, metadata=metadata or {}, distance=distance))
+            hits.append(
+                self._build_news_hit(
+                    row=row,
+                    document=document,
+                    metadata=metadata or {},
+                    distance=distance,
+                    analysis=analyses.get(str(row.id)),
+                )
+            )
         return hits
 
     def _search_filings(self, *, query: str, symbol: str, limit: int) -> list[RetrievedEvidence]:
@@ -128,6 +154,7 @@ class EvidenceRetrievalService:
             for item_id, metadata in zip(ids, metadatas, strict=False)
         ]
         rows = self.filing_repo.get_by_ids(source_ids)
+        analyses = self._safe_get_analyses("filing", list(rows.keys()))
 
         hits: list[RetrievedEvidence] = []
         for item_id, document, metadata, distance in zip(ids, documents, metadatas, distances, strict=False):
@@ -135,7 +162,15 @@ class EvidenceRetrievalService:
             row = rows.get(str(source_id))
             if row is None:
                 continue
-            hits.append(self._build_filing_hit(row=row, document=document, metadata=metadata or {}, distance=distance))
+            hits.append(
+                self._build_filing_hit(
+                    row=row,
+                    document=document,
+                    metadata=metadata or {},
+                    distance=distance,
+                    analysis=analyses.get(str(row.id)),
+                )
+            )
         return hits
 
     def _safe_query_collection(
@@ -158,6 +193,13 @@ class EvidenceRetrievalService:
             logger.exception("evidence query failed for %s/%s", collection_name, symbol)
             return {}
 
+    def _safe_get_analyses(self, source_type: str, source_ids: list[str]) -> dict[str, Any]:
+        try:
+            return self.analysis_repo.get_by_sources(source_type, source_ids)
+        except Exception:
+            logger.exception("evidence analysis lookup failed for %s", source_type)
+            return {}
+
     @staticmethod
     def _build_news_hit(
         *,
@@ -165,6 +207,7 @@ class EvidenceRetrievalService:
         document: str,
         metadata: dict[str, Any],
         distance: float | None,
+        analysis: Any = None,
     ) -> RetrievedEvidence:
         return RetrievedEvidence(
             source_type=SourceType.NEWS.value,
@@ -174,6 +217,7 @@ class EvidenceRetrievalService:
             source_label=row.source_name or "NEWS",
             score=float(distance if distance is not None else 0.0),
             news_cache_id=str(row.id),
+            **_analysis_kwargs(analysis),
         )
 
     @staticmethod
@@ -183,6 +227,7 @@ class EvidenceRetrievalService:
         document: str,
         metadata: dict[str, Any],
         distance: float | None,
+        analysis: Any = None,
     ) -> RetrievedEvidence:
         label = row.filing_type or metadata.get("source_type") or "DART"
         return RetrievedEvidence(
@@ -193,6 +238,7 @@ class EvidenceRetrievalService:
             source_label=str(label),
             score=float(distance if distance is not None else 0.0),
             filing_cache_id=str(row.id),
+            **_analysis_kwargs(analysis),
         )
 
     @staticmethod
@@ -245,9 +291,26 @@ def format_evidence_context(evidences: list[dict[str, Any]]) -> str:
         title = evidence.get("source_title", "제목 없음")
         excerpt = evidence.get("excerpt", "")
         label = evidence.get("source_label") or source_type
-        lines.append(f"{index}. [{source_type}] {title} ({label})")
+        sentiment = evidence.get("sentiment")
+        impact_score = evidence.get("impact_score")
+        analysis_summary = evidence.get("analysis_summary")
+        header_parts = [f"{index}. [{source_type}]"]
+        if sentiment:
+            header_parts.append(f"[{sentiment}]")
+        if impact_score is not None:
+            header_parts.append(f"[영향도 {int(impact_score):+d}]")
+        header_parts.append(f"{title} ({label})")
+        lines.append(" ".join(header_parts))
+        if analysis_summary:
+            lines.append(f"   요약: {analysis_summary}")
+        key_points = evidence.get("key_points") or []
+        if key_points:
+            lines.append(f"   핵심 근거: {', '.join(map(str, key_points[:3]))}")
+        risks = evidence.get("risks") or []
+        if risks:
+            lines.append(f"   리스크: {', '.join(map(str, risks[:3]))}")
         if excerpt:
-            lines.append(f"   - {excerpt}")
+            lines.append(f"   원문 발췌: {excerpt}")
     return "\n".join(lines)
 
 
@@ -260,3 +323,15 @@ def _excerpt_document(document: str, title: str | None) -> str:
     if len(normalized) <= _DEFAULT_EXCERPT_LENGTH:
         return normalized
     return normalized[:_DEFAULT_EXCERPT_LENGTH].rstrip() + "..."
+
+
+def _analysis_kwargs(analysis: Any) -> dict[str, Any]:
+    if analysis is None:
+        return {}
+    return {
+        "sentiment": analysis.sentiment,
+        "impact_score": analysis.impact_score,
+        "analysis_summary": analysis.summary,
+        "key_points": list(analysis.key_points or []),
+        "risks": list(analysis.risks or []),
+    }

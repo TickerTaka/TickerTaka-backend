@@ -5,6 +5,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.domain.evidence_analysis import EvidenceAnalysisService
 from app.external.article_scraper import ArticleScraper
 from app.external.chroma_client import (
     ChromaClient,
@@ -64,6 +65,7 @@ class EvidenceIndexingService:
         self.article_scraper = article_scraper or ArticleScraper()
         self.dart_client = dart_client or DartClient()
         self.collection_name = collection_name
+        self.analysis_service = EvidenceAnalysisService(session)
 
     def reindex_news_for_symbol(
         self,
@@ -77,6 +79,7 @@ class EvidenceIndexingService:
         rows = self.news_repo.list_by_symbol(symbol)
         result = ReindexNewsResult(symbol=symbol, scanned_rows=len(rows))
         documents: list[ChromaDocument] = []
+        analysis_inputs: list[tuple[NewsCache, str]] = []
 
         for row in rows:
             try:
@@ -108,6 +111,7 @@ class EvidenceIndexingService:
                     },
                 )
             )
+            analysis_inputs.append((row, scraped.content))
             result.indexed_rows += 1
 
         if documents:
@@ -116,6 +120,11 @@ class EvidenceIndexingService:
                 documents=documents,
                 embedding_client=self.embedding_client,
             )
+            for row, content in analysis_inputs:
+                try:
+                    self.analysis_service.analyze_news_row(row, content=content)
+                except Exception:
+                    logger.exception("news evidence analysis failed for row %s", row.id)
         return result
 
     def reindex_filing_for_symbol(
@@ -131,6 +140,7 @@ class EvidenceIndexingService:
         rows = self.filing_repo.list_by_symbol(symbol)
         result = ReindexFilingResult(symbol=symbol, scanned_rows=len(rows))
         documents: list[ChromaDocument] = []
+        analysis_inputs: list[tuple[FilingCache, str]] = []
 
         for row in rows:
             if not row.dart_receipt_no:
@@ -165,6 +175,7 @@ class EvidenceIndexingService:
                 continue
 
             documents.extend(chunks)
+            analysis_inputs.append((row, filing_text))
             result.indexed_rows += 1
 
         if documents:
@@ -173,6 +184,11 @@ class EvidenceIndexingService:
                 documents=documents,
                 embedding_client=self.embedding_client,
             )
+            for row, filing_text in analysis_inputs:
+                try:
+                    self.analysis_service.analyze_filing_row(row, filing_text)
+                except Exception:
+                    logger.exception("filing evidence analysis failed for row %s", row.id)
         return result
 
     @staticmethod

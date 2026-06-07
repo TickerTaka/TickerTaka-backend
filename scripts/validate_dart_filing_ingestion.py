@@ -38,8 +38,10 @@ class FakeDartClient:
         end_date: date,
         page_count: int = 100,
         last_report_only: bool = False,
+        max_items: int | None = None,
     ) -> list[DartFilingItem]:
-        return list(self.items[:page_count])
+        limit = max_items if max_items is not None else page_count
+        return list(self.items[:limit])
 
     @staticmethod
     def build_viewer_url(receipt_no: str) -> str:

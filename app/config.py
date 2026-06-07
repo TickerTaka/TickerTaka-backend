@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     embedding_provider: str = Field(default="huggingface", alias="EMBEDDING_PROVIDER")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     embedding_model: str = Field(default="jhgan/ko-sroberta-multitask", alias="EMBEDDING_MODEL")
+    analysis_provider: str = Field(default="local_hf", alias="ANALYSIS_PROVIDER")
+    analysis_model: str = Field(default="snunlp/KR-FinBert-SC", alias="ANALYSIS_MODEL")
+    analysis_enabled: bool = Field(default=True, alias="ANALYSIS_ENABLED")
+    analysis_max_chars: int = Field(default=6000, alias="ANALYSIS_MAX_CHARS")
+    analysis_prompt_version: str = Field(default="evidence-analysis-v1", alias="ANALYSIS_PROMPT_VERSION")
+    analysis_summary_provider: str = Field(default="extractive", alias="ANALYSIS_SUMMARY_PROVIDER")
+    analysis_generation_model: str | None = Field(default=None, alias="ANALYSIS_GENERATION_MODEL")
 
     # OpenRouter
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")
@@ -55,6 +62,8 @@ class Settings(BaseSettings):
 
     # 외부 API
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")
+    filing_initial_lookback_days: int = Field(default=365, gt=0, alias="FILING_INITIAL_LOOKBACK_DAYS")
+    filing_refresh_lookback_days: int = Field(default=30, gt=0, alias="FILING_REFRESH_LOOKBACK_DAYS")
     naver_news_client_id:     str = Field(default="", alias="NAVER_NEWS_CLIENT_ID")
     naver_news_client_secret: str = Field(default="", alias="NAVER_NEWS_CLIENT_SECRET")
 

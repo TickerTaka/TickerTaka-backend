@@ -206,8 +206,15 @@ def run_filing_background_trigger_flow(symbol: str) -> FlowResult:
         def __init__(self, session) -> None:
             captured["filing_session_bound"] = session is not None
 
-        def sync_filings_for_ticker(self, symbol: str, lookback_days: int | None = None, limit: int | None = None):
+        def sync_filings_for_ticker(
+            self,
+            symbol: str,
+            mode: str = "initial",
+            lookback_days: int | None = None,
+            limit: int | None = None,
+        ):
             captured["filing_symbol"] = symbol
+            captured["filing_mode"] = mode
 
             class Result:
                 fetched_count = 2
@@ -238,6 +245,7 @@ def run_filing_background_trigger_flow(symbol: str) -> FlowResult:
     expect(captured.get("filing_session_bound") is True, "filing trigger should open DB session")
     expect(captured.get("index_session_bound") is True, "filing indexer should share DB session")
     expect(captured.get("filing_symbol") == symbol, "filing trigger should pass symbol")
+    expect(captured.get("filing_mode") == "initial", "filing trigger should request initial backfill")
     expect(captured.get("index_symbol") == symbol, "filing indexing should pass symbol")
 
     return FlowResult(
