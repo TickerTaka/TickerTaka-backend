@@ -29,6 +29,21 @@ class FakeSession:
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
         self.saved_price_rows = []
+        self.saved_financial_rows = [
+            type(
+                "FinancialRow",
+                (),
+                {
+                    "symbol": symbol,
+                    "fiscal_year": 2025,
+                    "fiscal_quarter": 4,
+                    "net_income": 5000000000.0,
+                    "total_equity": 50000000000.0,
+                    "per": None,
+                    "pbr": None,
+                },
+            )()
+        ]
 
     def get(self, model, key):
         if key != self.symbol:
@@ -54,6 +69,23 @@ class FakePriceRepo:
         if not self.rows:
             return None
         return max(row["price_date"] for row in self.rows)
+
+    def list_recent(self, symbol: str, limit: int = 260):
+        filtered = [row for row in self.rows if row["symbol"] == symbol]
+        filtered.sort(key=lambda row: row["price_date"], reverse=True)
+        return [
+            type(
+                "PriceCacheRow",
+                (),
+                {
+                    "symbol": row["symbol"],
+                    "price_date": row["price_date"],
+                    "close_price": row["close_price"],
+                    "volume": row["volume"],
+                },
+            )()
+            for row in filtered[:limit]
+        ]
 
     def upsert_many(self, rows):
         self.rows = list(rows)
@@ -94,12 +126,64 @@ class FakeIndicatorRepo:
         return overflow
 
 
+class FakeFinancialRepo:
+    def __init__(self, session) -> None:
+        self.session = session
+
+    def get_latest_row(self, symbol: str):
+        return self.session.saved_financial_rows[0] if self.session.saved_financial_rows else None
+
+    def update_latest_valuation(self, symbol: str, *, per: float | None, pbr: float | None) -> bool:
+        row = self.get_latest_row(symbol)
+        if row is None:
+            return False
+        row.per = per
+        row.pbr = pbr
+        return True
+
+
 @dataclass(slots=True)
 class FakePriceClient:
     records: list[DailyPriceRecord]
+    per: float | None = 12.34
+    pbr: float | None = 1.23
+    eps: float | None = 5000.0
+    bps: float | None = 50000.0
+    listed_shares: int | None = 1000000
 
     def fetch_daily_prices(self, symbol: str, *, start_date: date, end_date: date, market) -> list[DailyPriceRecord]:
         return [row for row in self.records if start_date <= row.price_date <= end_date]
+
+    def fetch_latest_market_fundamental(self, symbol: str, *, end_date: date, market, lookback_days: int = 10):
+        if self.per is None and self.pbr is None and self.eps is None and self.bps is None:
+            return None
+        return type(
+            "Fundamental",
+            (),
+            {
+                "symbol": symbol,
+                "price_date": end_date,
+                "eps": self.eps,
+                "bps": self.bps,
+                "per": self.per,
+                "pbr": self.pbr,
+            },
+        )()
+
+    def fetch_latest_market_cap(self, symbol: str, *, end_date: date, market, lookback_days: int = 30):
+        if self.listed_shares is None:
+            return None
+        return type(
+            "MarketCap",
+            (),
+            {
+                "symbol": symbol,
+                "price_date": end_date,
+                "close_price": None,
+                "market_cap": None,
+                "listed_shares": self.listed_shares,
+            },
+        )()
 
 
 def main() -> None:
@@ -120,11 +204,14 @@ def main() -> None:
 
     original_price_repo = price_module.PriceCacheRepository
     original_indicator_repo = price_module.TechnicalIndicatorCacheRepository
+    original_financial_repo = price_module.FinancialCacheRepository
     try:
         price_module.PriceCacheRepository = FakePriceRepo
         price_module.TechnicalIndicatorCacheRepository = FakeIndicatorRepo
+        price_module.FinancialCacheRepository = FakeFinancialRepo
+        session = FakeSession(symbol)
         service = price_module.PriceIngestionService(
-            FakeSession(symbol),
+            session,
             price_client=FakePriceClient(records),
             redis_client=FakeRedis(),
         )
@@ -135,13 +222,46 @@ def main() -> None:
                 "inserted": result.inserted_count,
                 "updated": result.updated_count,
                 "indicators": result.indicators_count,
+                "per": session.saved_financial_rows[0].per,
+                "pbr": session.saved_financial_rows[0].pbr,
                 "trimmed_price_rows": result.trimmed_price_rows,
                 "trimmed_indicator_rows": result.trimmed_indicator_rows,
+            }
+        )
+
+        loss_session = FakeSession(symbol)
+        loss_service = price_module.PriceIngestionService(
+            loss_session,
+            price_client=FakePriceClient(records, per=0.0, pbr=0.0, eps=-100.0, bps=-1000.0),
+            redis_client=FakeRedis(),
+        )
+        loss_result = loss_service.sync_prices_for_ticker(symbol, force=True, backfill_days=200)
+        print(
+            {
+                "loss_case_fetched": loss_result.fetched_count,
+                "loss_case_per": loss_session.saved_financial_rows[0].per,
+                "loss_case_pbr": loss_session.saved_financial_rows[0].pbr,
+            }
+        )
+
+        derived_session = FakeSession(symbol)
+        derived_service = price_module.PriceIngestionService(
+            derived_session,
+            price_client=FakePriceClient(records, per=None, pbr=None, eps=None, bps=None, listed_shares=1000000),
+            redis_client=FakeRedis(),
+        )
+        derived_result = derived_service.sync_prices_for_ticker(symbol, force=True, backfill_days=200)
+        print(
+            {
+                "derived_case_fetched": derived_result.fetched_count,
+                "derived_case_per": derived_session.saved_financial_rows[0].per,
+                "derived_case_pbr": derived_session.saved_financial_rows[0].pbr,
             }
         )
     finally:
         price_module.PriceCacheRepository = original_price_repo
         price_module.TechnicalIndicatorCacheRepository = original_indicator_repo
+        price_module.FinancialCacheRepository = original_financial_repo
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from app.core.db import get_db
 from app.models import (
     DebateSession,
     DebateStatus,
+    FilingCache,
     FinancialCache,
     MarketType,
     NewsCache,
@@ -19,6 +20,8 @@ from app.models import (
 )
 from app.schemas.market_data import (
     DashboardStatsResponse,
+    FilingItem,
+    FilingListResponse,
     FinancialSnapshot,
     MarketIndexItem,
     MarketIndexesResponse,
@@ -210,6 +213,38 @@ def get_stock_news(
         )
     )
     return NewsListResponse(items=[_news_item(row) for row in rows])
+
+
+def _filing_item(row: FilingCache) -> FilingItem:
+    return FilingItem(
+        id=row.id,
+        symbol=row.symbol,
+        filing_title=row.filing_title,
+        filing_type=row.filing_type,
+        summary=row.summary,
+        source_url=row.source_url,
+        disclosed_at=row.disclosed_at,
+        retrieved_at=row.retrieved_at,
+    )
+
+
+@router.get("/api/stocks/{symbol}/filings", response_model=FilingListResponse)
+def get_stock_filings(
+    symbol: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> FilingListResponse:
+    if db.get(TickerMetadata, symbol) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {symbol}")
+    rows = list(
+        db.scalars(
+            select(FilingCache)
+            .where(FilingCache.symbol == symbol)
+            .order_by(FilingCache.disclosed_at.desc().nullslast(), FilingCache.retrieved_at.desc())
+            .limit(limit)
+        )
+    )
+    return FilingListResponse(items=[_filing_item(r) for r in rows])
 
 
 @router.get("/api/news/recent", response_model=NewsListResponse)

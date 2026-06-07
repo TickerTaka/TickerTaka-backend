@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -107,6 +107,24 @@ def get_debate(session_id: UUID, db: Session = Depends(get_db)) -> DebateSession
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"debate session not found: {session_id}")
     return _build_session_response(db, session_id)
+
+
+@router.delete("/{session_id}")
+def delete_debate(session_id: UUID, db: Session = Depends(get_db)) -> dict[str, str]:
+    row = db.get(DebateSession, session_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"debate session not found: {session_id}")
+    # Detach any session that cached from this one, then delete via Core so the
+    # DB's ON DELETE CASCADE removes statements/evidence/summaries/notes.
+    # (ORM-level delete would NULL child FKs and violate NOT NULL.)
+    db.execute(
+        update(DebateSession)
+        .where(DebateSession.cached_from_session_id == session_id)
+        .values(cached_from_session_id=None)
+    )
+    db.execute(delete(DebateSession).where(DebateSession.id == session_id))
+    db.commit()
+    return {"status": "deleted", "session_id": str(session_id)}
 
 
 def _build_session_response(db: Session, session_id: UUID) -> DebateSessionResponse:

@@ -22,6 +22,15 @@ class FinancialCacheRepository:
         )
         return list(self.session.scalars(stmt))
 
+    def get_latest_row(self, symbol: str) -> FinancialCache | None:
+        stmt = (
+            select(FinancialCache)
+            .where(FinancialCache.symbol == symbol)
+            .order_by(FinancialCache.fiscal_year.desc(), FinancialCache.fiscal_quarter.desc().nullslast())
+            .limit(1)
+        )
+        return self.session.scalar(stmt)
+
     def upsert_many(self, rows: Sequence[dict]) -> int:
         if not rows:
             return 0
@@ -37,8 +46,6 @@ class FinancialCacheRepository:
                     "total_assets": stmt.excluded.total_assets,
                     "total_liabilities": stmt.excluded.total_liabilities,
                     "total_equity": stmt.excluded.total_equity,
-                    "per": stmt.excluded.per,
-                    "pbr": stmt.excluded.pbr,
                     "roe": stmt.excluded.roe,
                     "debt_ratio": stmt.excluded.debt_ratio,
                     "source_url": stmt.excluded.source_url,
@@ -66,3 +73,18 @@ class FinancialCacheRepository:
         self.session.execute(delete(FinancialCache).where(FinancialCache.id.in_(ids)))
         self.session.flush()
         return overflow
+
+    def update_latest_valuation(
+        self,
+        symbol: str,
+        *,
+        per: float | None,
+        pbr: float | None,
+    ) -> bool:
+        row = self.get_latest_row(symbol)
+        if row is None:
+            return False
+        row.per = per
+        row.pbr = pbr
+        self.session.flush()
+        return True

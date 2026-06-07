@@ -49,6 +49,14 @@ async def data_agent_node(state: DebateState) -> dict:
         "price_context":     _fmt_price(symbol, price, tech, events),
         "financial_context": _fmt_finance(finance),
         "evidence_context":  format_evidence_context(evidences),
+        # ChromaDB 없으면 PostgreSQL news/filings로 폴백 (RAGAS 평가에도 동일 적용)
+        "initial_evidences": evidences or [
+            {"excerpt": n.get("summary") or n.get("title", ""), "source_title": n.get("title", "")}
+            for n in news if n.get("summary") or n.get("title")
+        ] + [
+            {"excerpt": f.get("summary") or f.get("filing_title", ""), "source_title": f.get("filing_title", "")}
+            for f in filings if f.get("summary") or f.get("filing_title")
+        ],
         "news_chunks":       [ev.get("source_title", "") + " " + (ev.get("excerpt") or "") for ev in evidences]
                            or [n.get("title","") + " " + (n.get("summary") or "") for n in news]
                            + [f.get("filing_title","") + " " + (f.get("summary") or "") for f in filings],
@@ -88,21 +96,47 @@ def _fmt_price(symbol, price, tech, events) -> str:
 def _fmt_finance(rows) -> str:
     if not rows:
         return "[재무] 데이터 없음"
-    lines = ["[재무지표]"]
-    for r in rows:
+
+    def val(r, k):
+        v = r.get(k)
+        return float(v) if v is not None else None
+
+    def fmt_val(v):
+        return f"{v/1e8:.0f}억" if v is not None else "N/A"
+
+    def chg(curr, prev):
+        if curr is None or prev is None or prev == 0:
+            return ""
+        rate = (curr - prev) / abs(prev) * 100
+        sign = "▲" if rate > 0 else "▼"
+        return f" ({sign}{abs(rate):.1f}% QoQ)"
+
+    lines = ["[재무지표] ※ QoQ는 직전 분기 대비 증감률"]
+    for i, r in enumerate(rows):
         p = f"{r['fiscal_year']}" + (f"Q{r['fiscal_quarter']}" if r.get("fiscal_quarter") else "")
-        def f(k): return f"{float(r[k])/1e8:.0f}억" if r.get(k) else "N/A"
+        prev = rows[i + 1] if i + 1 < len(rows) else None
+
+        rev  = val(r, "revenue");          prev_rev  = val(prev, "revenue")  if prev else None
+        opi  = val(r, "operating_profit"); prev_opi  = val(prev, "operating_profit") if prev else None
+        ni   = val(r, "net_income");       prev_ni   = val(prev, "net_income") if prev else None
+
         lines.append(
-            f"  {p}: 매출 {f('revenue')} 영익 {f('operating_profit')} 순익 {f('net_income')} "
-            f"| PER {r.get('per','N/A')} PBR {r.get('pbr','N/A')} ROE {r.get('roe','N/A')}"
+            f"  {p}: "
+            f"매출 {fmt_val(rev)}{chg(rev, prev_rev)} / "
+            f"영업이익(영익) {fmt_val(opi)}{chg(opi, prev_opi)} / "
+            f"당기순이익(순익) {fmt_val(ni)}{chg(ni, prev_ni)} "
+            f"| PER {r.get('per','N/A')} PBR {r.get('pbr','N/A')} "
+            f"ROE {str(round(float(r['roe'])*100, 2))+'%' if r.get('roe') else 'N/A'}"
         )
     return "\n".join(lines)
 
 
 def _yfinance_fallback(symbol):
     try:
+        import time
         import yfinance as yf
 
+        time.sleep(1)  # rate limit 회피
         quote = IntradayQuoteService().get_latest_quote(symbol)
         t = yf.Ticker(resolve_yfinance_symbol(symbol))
         hist = t.history(period="6mo")

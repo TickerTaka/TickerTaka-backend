@@ -16,7 +16,7 @@ from app.agents.nodes.moderator_node  import (
 
 logger = logging.getLogger(__name__)
 
-_ROUNDS = ["opening", "rebuttal", "closing"]
+_NUM_TOPICS = 3  # 모더레이터가 생성하는 주제 수
 
 
 def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "moderator_summary"]:
@@ -25,23 +25,25 @@ def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "moderato
         logger.warning("[graph] 환각 2회 초과 → summary 강제 이동")
         return "moderator_summary"
 
-    # 사회자 개입 → 같은 에이전트 재발언
+    if state["moderator_flag"] == "end":
+        return "moderator_summary"
+
+    topic_idx = state.get("current_topic_index", 0)
+    turn      = state.get("current_turn", 1)
+
+    # 모든 주제 완료 → summary
+    if topic_idx >= _NUM_TOPICS:
+        logger.info("[graph] 모든 주제 완료 → summary")
+        return "moderator_summary"
+
+    # 사회자 개입 → 직전 에이전트 재발언
     if state["moderator_flag"] == "intervene":
-        return "bull_agent" if state["round_order"] % 2 == 1 else "bear_agent"
+        return "bear_agent" if turn in (2, 4) else "bull_agent"
 
-    # summary 라운드 진입
-    if state["current_round"] == "summary" or state["moderator_flag"] == "end":
-        return "moderator_summary"
-
-    # bull/bear 교대 (bull 홀수, bear 짝수 round_order)
-    if state["round_order"] % 2 == 1:
+    # 4턴 구조: 1=bull주장, 2=bear반박, 3=bull재반박, 4=bear재반박
+    # turn=2,4 → bear 차례 / turn=1,3 → bull 차례
+    if turn in (2, 4):
         return "bear_agent"
-
-    # 다음 라운드로 넘어갈 시점인지 확인
-    idx = _ROUNDS.index(state["current_round"]) if state["current_round"] in _ROUNDS else -1
-    if idx >= len(_ROUNDS) - 1:
-        return "moderator_summary"
-
     return "bull_agent"
 
 
