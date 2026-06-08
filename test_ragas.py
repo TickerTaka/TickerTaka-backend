@@ -1,5 +1,7 @@
 # test_ragas.py
 """RAGAS 평가 함수 단독 테스트 (ChromaDB 데이터 없이도 동작 확인)"""
+import warnings
+warnings.filterwarnings("ignore", message="Field .* has conflict with protected namespace")
 import asyncio
 import os
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
