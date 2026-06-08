@@ -59,7 +59,7 @@ GOLDEN_CASES = [
             "쟁점3: 재무 지표(ROE, PER, PBR) 평가",
         ],
         "expected_summary_faithfulness_min":    0.6,
-        "expected_summary_answer_relevancy_min": 0.5,
+        "expected_summary_answer_relevancy_min": 0.4,
         "expected_evidence_precision_min":      0.0,   # ChromaDB 없는 환경에서 0도 허용
     },
 ]

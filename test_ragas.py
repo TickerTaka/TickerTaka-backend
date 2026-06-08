@@ -44,7 +44,7 @@ DUMMY_QUERY = "삼성전자 실적 재무 분기보고서 매출 영업이익 �
 
 
 async def main():
-    session_id = "test-ragas-000"
+    session_id = "00000000-0000-0000-0000-000000000000"
 
     print("\n[1] 요약 품질 평가 (Faithfulness + Answer Relevancy)")
     print("  context = 토론 발언, answer = 사회자 요약, question = 의제")
