@@ -46,10 +46,13 @@ DUMMY_QUERY = "삼성전자 실적 재무 분기보고서 매출 영업이익 �
 async def main():
     session_id = "test-ragas-000"
 
-    print("\n[1] 요약 품질 평가 (Faithfulness)")
-    print("  context = 토론 발언, answer = 사회자 요약")
-    result1 = await evaluate_summary_async(session_id, DUMMY_STATEMENTS, DUMMY_SUMMARY)
+    print("\n[1] 요약 품질 평가 (Faithfulness + Answer Relevancy)")
+    print("  context = 토론 발언, answer = 사회자 요약, question = 의제")
+    result1 = await evaluate_summary_async(
+        session_id, DUMMY_STATEMENTS, DUMMY_SUMMARY, agenda=DUMMY_AGENDA
+    )
     print(f"  → faithfulness={result1.faithfulness}")
+    print(f"  → answer_relevancy={result1.answer_relevancy}")
 
     print("\n[2] 검색 근거 품질 평가 (Context Precision)")
     print("  question = 카테고리 쿼리, contexts = 더미 뉴스/공시 청크")

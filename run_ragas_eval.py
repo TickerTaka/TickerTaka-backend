@@ -58,8 +58,9 @@ GOLDEN_CASES = [
             "쟁점2: 기술적 지표와 주가 흐름",
             "쟁점3: 재무 지표(ROE, PER, PBR) 평가",
         ],
-        "expected_summary_faithfulness_min": 0.6,
-        "expected_evidence_precision_min":   0.0,   # ChromaDB 없는 환경에서 0도 허용
+        "expected_summary_faithfulness_min":    0.6,
+        "expected_summary_answer_relevancy_min": 0.5,
+        "expected_evidence_precision_min":      0.0,   # ChromaDB 없는 환경에서 0도 허용
     },
 ]
 
@@ -80,6 +81,7 @@ async def run_case(case: dict, dry_run: bool) -> dict:
         session_id,
         case["statements"],
         case["summary"],
+        agenda=case.get("agenda", []),
         save=not dry_run,
     )
     evidence_result = await evaluate_evidence_async(
@@ -90,24 +92,30 @@ async def run_case(case: dict, dry_run: bool) -> dict:
         save=not dry_run,
     )
 
-    faith = summary_result.faithfulness
-    prec  = evidence_result.avg_precision
-    faith_pass = faith is not None and faith >= case.get("expected_summary_faithfulness_min", 0)
-    prec_pass  = prec  is None or prec >= case.get("expected_evidence_precision_min", 0)
+    faith  = summary_result.faithfulness
+    relev  = summary_result.answer_relevancy
+    prec   = evidence_result.avg_precision
 
-    status = "PASS" if (faith_pass and prec_pass) else "FAIL"
-    print(f"  summary_faithfulness : {faith:.3f} {'✅' if faith_pass else '❌'}" if faith is not None else "  summary_faithfulness : None ⚠️")
-    print(f"  evidence_precision   : {prec:.3f} {'✅' if prec_pass else '❌'}"  if prec  is not None else "  evidence_precision   : None ⚠️")
+    faith_pass = faith is not None and faith >= case.get("expected_summary_faithfulness_min", 0)
+    relev_pass = relev is None or relev >= case.get("expected_summary_answer_relevancy_min", 0)
+    prec_pass  = prec  is None or prec  >= case.get("expected_evidence_precision_min", 0)
+
+    status = "PASS" if (faith_pass and relev_pass and prec_pass) else "FAIL"
+    print(f"  summary_faithfulness    : {faith:.3f} {'✅' if faith_pass else '❌'}" if faith is not None else "  summary_faithfulness    : None ⚠️")
+    print(f"  summary_answer_relevancy: {relev:.3f} {'✅' if relev_pass else '❌'}" if relev is not None else "  summary_answer_relevancy: None ⚠️")
+    print(f"  evidence_precision      : {prec:.3f}  {'✅' if prec_pass else '❌'}"  if prec  is not None else "  evidence_precision      : None ⚠️")
     print(f"  → {status}")
 
     return {
-        "case_id":                  case["case_id"],
-        "description":              case["description"],
-        "summary_faithfulness":     faith,
-        "evidence_precision":       prec,
-        "faith_pass":               faith_pass,
-        "prec_pass":                prec_pass,
-        "status":                   status,
+        "case_id":                       case["case_id"],
+        "description":                   case["description"],
+        "summary_faithfulness":          faith,
+        "summary_answer_relevancy":      relev,
+        "evidence_precision":            prec,
+        "faith_pass":                    faith_pass,
+        "relev_pass":                    relev_pass,
+        "prec_pass":                     prec_pass,
+        "status":                        status,
     }
 
 
@@ -149,17 +157,19 @@ async def run_session(session_id: str, dry_run: bool) -> dict:
 
     print(f"\n▶ session={session_id} ({symbol} / {category})")
 
-    sr = await evaluate_summary_async(session_id, statements, summary, save=not dry_run)
+    sr = await evaluate_summary_async(session_id, statements, summary, agenda=[], save=not dry_run)
     er = await evaluate_evidence_async(session_id, [], eq, [], save=not dry_run)
 
-    print(f"  summary_faithfulness : {sr.faithfulness}")
-    print(f"  evidence_precision   : {er.avg_precision}")
+    print(f"  summary_faithfulness    : {sr.faithfulness}")
+    print(f"  summary_answer_relevancy: {sr.answer_relevancy}")
+    print(f"  evidence_precision      : {er.avg_precision}")
 
     return {
-        "case_id":              session_id,
-        "summary_faithfulness": sr.faithfulness,
-        "evidence_precision":   er.avg_precision,
-        "status":               "DONE",
+        "case_id":                  session_id,
+        "summary_faithfulness":     sr.faithfulness,
+        "summary_answer_relevancy": sr.answer_relevancy,
+        "evidence_precision":       er.avg_precision,
+        "status":                   "DONE",
     }
 
 
