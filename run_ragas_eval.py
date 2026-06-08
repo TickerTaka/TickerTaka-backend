@@ -129,7 +129,7 @@ async def run_session(session_id: str, dry_run: bool) -> dict:
         """, session_id)
         session_row = await conn.fetchrow("""
             SELECT ds.symbol, ds.category,
-                   COALESCE(tm.name, ds.symbol) AS symbol_name
+                   COALESCE(tm.name_kr, ds.symbol) AS symbol_name
             FROM debate_session ds
             LEFT JOIN ticker_metadata tm ON tm.symbol = ds.symbol
             WHERE ds.id = $1::uuid
