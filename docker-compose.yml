@@ -7,6 +7,7 @@
 
 services:
   postgres:
+    profiles: ["local-db"]
     image: postgres:15-alpine
     container_name: tickertaka-postgres
     restart: unless-stopped
@@ -52,7 +53,44 @@ services:
       - "8080:8000"
     volumes:
       - chromadata:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tickertaka-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_URL: http://chroma:8000
+      NOTION_MCP_SERVER_COMMAND: ""
+      NOTION_MCP_SERVER_ARGS: ""
+      HF_HOME: /root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    volumes:
+      - hfcache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   pgdata:
   chromadata:
+  hfcache:

@@ -843,4 +843,46 @@ MCP를 실제로 쓰려면 MCP 클라이언트/서버 라이브러리(예: `mcp`
   - **moderator fallback / graceful summary / RAGAS fail-soft**는 충족
   - **MCP publish fail-soft**는 아직 MCP 트랙 미착수라 유보
 - 따라서 **#2는 현재 범위 기준 사실상 종료**, 다음 우선순위는 **#3 MCP 도입**.
+
+## FF. #3 MCP 도입 진행 기록 (2026-06-09)
+
+- `POST /api/debates/{session_id}/publish/notion` 구현 완료
+- `debate_session`에 `notion_page_id` / `notion_page_url` / `notion_published_at` 컬럼 추가 및 Alembic 반영 완료
+- `app/integrations/notion_mcp.py`에서 **로컬 설치된 Notion MCP 서버 바이너리**를 stdio(JSON newline-delimited)로 실행하는 경로 구현
+- 현재 실환경 E2E 기준 tool은 **`API-post-page`**
+- payload는 **Notion REST 타입 객체**(`parent/properties/children`) 기준으로 확정
+- 실제 Notion DB row(page) 생성 성공, `notion_page_url` 반환까지 확인
+- 같은 세션 재발행 시 기존 URL을 반환하는 멱등 경로도 코드상 보유
+
+판정:
+- **#3 MCP 도입은 실서버 E2E까지 완료**
+- 다음 우선순위는 **#4 Dockerise**
+
+## GG. #4 Dockerise 진행 기록 (2026-06-09)
+
+- `Dockerfile` 추가
+- compose에 `app` 서비스 추가
+- `app`은 `env_file: .env`를 읽되, compose 내부에서는
+  - `REDIS_URL=redis://redis:6379/0`
+  - `CHROMA_URL=http://chroma:8000`
+  로 override
+- `postgres` 서비스는 `profiles: ["local-db"]`로 분리해 기본 경로에서 제외
+- `chroma` heartbeat healthcheck 추가
+- `app` healthcheck(`/health`) 추가
+- HuggingFace 캐시 영속화를 위해 `HF_HOME` + `hfcache` named volume 추가
+- MCP는 Docker app 내부에선 비활성화(`NOTION_MCP_SERVER_COMMAND=""`)하여 호스트 로컬 의존성과 분리
+
+실기동 확인:
+- `docker compose up -d redis chroma`
+- `docker compose up --build -d app`
+- `docker compose ps`
+- `curl http://127.0.0.1:8000/health`
+
+결과:
+- `tickertaka-app` / `tickertaka-chroma` / `tickertaka-redis` 모두 `healthy`
+- `/health` 응답 `{"status":"ok"}`
+
+판정:
+- **#4 Dockerise는 `/health` 실기동 기준 닫힘**
+- 다음 우선순위는 **#5 스트리밍 & 비동기 처리**
 - 단, fail-soft 범위는 **moderator/보조기능까지**이며, `save_statement`/`save_moderator_summary`/`update_session_status` 같은 핵심 DB 저장 실패는 여전히 본체 실패로 본다.
