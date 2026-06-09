@@ -15,7 +15,8 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
   - PyKRX / yfinance
   - 뉴스 소스
   - 토론 LLM (settings 기반 모델, 기본 `gpt-4o-mini` / 현재 OpenAI 직접)
-  - RAGAS 평가 LLM (현재 OpenRouter sLLM `gpt-oss-120b:free` — 1차 구현, 변경 가능)
+  - RAGAS 평가 LLM (현재 OpenRouter sLLM `gpt-oss-120b:free` — 변경 가능)
+  - Notion (MCP 경유 2차 저장소 — 토론 결과 발행)
 - 보조 인프라
   - PostgreSQL
   - Redis
@@ -122,13 +123,32 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
 
 - 목표: 토론 종료 후 요약/근거 품질을 사후 평가한다.
 - 트리거: moderator summary 저장 직후 백그라운드 태스크
-- 현재 구현 (**RAGAS 1차 구현 — 메트릭/모델/영속화 변경 가능**):
-  - summary faithfulness
+- 현재 구현 (RAGAS — 평가 모델/메트릭은 변경 가능):
+  - summary faithfulness + answer relevancy
   - evidence context precision
-  - ※ 결과는 현재 로그만(영속화·배치·리포트 미완)
+  - 결과는 **`debate_eval_result` 테이블에 영속화**, 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트(`test_ragas_regression.py`)까지 구현. golden set 확장이 남은 단계
 - 관련 코드:
   - `app/agents/nodes/moderator_node.py`
   - `app/domain/debate_evaluation.py`
+  - `run_ragas_eval.py`, `tests/test_agents/test_ragas_regression.py`
+
+## UC-09. 토론 결과 Notion 발행
+
+- 목표: 사용자가 완료된 토론을 Notion에 저장(미러)한다.
+- 진입점: `POST /api/debates/{session_id}/publish/notion`
+- 트리거: 토론 상세 화면의 **"노션에 저장" 버튼** (버튼 기반 온디맨드)
+- 전제: 세션 `completed` + 요약 존재
+- 성공 결과:
+  - Notion DB에 row(page) 생성 (속성 + 본문 block)
+  - `debate_session.notion_page_id/url/published_at` 저장
+  - `notion_page_url` 반환
+- 멱등: 이미 발행된 세션은 기존 URL 반환(중복 생성 없음)
+- 실패: MCP/Notion 발행 실패는 `502`, 토론 본체는 보존(fail-soft)
+- 관련 코드:
+  - `app/api/debate.py`
+  - `app/integrations/notion_mcp.py`
+
+> (예정 · 타 팀원 구현 중) **뉴스/공시 감성분석** — 이 repo 미병합. 머지 후 별도 UC로 추가 예정.
 
 ## 비기능 요구
 

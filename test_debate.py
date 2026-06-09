@@ -3,6 +3,8 @@
 에이전트 단독 실행 테스트
 터미널 실행 예시 python test_debate.py 005930 삼성전자 financial
 """
+import warnings
+warnings.filterwarnings("ignore", message="Field .* has conflict with protected namespace")
 import asyncio
 import uuid
 import sys

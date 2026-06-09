@@ -27,6 +27,7 @@
 - `moderator_summary`
 - `evidence`
 - `debate_note`
+- `debate_eval_result`
 
 ## 관계 요약
 
@@ -43,6 +44,7 @@
 | `debate_session` | 1:N | `agent_statement` | `uq_statement_order(session_id, round_order)` |
 | `debate_session` | 1:1 | `moderator_summary` | `session_id` **unique** → 실질 1:1 |
 | `debate_session` | 1:N | `debate_note` | `ON DELETE CASCADE` |
+| `debate_session` | 1:N | `debate_eval_result` | `session_id` FK, `ON DELETE CASCADE` — RAGAS 사후평가 결과 |
 | `debate_session` | 0..1:N | `debate_session` | **self-ref** `cached_from_session_id` → 토론 결과 캐시 재사용 |
 | `agent_statement` | 1:N | `evidence` | `ON DELETE CASCADE` |
 | `news/filing/price/financial/technical_cache` | 0..N:N | `evidence` | 5개 cache FK 모두 nullable·`ON DELETE SET NULL` (근거 원본 삭제돼도 발췌는 보존) |
@@ -68,6 +70,7 @@ erDiagram
     DEBATE_SESSION ||--o{ AGENT_STATEMENT : contains
     DEBATE_SESSION ||--o| MODERATOR_SUMMARY : summarizes
     DEBATE_SESSION ||--o{ DEBATE_NOTE : noted_by
+    DEBATE_SESSION ||--o{ DEBATE_EVAL_RESULT : evaluated_by
     DEBATE_SESSION ||--o{ DEBATE_SESSION : cached_from
     AGENT_STATEMENT ||--o{ EVIDENCE : cites
 
@@ -110,6 +113,9 @@ erDiagram
         datetime started_at
         datetime completed_at
         text error_message
+        string notion_page_id "nullable — Notion 발행 시"
+        string notion_page_url "nullable"
+        datetime notion_published_at "nullable"
     }
     AGENT_STATEMENT {
         uuid id PK
@@ -150,6 +156,15 @@ erDiagram
         uuid session_id FK
         bool is_favorite
         text user_memo
+    }
+    DEBATE_EVAL_RESULT {
+        uuid id PK
+        uuid session_id FK
+        string eval_type "summary_faithfulness|summary_answer_relevancy|evidence_precision"
+        float score "nullable, 0.0~1.0 (None=실패)"
+        string model_used
+        text error
+        datetime eval_at
     }
     PRICE_CACHE {
         uuid id PK
@@ -223,6 +238,7 @@ erDiagram
 | `DebateStatus` | `models/debate.py:33` | pending, running, completed, failed |
 | `DebateRound` | `models/debate.py:40` | opening, rebuttal, closing, summary |
 | `AgentRole` | `models/debate.py:47` | bull, bear, moderator, system |
+| `EvalType` | `models/debate.py:206` | summary_faithfulness, evidence_precision (※ 컬럼은 String이라 RAGAS 저장 시 `summary_answer_relevancy`도 기록) |
 | `SourceType` | `models/cache.py:35` | DART, NEWS, PRICE, FINANCIAL, TECHNICAL, INDUSTRY, MACRO, USER_INPUT, OTHER |
 | `MarketType` | `models/ticker.py:26` | KOSPI, KOSDAQ, NASDAQ, NYSE, AMEX, OTHER |
 | `RefreshJobType` | `models/cache.py:47` | price, news, filing, financial, technical, event, all |
@@ -263,6 +279,7 @@ erDiagram
 ### `debate_session`
 - 토론 세션 메타데이터
 - 상태, 종목, 카테고리, 시작/종료 시각 보유
+- **Notion 발행 상태** `notion_page_id` / `notion_page_url` / `notion_published_at` 보유(미발행 시 NULL) — 발행 멱등성의 근거(값 존재 시 재발행 대신 기존 URL 반환)
 
 ### `agent_statement`
 - bull/bear/moderator 발언 저장
@@ -279,6 +296,12 @@ erDiagram
 ### `debate_note`
 - 사용자별 토론 세션 메모/즐겨찾기 (`is_favorite`, `user_memo`)
 - `(user_id, session_id)` unique — 세션당 사용자 1개 노트
+
+### `debate_eval_result`
+- **RAGAS 사후평가 결과 영속화** (`models/debate.py:211`)
+- 지표별 1행: `eval_type`(summary_faithfulness / summary_answer_relevancy / evidence_precision) + `score`(0.0~1.0, 실패 시 NULL) + `model_used` + `error`
+- 토론 종료 후 백그라운드 평가(`debate_evaluation.py`)와 배치(`run_ragas_eval.py`)가 기록
+- `session_id` FK `ON DELETE CASCADE`, 조회 인덱스 `idx_eval_session` / `idx_eval_type`
 
 ## 구현 표현 차이 메모
 

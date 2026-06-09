@@ -257,7 +257,10 @@ async def moderator_summary_node(state: DebateState) -> dict:
     try:
         if not used_fallback_summary:
             _schedule_background_task(
-                _run_summary_eval(state["session_id"], state["statements"], summary),
+                _run_summary_eval(
+                    state["session_id"], state["statements"], summary,
+                    state.get("agenda", []),
+                ),
                 label="eval-summary",
             )
         else:
@@ -292,11 +295,13 @@ async def moderator_summary_node(state: DebateState) -> dict:
     }
 
 
-async def _run_summary_eval(session_id: str, statements: list, summary: str) -> None:
-    """사회자 요약 품질 RAGAS 평가 — 백그라운드 태스크"""
+async def _run_summary_eval(
+    session_id: str, statements: list, summary: str, agenda: list
+) -> None:
+    """사회자 요약 품질 RAGAS 평가 — 백그라운드 태스크 (faithfulness + answer_relevancy)"""
     try:
         from app.domain.debate_evaluation import evaluate_summary_async
-        await evaluate_summary_async(session_id, statements, summary)
+        await evaluate_summary_async(session_id, statements, summary, agenda)
     except Exception as e:
         logger.error(f"[eval] 요약 평가 실패: {e}")
 

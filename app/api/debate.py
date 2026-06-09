@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import get_settings
 from app.core.db import get_db
 from app.domain.debate_service import DebateExecutionService, DebateStartRejectedError
+from app.integrations import NotionMcpClient, NotionMcpError
 from app.models import AgentStatement, DebateSession, DebateStatus, ModeratorSummary, TickerMetadata
-from app.schemas.debate import DebateCreateRequest, DebateSessionResponse, DebateStatementResponse
+from app.schemas.debate import (
+    DebateCreateRequest,
+    DebateNotionPublishResponse,
+    DebateSessionResponse,
+    DebateStatementResponse,
+)
 from app.schemas.market_data import DebateListItem, DebateListResponse
 
 router = APIRouter(prefix="/api/debates", tags=["debates"])
@@ -109,6 +116,75 @@ def get_debate(session_id: UUID, db: Session = Depends(get_db)) -> DebateSession
     return _build_session_response(db, session_id)
 
 
+@router.post("/{session_id}/publish/notion", response_model=DebateNotionPublishResponse)
+def publish_debate_to_notion(session_id: UUID, db: Session = Depends(get_db)) -> DebateNotionPublishResponse:
+    session_row = db.scalar(
+        select(DebateSession)
+        .where(DebateSession.id == session_id)
+        .with_for_update()
+    )
+    if session_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"debate session not found: {session_id}")
+    if session_row.status != DebateStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="debate session is not completed yet",
+        )
+    if session_row.notion_page_id and session_row.notion_page_url and session_row.notion_published_at:
+        return DebateNotionPublishResponse(
+            session_id=session_row.id,
+            notion_page_id=session_row.notion_page_id,
+            notion_page_url=session_row.notion_page_url,
+            notion_published_at=session_row.notion_published_at,
+        )
+
+    ticker = db.get(TickerMetadata, session_row.symbol)
+    summary_row = db.scalar(select(ModeratorSummary).where(ModeratorSummary.session_id == session_id))
+    statement_rows = list(
+        db.scalars(
+            select(AgentStatement)
+            .where(AgentStatement.session_id == session_id)
+            .options(selectinload(AgentStatement.evidences))
+            .order_by(AgentStatement.round_order)
+        )
+    )
+    if summary_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="debate summary is not available yet",
+        )
+
+    client = NotionMcpClient()
+    try:
+        result = client.publish_debate(
+            _build_publish_payload(
+                session_row=session_row,
+                ticker=ticker,
+                summary_row=summary_row,
+                statement_rows=statement_rows,
+            )
+        )
+    except NotionMcpError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"failed to publish debate to notion: {exc}",
+        ) from exc
+
+    session_row.notion_page_id = result.page_id
+    session_row.notion_page_url = result.page_url
+    session_row.notion_published_at = datetime.now(UTC)
+    db.add(session_row)
+    db.commit()
+    db.refresh(session_row)
+    return DebateNotionPublishResponse(
+        session_id=session_row.id,
+        notion_page_id=session_row.notion_page_id or "",
+        notion_page_url=session_row.notion_page_url or "",
+        notion_published_at=session_row.notion_published_at or datetime.now(UTC),
+    )
+
+
 @router.delete("/{session_id}")
 def delete_debate(session_id: UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     row = db.get(DebateSession, session_id)
@@ -148,6 +224,9 @@ def _build_session_response(db: Session, session_id: UUID) -> DebateSessionRespo
         completed_at=row.completed_at,
         summary_content=summary_row.summary_content if summary_row else None,
         key_points=(summary_row.key_points or []) if summary_row else [],
+        notion_page_id=row.notion_page_id,
+        notion_page_url=row.notion_page_url,
+        notion_published_at=row.notion_published_at,
         statements=[
             DebateStatementResponse(
                 agent_role=str(stmt.agent_role.value if hasattr(stmt.agent_role, "value") else stmt.agent_role),
@@ -159,4 +238,40 @@ def _build_session_response(db: Session, session_id: UUID) -> DebateSessionRespo
             )
             for stmt in statement_rows
         ],
+    )
+
+
+def _build_publish_payload(
+    *,
+    session_row: DebateSession,
+    ticker: TickerMetadata | None,
+    summary_row: ModeratorSummary,
+    statement_rows: list[AgentStatement],
+):
+    from app.integrations.notion_mcp import DebatePublishPayload
+
+    key_points = [str(item) for item in (summary_row.key_points or []) if str(item).strip()]
+    statements: list[dict[str, object]] = []
+    for stmt in statement_rows:
+        evidence_lines = []
+        for evidence in stmt.evidences or []:
+            label = evidence.source_label or evidence.source_title or evidence.source_url or "evidence"
+            evidence_lines.append(f"{label}: {evidence.excerpt}")
+        statements.append(
+            {
+                "agent_role": str(stmt.agent_role.value if hasattr(stmt.agent_role, "value") else stmt.agent_role),
+                "round": str(stmt.round.value if hasattr(stmt.round, "value") else stmt.round),
+                "content": stmt.content,
+                "evidence_lines": evidence_lines,
+            }
+        )
+    return DebatePublishPayload(
+        session_id=str(session_row.id),
+        symbol=session_row.symbol,
+        symbol_name=ticker.name_kr if ticker else session_row.symbol,
+        category=str(session_row.category.value if hasattr(session_row.category, "value") else session_row.category),
+        started_at=session_row.started_at,
+        summary_content=summary_row.summary_content,
+        key_points=key_points,
+        statements=statements,
     )

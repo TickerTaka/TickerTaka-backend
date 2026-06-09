@@ -69,7 +69,8 @@
 이유:
 - 발표/시연에서 눈에 보이는 결과물이 좋음
 - “토론 결과 외부 협업 툴 저장”이 명확해서 평가 설명이 쉬움
-- 별도 UI를 새로 만들지 않아도 됨
+- **사용자가 원하는 토론만 저장**하게 만들 수 있어 데이터 위생이 좋음
+- 버튼 클릭 = MCP 호출이라 시연 동선이 직관적임
 
 권장 정책:
 - **시스템 SOT는 계속 PostgreSQL**
@@ -77,24 +78,31 @@
 
 즉:
 - `debate_sessions`, `statements`, `evidence`는 기존 DB 유지
-- MCP는 debate 완료 후 결과를 Notion page/database item으로 mirror
+- MCP는 **사용자 요청 시** 기존 토론 결과를 Notion database row(page)로 mirror
 
 이유:
 - Notion을 운영 DB처럼 쓰면 검색/정합성/트랜잭션이 약함
 - 평가 대응과 시연 목적에는 “MCP를 통한 외부 협업 시스템 연동”이면 충분
 
 최소 구현안:
-- 토론 완료 시 `session_id`, `symbol`, `category`, `summary_content`, `key_points`, `created_at` 저장
-- `/api/debates` 성공 경로 뒤 또는 background task에서 publish
+- **토론 상세 화면의 `노션에 저장` 버튼**에서 발행
+- 엔드포인트 예시: `POST /api/debates/{session_id}/publish/notion`
+- 성공 시 응답: `notion_page_url`
+- 저장 대상:
+  - 속성(DB property): `session_id`, `symbol`, `category`, `created_at`, `notion_published_at`
+  - 본문(block): `summary_content`, `key_points`, 주요 statements, 근거 링크
 
 주의:
 - **Notion REST API 직접 호출만 붙이면 평가 항목 6(MCP)로 인정받기 어렵다.**
 - 따라서 이번 단계의 닫힘 기준은 단순 “외부 저장 성공”이 아니라, **실제 MCP 프로토콜이 호출 경로에 존재하는지**까지 포함해야 한다.
+- 또한 이 대화에서 사용하는 MCP 도구는 개발 보조용일 뿐, **FastAPI가 직접 호출할 수 있는 런타임 경로가 아니다.**
+- 실제 구현 본체는 **백엔드가 MCP client가 되어 Notion MCP server와 세션을 맺는 배선**이다.
 
 권장 구현 2안:
 1. **Notion MCP 서버 사용**
-   - backend 또는 별도 worker가 MCP client로 Notion MCP 서버를 호출
-   - debate 결과를 Notion DB/page로 mirror
+   - backend가 MCP client로 Notion MCP 서버를 호출
+   - debate 결과를 **Notion 데이터베이스의 row(page)** 로 생성
+   - 속성은 DB 컬럼으로, 요약/발언/근거는 페이지 본문 block으로 저장
 2. **프로젝트 도구를 MCP로 노출**
    - `fetch_price_context`, `fetch_news_context`, `fetch_filing_context`, `publish_debate_result` 같은 도구를 MCP server로 노출
    - agent 또는 orchestration layer가 MCP client로 사용
@@ -102,6 +110,7 @@
 이번 단계 권장 결론:
 - **시연 가시성은 Notion MCP가 가장 좋다**
 - 다만 구현 문서에 **“REST 직접연동이 아니라 MCP 프로토콜 경유”**를 명시해야 한다
+- UX는 **자동 발행보다 버튼 기반 온디맨드 발행**이 더 적절하다
 
 대안:
 - Slack/Discord MCP: 시연은 쉬우나 구조 저장이 약함
@@ -114,8 +123,19 @@
 닫힘 기준:
 - MCP 서버 연결 문서화
 - MCP client → MCP server 호출 경로가 실제 코드에 존재
-- 토론 1건 실행 시 Notion에 결과 row/page 생성
-- 실패 시 본체 토론 API는 깨지지 않음 (fail-soft)
+- **토론 상세에서 사용자가 버튼을 눌렀을 때** Notion DB에 row(page) 생성
+- `debate_session` 또는 별도 publish 레코드에 `notion_page_id` / `notion_page_url` / `notion_published_at` 저장
+- 이미 발행된 세션은 **중복 생성 대신 기존 URL 반환 또는 update** (멱등성)
+- 실패 시 본체 토론 API는 깨지지 않음 (fail-soft), 프론트는 재시도 가능
+
+착수 전 운영 보완(누락 보강 — 실제 구현 시 막히는 지점):
+1. **Notion 사전 프로비저닝**: "토론 기록" 데이터베이스를 1회 수동 생성 → Notion **integration에 공유**(권한 부여) → `database_id`(필요 시 `data_source_id`)와 통합 토큰을 **설정/env로 주입**(`NOTION_TOKEN`, `NOTION_DATABASE_ID`). 이 사전작업이 없으면 row 생성이 401/404로 실패한다. 코드가 DB를 자동 생성하지 않는다는 전제를 명시.
+2. **MCP 전송/클라이언트 선택**: 이번 범위는 **로컬에 설치한 Notion MCP 서버 바이너리를 stdio로 실행**하는 방향으로 고정한다. 백엔드(FastAPI, Python)는 `app/integrations/notion_mcp.py`에서 **최소 stdio JSON-RPC client**로 서버 프로세스를 spawn하고 `initialize → tools/call → 종료`를 관리한다. stdio transport는 **newline-delimited JSON** 규격을 사용한다. 실제 E2E 기준 tool은 `API-post-page`, payload는 **Notion REST 타입 객체 형태**(`parent:{database_id:...}`, `properties:{title/rich_text/select/date...}`, `children:[paragraph/bulleted_list_item...]`)를 사용한다. Python `mcp` SDK는 이번 1차 구현의 필수 전제가 아니다.
+3. **스키마 변경 = Alembic 마이그레이션 필요**: `notion_page_id` / `notion_page_url` / `notion_published_at` 3컬럼 추가는 모델 수정만으로 끝나지 않고 **신규 Alembic revision**이 필요(기존 `alembic/versions/20260607_add_debate_eval_result.py` 패턴 따름). 닫힘 기준에 "마이그레이션 생성·적용"을 포함.
+4. **실제 E2E 계약 고정**: 이번 구현은 로컬 설치된 MCP 서버 바이너리 + `NOTION_MCP_TOOL_NAME=API-post-page` 기준으로 동작을 확정했다. 따라서 payload는 `parent/properties/children`의 **Notion REST 타입 객체**를 보내며, `children`은 `paragraph` / `bulleted_list_item` 블록만 사용한다. `notion-create-pages` / markdown `content` 기반 native v2 설명은 이번 브랜치의 실제 동작과 다르므로 혼용하지 않는다.
+5. **타임아웃 / 응답 파싱 실작동**: `NOTION_MCP_TIMEOUT_SECONDS`는 실제로 subprocess read에 적용되어야 하며, timeout 시 서버 프로세스를 종료하고 publish API는 실패해야 한다. 또한 tool 응답이 `content[].text` 안에 **JSON 문자열 또는 Notion URL** 형태로 감겨 와도 `page_id`/`page_url`를 추출할 수 있어야 하고, `tools/call` 결과의 `isError=true`는 일반 502가 아니라 tool-level 실패로 표면화되어야 한다.
+6. **로컬 바이너리 고정**: 이 환경에선 `npx` 실행이 안정적이지 않았으므로, `mkdir -p .notion-mcp && npm install --prefix .notion-mcp @notionhq/notion-mcp-server` 후 `NOTION_MCP_SERVER_COMMAND`를 `.notion-mcp/node_modules/.bin/notion-mcp-server` 절대경로로 고정하는 절차를 기본으로 둔다.
+7. **멱등성 동시클릭 가드(선택)**: 더블클릭 동시요청 시 페이지 2개 생성 가능. 발행 직전 `notion_page_id` **재조회 후 분기**로 충분하나, 더 단단히 하려면 기존 **RuntimeGuard(SET NX EX) 단일비행 락 패턴 재사용** 가능. 졸프 범위에선 재조회 분기로 충분.
 
 ## P1. 에러 핸들링 보강
 

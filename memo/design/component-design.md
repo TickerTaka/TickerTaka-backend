@@ -26,6 +26,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - 입력 검증
 - DB 세션 주입
 - background task enqueue
+- 토론 결과 Notion 발행 (`POST /api/debates/{session_id}/publish/notion`)
 
 ## 2. Domain Service Layer
 
@@ -45,7 +46,8 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - 캐시 적재/갱신
 - valuation 계산
 - evidence 검색
-- 사후 평가
+- 사후 평가 (RAGAS — `debate_eval_result` 영속화 + 배치/리포트)
+- (예정 · 타 팀원 구현 중) 뉴스/공시 **감성분석** — 이 repo 미병합, 머지 후 `news_cache.sentiment` 등 반영 예정
 
 ## 3. Agent Runtime Layer
 
@@ -82,6 +84,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `moderator_summary`
 - `evidence`
 - `debate_note`
+- `debate_eval_result`
 - `event_timeline`
 - `data_refresh_job`
 
@@ -97,6 +100,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `app/external/quote_client.py`
 - `app/external/chroma_client.py`
 - `app/core/llm_factory.py`
+- `app/integrations/notion_mcp.py`
 
 책임:
 - DART 재무/공시 데이터 수집
@@ -104,8 +108,9 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - yfinance fallback
 - Chroma query/upsert
 - 토론 LLM 호출: `llm_factory.get_llm(role)`가 role별 `settings.{bull,bear,moderator,fallback}_model`을 선택(**기본 `gpt-4o-mini`**). 현재 공급자는 OpenAI 직접(`openai_api_key`, base_url 미지정)
-- RAGAS 평가 LLM은 별도로 **OpenRouter sLLM** 사용 (`debate_evaluation.py`, 현재값 `gpt-oss-120b:free` — **RAGAS 1차 구현이라 모델/메트릭 변경 가능**)
+- RAGAS 평가 LLM은 별도로 **OpenRouter sLLM** 사용 (`debate_evaluation.py`, 현재값 `gpt-oss-120b:free` — 모델/메트릭 변경 가능). 결과는 **`debate_eval_result` 테이블에 영속화**되고 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트까지 구현됨 (메트릭: faithfulness / answer_relevancy / context_precision)
 - ※ `openrouter_base_url` 설정은 잔존하나 토론 경로엔 미적용 (항목3 sLLM 전환 시 재배선 지점)
+- **Notion 발행(MCP)**: `app/integrations/notion_mcp.py`가 **MCP client**로 self-host Notion MCP server(`@notionhq/notion-mcp-server`, stdio·newline-delimited JSON)를 spawn → `API-post-page`로 토론 결과를 Notion DB row(page)로 발행. PostgreSQL은 SOT, Notion은 2차 mirror
 
 ## 6. Infra Support Layer
 
@@ -162,6 +167,9 @@ flowchart LR
     AGENT --> REDIS
     AGENT --> CHROMA
     DOMAIN --> EVALLLM[OpenRouter sLLM - RAGAS eval]
+    DOMAIN --> EVALDB[(debate_eval_result)]
+    API --> NOTIONMCP[Notion MCP client - notion_mcp.py]
+    NOTIONMCP --> NOTION[Notion MCP server -> Notion DB row]
 ```
 
 ## 설계 원칙

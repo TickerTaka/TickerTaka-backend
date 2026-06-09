@@ -37,3 +37,13 @@ class DebateSessionResponse(BaseModel):
     summary_content: str | None = None
     key_points: list[str] = []
     statements: list[DebateStatementResponse] = []
+    notion_page_id: str | None = None
+    notion_page_url: str | None = None
+    notion_published_at: datetime | None = None
+
+
+class DebateNotionPublishResponse(BaseModel):
+    session_id: UUID
+    notion_page_id: str
+    notion_page_url: str
+    notion_published_at: datetime

@@ -102,6 +102,9 @@ class DebateSession(Base):
     cached_from_session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("debate_session.id"))
     error_message: Mapped[str | None] = mapped_column(Text)
     cache_key: Mapped[str | None] = mapped_column(String(255))
+    notion_page_id: Mapped[str | None] = mapped_column(String(255))
+    notion_page_url: Mapped[str | None] = mapped_column(String(2048))
+    notion_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped["AppUser"] = relationship(back_populates="debate_sessions")
     ticker: Mapped["TickerMetadata"] = relationship(back_populates="debate_sessions")
@@ -198,6 +201,31 @@ class ModeratorSummary(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
     session: Mapped["DebateSession"] = relationship(back_populates="moderator_summaries")
+
+
+class EvalType(str, Enum):
+    SUMMARY_FAITHFULNESS = "summary_faithfulness"
+    EVIDENCE_PRECISION   = "evidence_precision"
+
+
+class DebateEvalResult(Base):
+    """RAGAS 사후 평가 결과."""
+
+    __tablename__ = "debate_eval_result"
+    __table_args__ = (
+        Index("idx_eval_session", "session_id"),
+        Index("idx_eval_type", "eval_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    session_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("debate_session.id", ondelete="CASCADE"), nullable=False)
+    eval_type: Mapped[str] = mapped_column(String(50), nullable=False)   # EvalType value
+    score: Mapped[float | None] = mapped_column()                         # 0.0~1.0, None=실패
+    model_used: Mapped[str | None] = mapped_column(String(100))
+    error: Mapped[str | None] = mapped_column(Text)
+    eval_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    session: Mapped["DebateSession"] = relationship()
 
 
 class DebateNote(Base):
