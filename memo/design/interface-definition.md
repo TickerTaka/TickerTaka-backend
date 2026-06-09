@@ -146,8 +146,12 @@
 | `summary_content` | str? |
 | `key_points` | str[] (기본 []) |
 | `statements` | `DebateStatementResponse[]` |
+| `notion_page_id` | str? (Notion 발행 시) |
+| `notion_page_url` | str? |
+| `notion_published_at` | datetime? |
 
 - `DebateStatementResponse`: `agent_role:str`, `round:str`, `round_order:int`, `content:str`, `model_used:str`, `evidence_count:int=0`
+- ※ `notion_*` 3필드로 프론트는 "노션에 저장 ↔ 노션에서 보기" 버튼 상태를 토글
 - 오류: ticker 없음 → `404`, 동일 user/symbol 진행중(가드 거절) → `409`, 런타임 실패 → `503`/`500`
 
 ### GET `/api/debates`
@@ -166,6 +170,23 @@
 
 - 목적: 토론 세션 삭제 (CASCADE로 statement/summary/evidence/note 동반 삭제)
 - 응답: `{status: "deleted", session_id}`
+
+### POST `/api/debates/{session_id}/publish/notion`
+
+- 목적: 완료된 토론을 **Notion DB row(page)로 발행** (버튼 기반 온디맨드, MCP 경유)
+- 요청: body 없음 (path `session_id`)
+- 응답 `DebateNotionPublishResponse`:
+
+| 필드 | 타입 |
+|---|---|
+| `session_id` | UUID |
+| `notion_page_id` | str |
+| `notion_page_url` | str |
+| `notion_published_at` | datetime |
+
+- **멱등**: 이미 발행된 세션은 새 페이지 생성 없이 **기존 값 그대로 반환**
+- 동작: `app/integrations/notion_mcp.py`(MCP client) → self-host Notion MCP server(stdio) → `API-post-page`. 속성은 DB property, 요약/발언/근거는 페이지 본문 block
+- 오류: 세션 없음 → `404`, `completed` 아님/요약 미생성 → `409`, MCP/Notion 발행 실패 → `502`(본문에 실제 오류 메시지, 토론 본체는 rollback로 보존)
 
 ---
 
@@ -188,8 +209,9 @@
 | 상황 | 코드 |
 |---|---|
 | ticker / user / watchlist not found | `404` |
-| watchlist 중복 / debate 가드 거절 | `409` |
+| watchlist 중복 / debate 가드 거절 / 미완료 세션 발행 | `409` |
 | external / runtime 실패 | `503` (일부 `500`) |
+| MCP/Notion 발행 실패 | `502` (본체 토론은 비전파·rollback) |
 | health check | 도메인 상태와 분리된 단순 프로세스 헬스 |
 
 ---
@@ -197,5 +219,6 @@
 ## 6. 추후 확장 예정 인터페이스
 
 - SSE debate stream endpoint (`text/event-stream`, astream 청크 forward)
-- MCP publish endpoint 또는 내부 worker 경로
-- RAGAS 평가 결과 조회 endpoint (현재 결과는 로그만, 영속화 미완)
+- RAGAS 평가 결과 **조회** endpoint — 결과는 이미 `debate_eval_result`에 **영속화됨**(배치 `run_ragas_eval.py` + 리포트 `ragas-<sha>.json`), 조회 API만 미구현
+- (예정 · 타 팀원 구현 중) 뉴스/공시 **감성분석** 결과 노출 — 이 repo 미병합
+- ※ Notion 발행 endpoint는 §3에 **정식 구현 완료**(추후 확장에서 제외)

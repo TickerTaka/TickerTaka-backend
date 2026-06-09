@@ -161,7 +161,7 @@ sequenceDiagram
 
 ## 4. 토론 사후 평가
 
-> ⚠️ **이 절은 RAGAS 1차 구현 기준이며 유동적이다.** 평가 모델·메트릭·영속화 방식이 바뀔 수 있다(현재 메트릭 2종, 결과 로그만, 배치/리포트 미완). 아래 모델명/메트릭은 *현재값*이며 확정 사양이 아니다.
+> ⚠️ **이 절의 평가 모델은 유동적이다**(OpenRouter sLLM 모델명 변경 가능). 단 **결과는 `debate_eval_result` 테이블에 영속화**되고 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트(`test_ragas_regression.py`)까지 구현됨. 현재 메트릭 **3종**(faithfulness·answer_relevancy·context_precision).
 
 ```mermaid
 sequenceDiagram
@@ -175,14 +175,57 @@ sequenceDiagram
     EV->>RAGAS: evaluate(faithfulness / context_precision)
     RAGAS->>LLM: judge calls (run_in_executor)
     RAGAS-->>EV: score
-    EV-->>MD: log result (결과 영속화는 미완)
+    EV->>RAGAS: (배치) run_ragas_eval.py → ragas-<sha>.json
+    EV-->>MD: 결과를 debate_eval_result에 저장(지표별 1행)
 ```
 
-- 현재값(변경 가능): 평가 LLM = `openai/gpt-oss-120b:free`(OpenRouter, `debate_evaluation.py:45`), 메트릭 = `faithfulness`·`context_precision`.
+- 현재값(변경 가능): 평가 LLM = `openai/gpt-oss-120b:free`(OpenRouter, `debate_evaluation.py:45`), 메트릭 = `faithfulness`·`answer_relevancy`·`context_precision`. 결과는 `debate_eval_result`에 저장.
+
+## 5. 토론 결과 Notion 발행 (MCP)
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant API as Debate API
+    participant PG as PostgreSQL
+    participant NM as notion_mcp (MCP client)
+    participant MS as Notion MCP server (stdio)
+    participant NT as Notion
+
+    FE->>API: POST /api/debates/{id}/publish/notion (버튼)
+    API->>PG: SELECT debate_session ... FOR UPDATE (세션 락)
+    alt 세션 없음
+        API-->>FE: 404
+    else completed 아님 / 요약 없음
+        API-->>FE: 409
+    else 이미 발행됨 (notion_page_* 존재)
+        API-->>FE: 200 기존 notion_page_url (멱등 — 새 생성 없음)
+    else 정상 발행
+        API->>PG: read summary + statements(+evidence)
+        API->>NM: publish_debate(payload)
+        NM->>MS: spawn(stdio) → initialize (newline-delimited JSON)
+        NM->>MS: tools/call API-post-page {parent, properties, children}
+        MS->>NT: create page (Notion REST 프록시)
+        NT-->>MS: page id / url
+        MS-->>NM: result(content/text)
+        NM-->>API: page_id, page_url (응답 파싱)
+        alt 발행 실패 (NotionMcpError)
+            API->>PG: rollback
+            API-->>FE: 502 (실제 오류 메시지, 토론 본체 보존)
+        else 성공
+            API->>PG: save notion_page_id/url/published_at (commit)
+            API-->>FE: 200 DebateNotionPublishResponse
+        end
+    end
+```
+
+> **발행 본체**: `app/integrations/notion_mcp.py`가 MCP client로 self-host `@notionhq/notion-mcp-server`(stdio)를 spawn → `API-post-page` 호출. transport는 **newline-delimited JSON**(MCP stdio 규격), 타임아웃·`isError` 표면화 처리.
+> **저장 위치**: 속성(session_id/symbol/category/날짜)은 Notion DB property, 요약/핵심논점/주요발언은 페이지 본문 block(paragraph·bulleted).
+> **멱등성**: `debate_session.notion_page_*`에 값이 있으면 재발행 대신 기존 URL 반환. **fail-soft**: 발행 실패(502)는 토론 본체 경로에 비전파(rollback).
 
 ## 현재 시퀀스 상 주의 포인트
 
 - watchlist background sync는 병렬 큐 시스템이 아니라 FastAPI background task 기반
 - debate API는 현재 요청-응답형 완료 경로
 - SSE streaming은 추후 별도 시퀀스로 확장 예정
-- **RAGAS 평가는 1차 구현 단계** — 현재 로그 기반 사후 평가이며 결과 영속화·배치·리포트는 미완(메트릭/모델 변경 가능)
+- **RAGAS 평가는 결과를 `debate_eval_result`에 영속화**하고 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트까지 구현됨. golden set 확장이 남은 단계(평가 모델 변경 가능)
