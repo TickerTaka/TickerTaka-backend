@@ -1,0 +1,12 @@
+.git
+.pytest_cache
+.venv
+venv
+__pycache__
+*.pyc
+.mypy_cache
+.ruff_cache
+.notion-mcp
+memo
+scripts
+*.log
