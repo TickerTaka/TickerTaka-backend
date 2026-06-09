@@ -46,3 +46,4 @@ chromadata/
 docs/_build/
 .claude/*
 .claude
+.notion-mcp/

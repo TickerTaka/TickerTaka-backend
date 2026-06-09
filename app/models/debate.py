@@ -102,6 +102,9 @@ class DebateSession(Base):
     cached_from_session_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("debate_session.id"))
     error_message: Mapped[str | None] = mapped_column(Text)
     cache_key: Mapped[str | None] = mapped_column(String(255))
+    notion_page_id: Mapped[str | None] = mapped_column(String(255))
+    notion_page_url: Mapped[str | None] = mapped_column(String(2048))
+    notion_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped["AppUser"] = relationship(back_populates="debate_sessions")
     ticker: Mapped["TickerMetadata"] = relationship(back_populates="debate_sessions")

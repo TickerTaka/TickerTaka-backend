@@ -130,10 +130,12 @@
 
 착수 전 운영 보완(누락 보강 — 실제 구현 시 막히는 지점):
 1. **Notion 사전 프로비저닝**: "토론 기록" 데이터베이스를 1회 수동 생성 → Notion **integration에 공유**(권한 부여) → `database_id`(필요 시 `data_source_id`)와 통합 토큰을 **설정/env로 주입**(`NOTION_TOKEN`, `NOTION_DATABASE_ID`). 이 사전작업이 없으면 row 생성이 401/404로 실패한다. 코드가 DB를 자동 생성하지 않는다는 전제를 명시.
-2. **MCP 전송/클라이언트 선택**: 백엔드(FastAPI, Python)는 `mcp` 파이썬 SDK의 **client**로 Notion MCP server에 접속한다. 전송은 **stdio(서버 프로세스 spawn)** 또는 **streamable-http** 중 택1 — 졸프 로컬 기준 stdio가 간단. 서버 기동/세션 수명(연결→`tools/list`→`tools/call`→종료) 관리 위치를 `app/integrations/notion_mcp.py`(가칭)로 단일화. 의존성은 `==` 핀([[feedback_requirements_pinning]]).
+2. **MCP 전송/클라이언트 선택**: 이번 범위는 **로컬에 설치한 Notion MCP 서버 바이너리를 stdio로 실행**하는 방향으로 고정한다. 백엔드(FastAPI, Python)는 `app/integrations/notion_mcp.py`에서 **최소 stdio JSON-RPC client**로 서버 프로세스를 spawn하고 `initialize → tools/call → 종료`를 관리한다. stdio transport는 **newline-delimited JSON** 규격을 사용한다. 실제 E2E 기준 tool은 `API-post-page`, payload는 **Notion REST 타입 객체 형태**(`parent:{database_id:...}`, `properties:{title/rich_text/select/date...}`, `children:[paragraph/bulleted_list_item...]`)를 사용한다. Python `mcp` SDK는 이번 1차 구현의 필수 전제가 아니다.
 3. **스키마 변경 = Alembic 마이그레이션 필요**: `notion_page_id` / `notion_page_url` / `notion_published_at` 3컬럼 추가는 모델 수정만으로 끝나지 않고 **신규 Alembic revision**이 필요(기존 `alembic/versions/20260607_add_debate_eval_result.py` 패턴 따름). 닫힘 기준에 "마이그레이션 생성·적용"을 포함.
-4. **Notion 블록 제약 → 청크 분할**: Notion API는 **rich text 블록당 약 2000자, 요청당 100블록** 제한이 있다. 긴 `summary_content`/`statements`는 블록 단위로 잘라 넣어야 하며, 그렇지 않으면 400. 본문 매핑 로직에 분할 처리 명시.
-5. **멱등성 동시클릭 가드(선택)**: 더블클릭 동시요청 시 페이지 2개 생성 가능. 발행 직전 `notion_page_id` **재조회 후 분기**로 충분하나, 더 단단히 하려면 기존 **RuntimeGuard(SET NX EX) 단일비행 락 패턴 재사용** 가능. 졸프 범위에선 재조회 분기로 충분.
+4. **실제 E2E 계약 고정**: 이번 구현은 로컬 설치된 MCP 서버 바이너리 + `NOTION_MCP_TOOL_NAME=API-post-page` 기준으로 동작을 확정했다. 따라서 payload는 `parent/properties/children`의 **Notion REST 타입 객체**를 보내며, `children`은 `paragraph` / `bulleted_list_item` 블록만 사용한다. `notion-create-pages` / markdown `content` 기반 native v2 설명은 이번 브랜치의 실제 동작과 다르므로 혼용하지 않는다.
+5. **타임아웃 / 응답 파싱 실작동**: `NOTION_MCP_TIMEOUT_SECONDS`는 실제로 subprocess read에 적용되어야 하며, timeout 시 서버 프로세스를 종료하고 publish API는 실패해야 한다. 또한 tool 응답이 `content[].text` 안에 **JSON 문자열 또는 Notion URL** 형태로 감겨 와도 `page_id`/`page_url`를 추출할 수 있어야 하고, `tools/call` 결과의 `isError=true`는 일반 502가 아니라 tool-level 실패로 표면화되어야 한다.
+6. **로컬 바이너리 고정**: 이 환경에선 `npx` 실행이 안정적이지 않았으므로, `mkdir -p .notion-mcp && npm install --prefix .notion-mcp @notionhq/notion-mcp-server` 후 `NOTION_MCP_SERVER_COMMAND`를 `.notion-mcp/node_modules/.bin/notion-mcp-server` 절대경로로 고정하는 절차를 기본으로 둔다.
+7. **멱등성 동시클릭 가드(선택)**: 더블클릭 동시요청 시 페이지 2개 생성 가능. 발행 직전 `notion_page_id` **재조회 후 분기**로 충분하나, 더 단단히 하려면 기존 **RuntimeGuard(SET NX EX) 단일비행 락 패턴 재사용** 가능. 졸프 범위에선 재조회 분기로 충분.
 
 ## P1. 에러 핸들링 보강
 

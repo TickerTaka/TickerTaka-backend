@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     default_llm_model: str = Field(default="openai/gpt-4o-mini", alias="DEFAULT_LLM_MODEL")
     judge_llm_model: str = Field(default="anthropic/claude-haiku-4-5", alias="JUDGE_LLM_MODEL")
 
+    # MCP / Notion publish
+    notion_token: str = Field(default="", alias="NOTION_TOKEN")
+    notion_database_id: str = Field(default="", alias="NOTION_DATABASE_ID")
+    notion_mcp_server_command: str = Field(default="", alias="NOTION_MCP_SERVER_COMMAND")
+    notion_mcp_server_args: str = Field(default="", alias="NOTION_MCP_SERVER_ARGS")
+    notion_mcp_tool_name: str = Field(default="API-post-page", alias="NOTION_MCP_TOOL_NAME")
+    notion_mcp_timeout_seconds: int = Field(default=30, alias="NOTION_MCP_TIMEOUT_SECONDS")
+
     # 외부 API
     dart_api_key:             str = Field(default="", alias="DART_API_KEY")
     naver_news_client_id:     str = Field(default="", alias="NAVER_NEWS_CLIENT_ID")
