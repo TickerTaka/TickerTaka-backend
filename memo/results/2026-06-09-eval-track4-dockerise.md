@@ -318,3 +318,15 @@ curl http://127.0.0.1:8000/health
 판정:
 - D-1(호스트 8000 포트 점유) 해소 후 실기동 성공
 - Docker 트랙의 핵심 닫힘 기준인 **app 컨테이너 기동 + `/health` 200** 충족
+
+## 10. 보완 반영 재검증 (Claude, 2026-06-09)
+
+> D-2(HF 캐시)·D-6(postgres profile) 보완분과 실기동 결과를 `docker-compose.yml` 실파일로 재확인.
+
+- **D-2 해소 확인** ✓ — `app.environment.HF_HOME=/root/.cache/huggingface`(L76) + `app.volumes: hfcache:/root/.cache/huggingface`(L80) + 최상위 `volumes: hfcache`(L96) **3곳 모두 정합**(volume 선언 누락 없음). 컨테이너 재생성 시 `jhgan/ko-sroberta-multitask` 재다운로드 방지.
+- **D-6 해소 확인** ✓ — `postgres.profiles: ["local-db"]`(L10)로 기본 `up`에서 제외. redis/chroma는 profile 미지정이라 `up -d redis chroma`·기본 `up` 모두 정상 기동(앱 의존성 깨지지 않음).
+- **chroma 헬스체크** ✓ — 이미지 curl 실측 + 실기동에서 chroma `healthy` 도달로 이중 확인.
+- **무회귀** — env override(REDIS/CHROMA/NOTION_*) 우선순위, `.env` 미빌드(런타임 주입), DB 경계(app↛local postgres) 변동 없음.
+- **실기동 결과 정합** — `docker compose ps`상 app/chroma/redis 전부 `healthy`, `/health`=`{"status":"ok"}`. 최초 1회 `Connection reset`은 기동 전환 중 소켓 레이스로 양성(benign), 재호출 200으로 확인.
+
+**판정: #4 Dockerise = `/health` 실기동 기준 닫힘. 보완분까지 정합, 회귀 없음.** 잔여 항목(D-3 start_period 인지 / D-4 마이그레이션 비자동 / D-5 `.env` 전제)은 저위험 문서화 항목으로, 트랙 종료에 지장 없음.
