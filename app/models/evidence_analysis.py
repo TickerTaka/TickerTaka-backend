@@ -21,6 +21,7 @@ class EvidenceAnalysis(Base):
         Index("idx_evidence_analysis_symbol", "symbol"),
         Index("idx_evidence_analysis_source", "source_type", "source_id"),
         Index("idx_evidence_analysis_sentiment", "sentiment"),
+        Index("idx_evidence_analysis_event_type", "event_type"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -30,9 +31,11 @@ class EvidenceAnalysis(Base):
     sentiment: Mapped[str] = mapped_column(String(20), nullable=False)
     impact_score: Mapped[int] = mapped_column(Integer, nullable=False)
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    event_type: Mapped[str | None] = mapped_column(String(40))
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     key_points: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     risks: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    evidence: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     model_name: Mapped[str] = mapped_column(String(150), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
     raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

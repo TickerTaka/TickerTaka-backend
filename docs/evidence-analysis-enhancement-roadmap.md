@@ -1,16 +1,46 @@
 # 공시/뉴스 감성분석 — 향후 고도화 로드맵
 
 > 작성: 2026-06-08
-> 기준 커밋: `mergedb` (감성분석 레이어 + 공시 커버리지 개선 머지 완료)
-> 관련 문서: [evidence-llm-analysis-implementation-plan.md](./evidence-llm-analysis-implementation-plan.md)
+> 기준: 감성분석 레이어 + 공시 커버리지 개선 + feed API 노출 완료
+> 관련 문서:
+> [기존 구현 계획](./evidence-llm-analysis-implementation-plan.md),
+> [Qwen 구조화 분석 상세 계획](../memo/plans/evidence-qwen-structured-analysis-plan.md)
 
 ---
 
-## 현재 상태 (한 줄 요약)
+## 현재 상태
 
-감성분석은 **룰엔진(키워드/제목) + FinBERT** 로 동작하고 `evidence_analysis` 테이블에 적재된다.
-실데이터(두산로보틱스 454910) 기준 **FinBERT는 표 공시에서 거의 neutral만 찍고, 실제 긍·부정 신호는 룰엔진이 만든다.**
-Qwen 요약→FinBERT 경로는 코드에 들어가 있으나 **기본 off**(`analysis_generation_model=None`)다.
+분석 결과는 **FinBERT + `InvestmentImpactRuleEngine`**으로 생성되어 `evidence_analysis`에 저장되고, 관심종목 feed API에도 노출된다.
+
+- 뉴스와 자연어 문장: FinBERT가 감성 기준점 역할을 한다.
+- 명확한 사건 제목: 룰엔진의 hard override가 최종 정책을 보장한다.
+- 표 중심 공시: FinBERT가 대부분 neutral을 반환하며 룰엔진 의존도가 높다.
+- Qwen: 현재 `표 요약 -> FinBERT` 경로로 구현되어 있지만 기본 off(`ANALYSIS_GENERATION_MODEL=None`)다.
+
+실데이터 두산로보틱스(454910) 검증에서는 표 공시 56건 중 FinBERT가 비-neutral을 반환한 건이 사실상 1건이었다. 따라서 **Qwen은 표 공시의 의미를 복원하는 필수 해석기**로 사용하되, 모든 생성 결과는 하네스로 검증한다.
+
+---
+
+## 목표 구조
+
+```text
+[동기 baseline]
+뉴스/공시 -> FinBERT 가능한 입력 분류 -> 룰엔진 보정 -> 즉시 저장
+                                      -> 조건 통과 시 Qwen enrichment job enqueue
+
+[비동기 enrichment]
+job -> Qwen 구조화 분석 -> 스키마/근거/수치/일관성 검증
+    -> 룰엔진 정책 보정 -> 검증 성공 필드만 baseline에 병합
+```
+
+역할 분담:
+
+- **Qwen**: 표 공시 구조화 해석, 요약, 사건 유형, 근거와 리스크 생성
+- **FinBERT**: 뉴스와 자연어형 입력의 빠른 감성 기준점
+- **룰엔진**: 명확한 사건과 정책적 영향도 보정
+- **하네스**: JSON 오류, 환각, 수치 불일치, 감성-영향도 충돌 차단
+
+핵심 원칙은 **Qwen을 표 공시 분석에 반드시 사용하되, 검증 없이 최종값으로 믿지 않는 것**이다.
 
 ---
 
@@ -18,94 +48,149 @@ Qwen 요약→FinBERT 경로는 코드에 들어가 있으나 **기본 off**(`an
 
 | 순위 | 항목 | 해결하는 문제 | 규모 |
 |---:|---|---|---|
-| 1 | 프론트 노출 (feed API 확장) | 분석 결과가 프론트로 안 나감 | 작음 |
-| 2 | Qwen→FinBERT 비동기 고도화 | 표 공시에서 FinBERT 무력 / 동기 경로 느림 | 큼 |
-| 3 | 정식 alembic 마이그레이션 | evidence_analysis 테이블 프로비저닝 | 작음 |
-| 4 | 키워드 경로 부정문 가드 | "○○ 여부: 아니오" 체크리스트 오탐 잔존 | 작음 |
-| 5 | Refresh 스케줄러 | 등록 이후 신규 공시 자동 반영 | 중간 |
-| 6 | 뉴스 경로 FinBERT 검증 | FinBERT 본업(prose)이 검증 안 됨 | 중간 |
-| 7 | 표 구조화 해석 / grounding 완화 | 실적 표의 숫자 신호 정밀 추출 | 큼 |
+| 1 | Qwen 구조화 분석 + 비동기 enrichment | 표 공시 FinBERT 무력, 2-hop 정보 손실, 동기 경로 지연 | 큼 |
+| 2 | 정식 Alembic 마이그레이션 + `analysis_job` | 수동 테이블 생성, 워커 잡 상태 부재 | 중간 |
+| 3 | 키워드 경로 부정문 가드 확장 | `"○○ 여부: 아니오"` 체크리스트 오탐 | 작음 |
+| 4 | 공시 refresh 스케줄러 | 등록 이후 신규·정정 공시 미반영 | 중간 |
+| 5 | 뉴스 FinBERT 검증 + Qwen 조건부 보강 | 실제 뉴스 정확도 미검증, 근거·요약 부족 | 중간 |
+| 6 | 표 필드 파서 + grounding 정교화 | 생성형 의존도와 수치 오탐 감소 | 큼 |
 
 ---
 
-## 1. 프론트 노출 — feed API에 감성 실어보내기 (우선)
+## 1. Qwen 구조화 분석 + 비동기 Enrichment
 
-**문제**: `evidence_analysis`(sentiment/impact/key_points/risks)가 API·스키마 어디에도 노출되지 않음. 현재는 토론 컨텍스트 내부용으로만 쓰임.
+### 문제
 
-**할 일**
-- [app/schemas/market_data.py](../app/schemas/market_data.py) `WatchlistFeedItem`에 필드 추가: `sentiment`, `impact_score`, `analysis_summary`, `key_points`, `risks`
-- [app/api/watchlist.py](../app/api/watchlist.py) `get_watchlist_feed`에서 `EvidenceAnalysisRepository.get_by_sources("news"/"filing", ids)`로 join 후 각 FeedItem에 채움
+현재 구현은 표 공시를 Qwen이 한 문장으로 요약한 뒤 FinBERT가 다시 분류한다. 이 경로는 다음 한계가 있다.
 
-**효과**: 프론트가 feed 한 번 호출로 뉴스/공시별 `[negative][영향도 -1]` 배지 + 핵심근거/리스크를 렌더링.
+- 요약 단계에서 사건 유형, 근거, 리스크가 손실될 수 있다.
+- Qwen 요약이 grounding에 실패해도 현재는 FinBERT 분류 입력으로 사용된다.
+- Qwen을 동기 인덱싱에서 호출하면 건당 약 10초가 추가되어 365일 백필이 느려진다.
+- 현재 Qwen은 `summary`만 생성하며 `sentiment`, `impact_score`, `event_type`, `evidence`를 직접 출력하지 않는다.
 
-**참고**: `impact_score`는 -2~+2 (강도), `sentiment`는 방향(positive/negative/neutral/mixed). 프론트는 sentiment로 색, impact_score로 강도 표시 권장.
+### 할 일
 
----
+- [ ] `LocalQwenSummarizer`를 구조화 출력용 `LocalQwenEvidenceAnalyzer`로 확장
+- [ ] 공시 출력에 `summary`, `event_type`, `sentiment`, `impact_score`, `confidence`, `key_points`, `risks`, `evidence` 포함
+- [ ] 동기 `baseline` 분석과 비동기 Qwen `enrichment` 분리
+- [ ] 표 중심 공시는 Qwen enrichment 필수 enqueue
+- [ ] 명확한 제목 hard rule 공시는 판정용 Qwen을 생략하고 필요 시 요약만 생성
+- [ ] Qwen 실패·타임아웃·잘못된 JSON 발생 시 기존 baseline 보존
+- [ ] 모델 프로세스당 1회 로딩 및 워커 동시성 1로 시작
 
-## 2. Qwen 요약 → FinBERT 비동기 고도화 (핵심)
+### 전환 정책
 
-**문제**: DART 공시 본문은 100% 직렬화된 표(`필드: 값 | 필드: 값`)라 자연어 문장이 없음. FinBERT가 표를 못 읽고 neutral만 반환 → 실데이터 56건 중 FinBERT가 비-neutral을 낸 건 사실상 1건뿐.
+Qwen의 sentiment와 impact는 처음부터 최종값으로 사용하지 않는다.
 
-**검증된 사실 (이번 세션)**: Qwen이 표를 자연어로 요약하면 FinBERT가 제대로 판정함.
-- 잠정실적: `FinBERT(raw표)=neutral` → `Qwen요약("영업이익 26.6% 감소")→FinBERT=negative` ✅
-
-**현재 구현 상태**: 코드 존재, 기본 off.
-- `LocalQwenSummarizer` ([app/domain/evidence_analysis.py](../app/domain/evidence_analysis.py))
-- 게이트: 제목 규칙 없음 + 표 본문(`_title_has_rule`, `_is_table_heavy`)
-- Qwen 요약 → FinBERT 입력 + (grounding 통과 시) 저장 summary
-- on/off: `ANALYSIS_GENERATION_MODEL` 설정
-
-**남은 고도화 (켜기 전 필요)**
-- [ ] **동기 인덱싱에서 분리** — Qwen은 건당 ~10초라 최초 365일 백필 시 수 분 소요. 룰+FinBERT로 즉시 분석 저장 후, Qwen 보강은 큐/워커 비동기 후처리로 (설계문서 13-3).
-- [ ] **게이트 축소** — "제목 규칙 없는 표 공시" 전부가 아니라 **실적·손익 유형(잠정실적/손익구조변경)** 으로 한정해 호출 건수 감소.
-- [ ] 실패/타임아웃 폴백, 모델 로딩 1회 amortize 확인.
+1. shadow mode에서 Qwen 결과를 `raw_response`에 기록한다.
+2. 사람 검증셋으로 정확도, impact MAE, JSON 유효율, evidence 일치율, grounding 통과율을 측정한다.
+3. 기준 통과 후 표 공시에 한해 Qwen 분류를 기준값으로 승격한다.
+4. hard rule과 critical event 정책은 항상 최종 가드레일로 유지한다.
 
 ---
 
-## 3. 정식 alembic 마이그레이션
+## 2. 정식 Alembic 마이그레이션 + `analysis_job`
 
-**문제**: `evidence_analysis` 테이블이 [scripts/create_evidence_analysis_table.sql](../scripts/create_evidence_analysis_table.sql) 수동 SQL로만 프로비저닝됨. (main 머지로 alembic 툴링은 이제 들어옴: `alembic.ini`, `alembic/versions/`)
+### 문제
 
-**할 일**: `alembic revision`으로 `evidence_analysis` 생성 마이그레이션 추가 (`op.execute(<SQL>)` 또는 `op.create_table`), `alembic upgrade head` 검증.
+- `evidence_analysis`는 SQLAlchemy 모델이 있지만 Alembic 초기 마이그레이션에는 누락되어 수동 SQL로 생성된다.
+- `event_type`, 원문 근거 `evidence`를 저장할 정식 컬럼이 없다.
+- Qwen enrichment 상태와 실패 원인을 관리할 잡 테이블이 없다.
 
----
+### 할 일
 
-## 4. 키워드 경로 부정문 가드 확장
+- [ ] `evidence_analysis` 생성 및 기존 환경 보존형 Alembic 마이그레이션 추가
+- [ ] `event_type VARCHAR(40)`, `evidence JSONB` 컬럼과 인덱스 추가
+- [ ] 별도 `analysis_job` 테이블 및 repository 추가
+- [ ] `SELECT ... FOR UPDATE SKIP LOCKED` 기반 claim 구현
+- [ ] 재시도, backoff, 오래된 running job 복구 구현
+- [ ] `scripts/create_evidence_analysis_table.sql` 동기화
 
-**문제**: critical 경로엔 부정문 가드(`_critical_negative_present`)를 넣어 `횡령ㆍ배임사항 기재여부: 아니오` 류 오탐을 막았으나, **`NEGATIVE_KEYWORDS` 경로엔 가드가 없음.** 제목이 행정공시가 아닌 표 공시가 같은 체크리스트를 포함하면 여전히 negative 오탐 가능 (실무상 admin 제목이 덮어 위험은 낮음).
-
-**할 일**: `negative_hits`/`positive_hits` 계산 시 부정어가 있는 줄의 키워드는 제외하는 가드를 동일하게 적용.
-
----
-
-## 5. Refresh 스케줄러
-
-**문제**: 현재 공시 동기화는 관심종목 **최초 등록 시점**에만 자동 실행됨. 등록 이후 발생하는 신규/정정 공시는 수동 동기화 전까지 시스템이 모름.
-
-**할 일**: 주기 스케줄러로 관심종목별 최근 30일(refresh) 공시 조회 → 신규만 인덱싱/분석. 실패 재시도·종목 격리·DART 호출 한도 관리 포함.
+저장소는 Redis와 Celery 의존성을 이미 갖고 있지만 실제 Celery 워커 구성은 없다. 첫 구현은 별도 프로세스 + Postgres 잡 큐로 시작하고, 처리량이 증가하면 repository 경계를 유지한 채 Celery로 교체한다.
 
 ---
 
-## 6. 뉴스 경로 FinBERT 검증
+## 3. 키워드 경로 부정문 가드 확장
 
-**근거**: FinBERT는 prose(자연어)엔 정확히 반응함을 확인 (호재 문장→positive 1.00, 악재 문장→negative 1.00). 뉴스 본문은 prose라 FinBERT 본업이 제대로 작동할 가능성이 높음. 그러나 실제 뉴스 데이터로 검증/벤치가 안 됨.
+### 문제
 
-**할 일**: 관심종목 뉴스 수집 후 `analyze_news_row` 결과의 sentiment 분포·정확도 점검. 표 공시와 달리 뉴스는 Qwen 없이도 FinBERT가 신호를 낼 것으로 기대.
+critical 경로에는 `_critical_negative_present`가 있어 `횡령ㆍ배임사항 기재여부: 아니오` 같은 오탐을 차단한다. 일반 `NEGATIVE_KEYWORDS`/`POSITIVE_KEYWORDS` hit 계산에는 동일한 부정문 가드가 없다.
+
+### 할 일
+
+- [ ] 키워드가 등장한 문장 또는 표 행 단위로 hit 계산
+- [ ] `아니오`, `없음`, `해당사항 없음` 등 부정 표현이 있는 행의 hit 제외
+- [ ] 부정 표현 자체가 사건 설명인 사례와 체크리스트 응답을 구분하는 회귀 테스트 추가
 
 ---
 
-## 7. 표 구조화 해석 / grounding 완화 (선택)
+## 4. 공시 Refresh 스케줄러
 
-- **표 셀 직접 해석(B안)**: 잠정실적 표의 `흑자적자전환여부`, `증감율` 같은 신호 셀을 직접 읽어 sentiment 결정. Qwen 없이 정확하지만 공시유형별 필드맵 필요(비용 큼). Qwen 경로의 대안/보완.
-- **grounding 완화**: 현재 `_verify_numerical_grounding`이 `17.6%`(요약) vs `17.6`(원문, %는 헤더 분리)를 불일치로 봐 Qwen 요약이 저장 안 됨(sentiment엔 사용됨). 단위 분리 케이스 허용하도록 완화하면 저장 품질↑.
+### 문제
+
+관심종목 등록 시 최초 365일 공시는 수집하지만, 이후 발생하는 신규·정정 공시는 자동 반영되지 않는다.
+
+### 할 일
+
+- [ ] 관심종목별 최근 30일 공시 주기 조회
+- [ ] 신규·변경 공시만 인덱싱, baseline 분석, enrichment enqueue
+- [ ] 종목별 실패 격리와 재시도
+- [ ] DART API 호출 한도 및 Redis lock 활용
+- [ ] 정정 공시가 기존 분석을 갱신하는 정책 정의
 
 ---
 
-## 이미 완료된 것 (참고)
+## 5. 뉴스 FinBERT 검증 + Qwen 조건부 보강
 
-- ✅ 감성분석 레이어 (FinBERT + 룰엔진 결합, 필드별 하네스 분리)
+### 근거
+
+FinBERT는 자연어 테스트 문장에는 강하게 반응했지만 실제 수집 뉴스에 대한 분포와 정확도는 아직 검증되지 않았다. 뉴스 전건에 Qwen을 호출하면 비용과 처리 지연이 커지므로 조건부 보강이 적합하다.
+
+### 할 일
+
+- [ ] 실제 뉴스 검증셋으로 sentiment 분포와 macro-F1 측정
+- [ ] 종목명만 언급한 기사, 과장 제목, 부정문, 인용문 회귀 케이스 추가
+- [ ] FinBERT non-neutral 또는 `|impact_score|` 임계 이상 뉴스만 Qwen enqueue
+- [ ] 뉴스 Qwen은 `summary`, `key_points`, `risks`, `evidence` 보강에 사용
+- [ ] 뉴스 최종 sentiment와 impact는 FinBERT + 룰엔진 결과 유지
+
+---
+
+## 6. 표 필드 파서 + Grounding 정교화
+
+### 표 필드 직접 해석
+
+잠정실적의 `증감율`, `흑자적자전환여부`, 손익구조변경의 주요 수치처럼 안정적인 필드는 직접 파싱한다.
+
+- Qwen 입력을 압축하고 명확한 수치 신호를 제공한다.
+- Qwen 결과 검증 기준으로도 활용한다.
+- 공시 유형별 필드맵과 단위 정규화가 필요하므로 점진적으로 확장한다.
+
+### Grounding 개선
+
+- [ ] `17.6%`와 원문의 `17.6` + 분리된 `%` 헤더를 동일 수치로 인식
+- [ ] 숫자뿐 아니라 Qwen `evidence`가 원문에 실제 존재하는지 검증
+- [ ] summary/key points/risks/evidence를 필드별로 검증하고 실패 필드만 폐기
+- [ ] grounding 실패 결과를 FinBERT 입력이나 최종 분류에 사용하지 않음
+
+---
+
+## 이미 완료된 것
+
+- ✅ 감성분석 레이어 및 `evidence_analysis` 적재
 - ✅ 모델 중심 결합: 명확한 사건 제목만 hard override, 일반 키워드는 보정, 충돌 시 mixed/0
-- ✅ critical 오탐 수정 (사건 제목 우선 / 부정문 가드 / 횡령·배임 본문 제외) — 두산 검증 오탐 0
+- ✅ critical 오탐 수정: 사건 제목 우선, 부정문 가드, 횡령·배임 본문 제외
 - ✅ 공시 커버리지: 최초 365일 백필 + DART 페이지네이션
-- ✅ DB 적재 확인 (`evidence_analysis`, model_name/hf 라벨/decision.source 보존)
-- ✅ origin/main 머지 (충돌 0)
+- ✅ feed API 분석 결과 노출: sentiment, impact, confidence, summary, key points, risks
+- ✅ DB에 model name, HF 라벨, decision source 보존
+
+---
+
+## 완료 기준
+
+- 표 중심 공시는 baseline 저장 후 Qwen enrichment 잡이 생성된다.
+- 검증된 Qwen 결과만 baseline에 병합된다.
+- Qwen 실패나 워커 중단이 기존 분석 결과를 훼손하지 않는다.
+- 뉴스는 게이트를 통과한 건만 Qwen으로 보강된다.
+- `event_type`과 원문 `evidence`를 DB와 feed API에서 조회할 수 있다.
+- 실제 검증셋 결과로 Qwen 분류 권위 활성화 여부를 결정할 수 있다.

@@ -11,6 +11,8 @@ import app.models.ticker   # noqa: F401
 import app.models.user     # noqa: F401
 import app.models.watchlist  # noqa: F401
 import app.models.cache    # noqa: F401
+import app.models.evidence_analysis  # noqa: F401
+import app.models.analysis_jobs  # noqa: F401
 from app.core.db import _to_sync_database_url
 from app.config import get_settings
 

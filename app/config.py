@@ -29,9 +29,16 @@ class Settings(BaseSettings):
     analysis_model: str = Field(default="snunlp/KR-FinBert-SC", alias="ANALYSIS_MODEL")
     analysis_enabled: bool = Field(default=True, alias="ANALYSIS_ENABLED")
     analysis_max_chars: int = Field(default=6000, alias="ANALYSIS_MAX_CHARS")
-    analysis_prompt_version: str = Field(default="evidence-analysis-v1", alias="ANALYSIS_PROMPT_VERSION")
+    analysis_prompt_version: str = Field(default="evidence-analysis-v2", alias="ANALYSIS_PROMPT_VERSION")
     analysis_summary_provider: str = Field(default="extractive", alias="ANALYSIS_SUMMARY_PROVIDER")
     analysis_generation_model: str | None = Field(default=None, alias="ANALYSIS_GENERATION_MODEL")
+    # 비동기 Qwen 보강 워커
+    analysis_async_enabled: bool = Field(default=True, alias="ANALYSIS_ASYNC_ENABLED")
+    analysis_worker_poll_interval: float = Field(default=2.0, alias="ANALYSIS_WORKER_POLL_INTERVAL")
+    analysis_worker_batch_size: int = Field(default=4, alias="ANALYSIS_WORKER_BATCH_SIZE")
+    analysis_worker_max_attempts: int = Field(default=3, alias="ANALYSIS_WORKER_MAX_ATTEMPTS")
+    # 뉴스 Qwen 게이팅: FinBERT 비-neutral 또는 |impact|>=임계일 때만 보강
+    analysis_news_qwen_min_impact: int = Field(default=1, alias="ANALYSIS_NEWS_QWEN_MIN_IMPACT")
 
     # OpenRouter (하위 호환용 — 더 이상 LLM 호출에 사용하지 않음)
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")

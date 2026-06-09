@@ -136,6 +136,11 @@ class WatchlistFeedItem(BaseModel):
         description="판단 신뢰도 0.0~1.0.",
         examples=[0.78],
     )
+    event_type: str | None = Field(
+        default=None,
+        description='공시 사건 유형. "잠정실적" | "손익구조변경" | "유상증자" | "자사주취득" | "단일판매공급계약" | "배당" | "소송" | "횡령배임" | "기타". 뉴스/미분석이면 null.',
+        examples=["잠정실적"],
+    )
     analysis_summary: str | None = Field(
         default=None,
         description="감성분석이 생성한 요약(원문 summary와 별개일 수 있음).",
@@ -147,6 +152,10 @@ class WatchlistFeedItem(BaseModel):
     risks: list[str] = Field(
         default_factory=list,
         description="주의해야 할 리스크 문장/키워드.",
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="판단 근거가 된 원문 인용(grounding 검증 통과 항목).",
     )
 
     model_config = ConfigDict(
@@ -164,9 +173,11 @@ class WatchlistFeedItem(BaseModel):
                 "sentiment": "negative",
                 "impact_score": -1,
                 "confidence": 0.78,
+                "event_type": "잠정실적",
                 "analysis_summary": "영업이익이 전년 동기 대비 감소해 단기 실적 둔화.",
                 "key_points": ["영업이익 26.6% 감소"],
                 "risks": ["수익성 악화"],
+                "evidence": ["영업이익 26.6% 감소"],
             }
         }
     )

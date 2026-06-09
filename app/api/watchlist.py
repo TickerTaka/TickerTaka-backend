@@ -166,9 +166,11 @@ def get_watchlist_feed(
             "sentiment": analysis.sentiment,
             "impact_score": analysis.impact_score,
             "confidence": float(analysis.confidence) if analysis.confidence is not None else None,
+            "event_type": analysis.event_type,
             "analysis_summary": analysis.summary,
             "key_points": list(analysis.key_points or []),
             "risks": list(analysis.risks or []),
+            "evidence": list(analysis.evidence or []),
         }
 
     feed: list[WatchlistFeedItem] = []

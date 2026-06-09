@@ -16,6 +16,7 @@ from app.external.chroma_client import (
 from app.external.dart import DartClient
 from app.external.embedding import EmbeddingClient, get_embedding_client
 from app.models import FilingCache, NewsCache
+from app.repositories.analysis_jobs_repository import AnalysisJobRepository
 from app.repositories.filing_cache_repository import FilingCacheRepository
 from app.repositories.news_cache_repository import NewsCacheRepository
 
@@ -66,6 +67,7 @@ class EvidenceIndexingService:
         self.dart_client = dart_client or DartClient()
         self.collection_name = collection_name
         self.analysis_service = EvidenceAnalysisService(session)
+        self.job_repo = AnalysisJobRepository(session)
 
     def reindex_news_for_symbol(
         self,
@@ -122,7 +124,14 @@ class EvidenceIndexingService:
             )
             for row, content in analysis_inputs:
                 try:
-                    self.analysis_service.analyze_news_row(row, content=content)
+                    baseline = self.analysis_service.analyze_news_row(row, content=content)
+                    self._maybe_enrich(
+                        source_type="news",
+                        source_id=row.id,
+                        symbol=row.symbol,
+                        needs_qwen=self.analysis_service.news_needs_qwen(baseline),
+                        inline=lambda r=row, c=content: self.analysis_service.enrich_news_row(r, content=c),
+                    )
                 except Exception:
                     logger.exception("news evidence analysis failed for row %s", row.id)
         return result
@@ -187,9 +196,38 @@ class EvidenceIndexingService:
             for row, filing_text in analysis_inputs:
                 try:
                     self.analysis_service.analyze_filing_row(row, filing_text)
+                    self._maybe_enrich(
+                        source_type="filing",
+                        source_id=row.id,
+                        symbol=row.symbol,
+                        needs_qwen=self.analysis_service.filing_needs_qwen(row.filing_title, filing_text),
+                        inline=lambda r=row, t=filing_text: self.analysis_service.enrich_filing_row(r, t),
+                    )
                 except Exception:
                     logger.exception("filing evidence analysis failed for row %s", row.id)
         return result
+
+    def _maybe_enrich(
+        self,
+        *,
+        source_type: str,
+        source_id: object,
+        symbol: str,
+        needs_qwen: bool,
+        inline,
+    ) -> None:
+        """게이트 통과 시: 비동기면 큐 enqueue, 동기면 즉시 Qwen 보강."""
+        if not needs_qwen:
+            return
+        if self.analysis_service.settings.analysis_async_enabled:
+            self.job_repo.enqueue(
+                source_type=source_type,
+                source_id=source_id,
+                symbol=symbol,
+                prompt_version=self.analysis_service.settings.analysis_prompt_version,
+            )
+        else:
+            inline()
 
     @staticmethod
     def build_news_document(

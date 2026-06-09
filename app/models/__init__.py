@@ -1,3 +1,10 @@
+from app.models.analysis_jobs import (
+    JOB_STATUS_DONE,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    AnalysisJob,
+)
 from app.models.base import Base
 from app.models.cache import (
     DataRefreshJob,
@@ -31,7 +38,12 @@ from app.models.watchlist import Watchlist
 __all__ = [
     "AgentRole",
     "AgentStatement",
+    "AnalysisJob",
     "AppUser",
+    "JOB_STATUS_DONE",
+    "JOB_STATUS_FAILED",
+    "JOB_STATUS_PENDING",
+    "JOB_STATUS_RUNNING",
     "Base",
     "DataRefreshJob",
     "DebateCategory",

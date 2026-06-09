@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import json
 import logging
 import re
 from typing import Any
@@ -17,6 +18,27 @@ logger = logging.getLogger(__name__)
 SOURCE_TYPE_NEWS = "news"
 SOURCE_TYPE_FILING = "filing"
 VALID_SENTIMENTS = {"positive", "negative", "neutral", "mixed"}
+EVENT_TYPES = {
+    "잠정실적",
+    "손익구조변경",
+    "유상증자",
+    "자사주취득",
+    "단일판매공급계약",
+    "배당",
+    "소송",
+    "횡령배임",
+    "기타",
+}
+# Qwen 보강 대상 공시: 표 본문 + 실적/손익 유형 제목만 호출(비용 절감)
+FILING_QWEN_TITLE_KEYWORDS = (
+    "잠정실적",
+    "영업(잠정)실적",
+    "영업잠정실적",
+    "손익구조",
+    "매출액또는손익구조",
+    "매출액또는손익구조30",
+    "결산실적",
+)
 POSITIVE_KEYWORDS = (
     "수주",
     "계약 체결",
@@ -162,6 +184,8 @@ class EvidenceAnalysisResult:
     risks: list[str]
     model_name: str
     prompt_version: str
+    event_type: str | None = None
+    evidence: list[str] = field(default_factory=list)
     raw_response: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -226,11 +250,12 @@ class LocalHFSentimentAnalyzer:
         return None
 
 
-class LocalQwenSummarizer:
-    """Lazy local Qwen summarizer: 직렬화된 표 본문을 자연어 한 문장으로 요약한다.
+class LocalQwenEvidenceAnalyzer:
+    """Lazy local Qwen(sLLM) 구조화 분석기.
 
-    표 본문은 FinBERT가 감성을 못 읽으므로, Qwen이 자연어로 풀어주면
-    (a) FinBERT 분류 입력, (b) 저장용 summary 로 함께 쓴다.
+    직렬화된 표 본문은 FinBERT가 못 읽으므로 Qwen이 표/문맥을 해석해
+    구조화 JSON(summary/event_type/sentiment/impact/key_points/risks/evidence)을 직접 낸다.
+    공시는 전체 필드, 뉴스는 summary/key_points/risks/evidence 만(감성은 FinBERT 권위 유지).
     """
 
     _models: dict[str, Any] = {}
@@ -238,14 +263,14 @@ class LocalQwenSummarizer:
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
 
-    def summarize(self, title: str, text: str, *, max_new_tokens: int = 300) -> str | None:
+    def analyze(self, title: str, text: str, *, kind: str, max_new_tokens: int = 768) -> dict[str, Any] | None:
         try:
             import torch
 
             tokenizer, model, device = self._get_model()
             messages = [
-                {"role": "system", "content": "너는 사실 기반 한국 금융 공시/뉴스 요약기다."},
-                {"role": "user", "content": self._build_prompt(title, text)},
+                {"role": "system", "content": "너는 사실 기반 한국 금융 공시/뉴스 분석기다. JSON 한 개만 출력한다."},
+                {"role": "user", "content": self._build_prompt(title, text, kind)},
             ]
             chat = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = tokenizer([chat], return_tensors="pt").to(device)
@@ -260,9 +285,9 @@ class LocalQwenSummarizer:
                 )
             output_ids = generated[0][inputs.input_ids.shape[-1] :]
             raw = tokenizer.decode(output_ids, skip_special_tokens=True)
-            return self._clean_output(raw)
+            return self._parse_json(raw)
         except Exception as exc:
-            logger.info("local Qwen summary unavailable: %s", exc)
+            logger.info("local Qwen analysis unavailable: %s", exc)
             return None
 
     def _get_model(self) -> Any:
@@ -280,25 +305,63 @@ class LocalQwenSummarizer:
         return self._models[self.model_name]
 
     @staticmethod
-    def _build_prompt(title: str, text: str) -> str:
+    def _build_prompt(title: str, text: str, kind: str) -> str:
+        rules = (
+            "규칙:\n"
+            "- 본문에 없는 사실/숫자는 절대 만들지 마라. 금액·비율·증감은 원문 그대로 유지하라.\n"
+            "- 표의 핵심 수치(매출, 영업이익, 증감율, 취득금액 등)와 방향(증가/감소/흑자/적자)을 자연어로 풀어라.\n"
+            "- key_points 는 최대 3개, 각 40자 이내.\n"
+            "- evidence 는 판단 근거가 된 핵심 수치만 1~2개, 각 40자 이내로 짧게 인용하라(표 전체를 붙여넣지 마라).\n"
+            "- JSON 외 다른 텍스트(설명/코드펜스)는 출력하지 마라.\n"
+        )
+        if kind == SOURCE_TYPE_FILING:
+            schema = (
+                '{"summary": "한 문장 요약", '
+                '"event_type": "잠정실적|손익구조변경|유상증자|자사주취득|단일판매공급계약|배당|소송|횡령배임|기타", '
+                '"sentiment": "positive|negative|neutral|mixed", '
+                '"impact_score": -2~2 사이 정수, '
+                '"key_points": ["핵심 근거"], "risks": ["리스크"], "evidence": ["원문 인용"]}'
+            )
+        else:
+            schema = (
+                '{"summary": "한 문장 요약", '
+                '"key_points": ["핵심 근거"], "risks": ["리스크"], "evidence": ["원문 인용"]}'
+            )
         return (
-            "다음 공시를 한국어 한 문장으로 요약하라.\n"
-            "본문에 없는 내용은 만들지 마라. 금액·비율·증감은 원문 그대로 유지하라.\n"
-            "표의 핵심 수치(매출, 영업이익, 증감율, 취득금액 등)와 그 방향(증가/감소/흑자/적자)을 자연어로 풀어라.\n"
-            "요약 문장만 출력하라.\n\n"
+            "다음 자료를 분석해 아래 스키마의 JSON 한 개만 출력하라.\n"
+            f"{rules}"
+            f"출력 스키마: {schema}\n\n"
             f"제목: {title}\n"
             f"본문: {text[:6000]}\n\n"
-            "요약:"
+            "JSON:"
         )
 
     @staticmethod
-    def _clean_output(raw: str) -> str | None:
+    def _parse_json(raw: str) -> dict[str, Any] | None:
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip().rstrip("`").strip()
-        # 첫 문장/첫 줄만 사용 (모델이 부연을 덧붙이는 경우 방지)
-        first_line = cleaned.splitlines()[0].strip() if cleaned else ""
-        return first_line or None
+        start = cleaned.find("{")
+        if start == -1:
+            return None
+        snippet = cleaned[start:]
+        end = snippet.rfind("}")
+        if end != -1:
+            try:
+                parsed = json.loads(snippet[: end + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+        # 토큰 한도로 잘린(닫는 괄호 없는) JSON 복구 시도
+        repaired = _salvage_truncated_json(snippet)
+        if repaired is None:
+            return None
+        try:
+            parsed = json.loads(repaired)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 class ExtractiveSummaryBuilder:
@@ -377,6 +440,7 @@ class InvestmentImpactRuleEngine:
         text: str,
         model_sentiment: str | None,
         model_confidence: float | None,
+        model_impact: int | None = None,
     ) -> InvestmentImpactDecision:
         title_lower = title.lower()
         lower = text.lower()
@@ -406,7 +470,17 @@ class InvestmentImpactRuleEngine:
             return self._decision("neutral", 0, confidence, "admin_default", positive_hits, negative_hits)
 
         base_sentiment = model_sentiment if model_sentiment in VALID_SENTIMENTS else "neutral"
-        base_impact = {"positive": 1, "negative": -1, "neutral": 0, "mixed": 0}[base_sentiment]
+        # Qwen 등 모델이 강도(impact)를 직접 주면 그 부호가 sentiment와 일치할 때 사용(예: 영업이익 급감 → -2).
+        default_impact = {"positive": 1, "negative": -1, "neutral": 0, "mixed": 0}[base_sentiment]
+        if (
+            model_impact is not None
+            and ((base_sentiment == "positive" and model_impact > 0)
+                 or (base_sentiment == "negative" and model_impact < 0)
+                 or base_sentiment in ("neutral", "mixed"))
+        ):
+            base_impact = max(-2, min(2, int(model_impact)))
+        else:
+            base_impact = default_impact
 
         if positive_hits and negative_hits:
             if len(positive_hits) > len(negative_hits):
@@ -461,50 +535,89 @@ class EvidenceAnalysisService:
         *,
         repository: EvidenceAnalysisRepository | None = None,
         sentiment_analyzer: LocalHFSentimentAnalyzer | None = None,
-        summarizer: LocalQwenSummarizer | None = None,
+        analyzer: LocalQwenEvidenceAnalyzer | None = None,
     ) -> None:
         self.settings = get_settings()
         self.session = session
         self.repository = repository or (EvidenceAnalysisRepository(session) if session is not None else None)
         self.sentiment_analyzer = sentiment_analyzer or LocalHFSentimentAnalyzer(self.settings.analysis_model)
-        self.summarizer = summarizer
-        if self.summarizer is None and self.settings.analysis_generation_model:
-            self.summarizer = LocalQwenSummarizer(self.settings.analysis_generation_model)
+        self.analyzer = analyzer
+        if self.analyzer is None and self.settings.analysis_generation_model:
+            self.analyzer = LocalQwenEvidenceAnalyzer(self.settings.analysis_generation_model)
         self.summary_builder = ExtractiveSummaryBuilder()
         self.rule_engine = InvestmentImpactRuleEngine()
 
+    # ------------------------------------------------------------------
+    # Qwen 가용성 / 게이팅
+    # ------------------------------------------------------------------
+    @property
+    def qwen_available(self) -> bool:
+        return bool(
+            self.settings.analysis_enabled
+            and self.settings.analysis_generation_model
+            and self.analyzer is not None
+        )
+
+    def filing_needs_qwen(self, title: str, text: str) -> bool:
+        """공시 Qwen 보강 게이트: 표 본문 + 실적/손익 유형 제목만(룰 제목 제외)."""
+        if not self.qwen_available:
+            return False
+        if _title_has_rule(title):
+            return False
+        cleaned = self.summary_builder.clean_text(text or title)
+        if not _is_table_heavy(cleaned):
+            return False
+        lowered = title.replace(" ", "").lower()
+        return any(keyword.replace(" ", "").lower() in lowered for keyword in FILING_QWEN_TITLE_KEYWORDS)
+
+    def news_needs_qwen(self, baseline: EvidenceAnalysisResult) -> bool:
+        """뉴스 Qwen 보강 게이트: FinBERT 비-neutral 또는 |impact|>=임계."""
+        if not self.qwen_available:
+            return False
+        if baseline.sentiment != "neutral":
+            return True
+        return abs(baseline.impact_score) >= self.settings.analysis_news_qwen_min_impact
+
+    # ------------------------------------------------------------------
+    # baseline (동기: 룰 + FinBERT, Qwen 없음)
+    # ------------------------------------------------------------------
     def analyze_news_row(
-        self,
-        row: NewsCache,
-        *,
-        content: str | None = None,
-        persist: bool = True,
+        self, row: NewsCache, *, content: str | None = None, persist: bool = True
     ) -> EvidenceAnalysisResult:
         text = content or row.content or row.summary or ""
         return self.analyze_text(
-            source_type=SOURCE_TYPE_NEWS,
-            symbol=row.symbol,
-            title=row.title,
-            text=text,
-            source_id=row.id,
-            persist=persist,
+            source_type=SOURCE_TYPE_NEWS, symbol=row.symbol, title=row.title,
+            text=text, source_id=row.id, persist=persist, use_qwen=False,
         )
 
     def analyze_filing_row(
-        self,
-        row: FilingCache,
-        content: str | None = None,
-        *,
-        persist: bool = True,
+        self, row: FilingCache, content: str | None = None, *, persist: bool = True
     ) -> EvidenceAnalysisResult:
         text = content or row.content or row.summary or ""
         return self.analyze_text(
-            source_type=SOURCE_TYPE_FILING,
-            symbol=row.symbol,
-            title=row.filing_title,
-            text=text,
-            source_id=row.id,
-            persist=persist,
+            source_type=SOURCE_TYPE_FILING, symbol=row.symbol, title=row.filing_title,
+            text=text, source_id=row.id, persist=persist, use_qwen=False,
+        )
+
+    # ------------------------------------------------------------------
+    # enrich (비동기 워커: Qwen 구조화 보강)
+    # ------------------------------------------------------------------
+    def enrich_news_row(
+        self, row: NewsCache, *, content: str | None = None, persist: bool = True
+    ) -> EvidenceAnalysisResult:
+        text = content or row.content or row.summary or ""
+        return self.analyze_text(
+            source_type=SOURCE_TYPE_NEWS, symbol=row.symbol, title=row.title,
+            text=text, source_id=row.id, persist=persist, use_qwen=True,
+        )
+
+    def enrich_filing_row(
+        self, row: FilingCache, content: str | None = None, *, persist: bool = True
+    ) -> EvidenceAnalysisResult:
+        text = content or row.content or row.summary or ""
+        return self.analyze_text(
+            source_type=SOURCE_TYPE_FILING, symbol=row.symbol, title=row.filing_title,
+            text=text, source_id=row.id, persist=persist, use_qwen=True,
         )
 
     def analyze_text(
@@ -516,6 +629,7 @@ class EvidenceAnalysisService:
         text: str,
         source_id: str | UUID,
         persist: bool = True,
+        use_qwen: bool = False,
     ) -> EvidenceAnalysisResult:
         cleaned_text = self.summary_builder.clean_text(text or title)
         analysis_text = f"{title}\n{cleaned_text}".strip()[: self.settings.analysis_max_chars]
@@ -523,73 +637,111 @@ class EvidenceAnalysisService:
             analysis_text = title
         summary, key_points, risks = self.summary_builder.build(title=title, text=text or title)
         summary_provider = self.settings.analysis_summary_provider
+        event_type: str | None = None
+        evidence: list[str] = []
 
-        # 표 본문이면 Qwen으로 자연어 요약 → FinBERT 입력 및 저장 summary 로 사용
-        gen_summary: str | None = None
-        gen_raw: dict[str, Any] = {"status": "disabled"}
-        if (
-            self.settings.analysis_enabled
-            and self.settings.analysis_generation_model
-            and self.summarizer is not None
-            and not _title_has_rule(title)
-            and _is_table_heavy(cleaned_text)
-        ):
-            candidate = self.summarizer.summarize(title, text or title)
-            if candidate:
-                grounded = _verify_numerical_grounding(text or title, candidate)
-                gen_summary = candidate
-                gen_raw = {"status": "pass", "grounded": grounded, "summary": candidate}
-                if grounded:
-                    summary = f"{title} {candidate}".strip()[:800]
-                    summary_provider = "generative"
-                else:
-                    gen_raw["note"] = "ungrounded_not_stored"
-            else:
-                gen_raw = {"status": "fallback", "failure_reason": "qwen_no_output"}
-
-        # FinBERT 입력: Qwen 자연어 요약이 있으면 그것을, 없으면 원문(표 포함)을 사용
-        classification_input = gen_summary or analysis_text
-
+        # 1) FinBERT baseline (raw 입력)
         model_sentiment: str | None = None
         model_confidence: float | None = None
+        model_impact: int | None = None
         hf_raw: dict[str, Any] = {"status": "disabled"}
         model_name = "rule-only-extractive"
         if self.settings.analysis_enabled and self.settings.analysis_provider == "local_hf":
-            model_sentiment, model_confidence, hf_raw = self.sentiment_analyzer.analyze(classification_input)
+            model_sentiment, model_confidence, hf_raw = self.sentiment_analyzer.analyze(analysis_text)
             if hf_raw.get("status") == "pass":
                 model_name = self.settings.analysis_model
 
+        # 2) Qwen 구조화 보강 (게이트 통과 시)
+        qwen_raw: dict[str, Any] = {"status": "disabled"}
+        gate = False
+        if use_qwen and self.qwen_available:
+            if source_type == SOURCE_TYPE_FILING:
+                gate = self.filing_needs_qwen(title, text or title)
+            else:
+                gate = model_sentiment not in (None, "neutral")
+        if gate and self.analyzer is not None:
+            # A) 입력 트리밍: 공시 표는 신호 행만 추려 prefill 축소(속도) + 헤더 덤프 유혹 감소(품질)
+            llm_input = _trim_table_for_llm(text or title) if source_type == SOURCE_TYPE_FILING else (text or title)
+            parsed = self.analyzer.analyze(title, llm_input, kind=source_type)
+            if parsed:
+                original = text or title  # grounding 은 항상 전체 원문 기준
+                cand_summary = _grounded_text(original, str(parsed.get("summary", "")).strip())
+                # B) 출력 노이즈 필터: grounding 통과해도 표 헤더/셀 덤프는 근거가 아니므로 제거
+                cand_keys = _filter_noise(_grounded_list(original, parsed.get("key_points")))
+                cand_risks = _filter_noise(_grounded_list(original, parsed.get("risks")))
+                cand_evidence = _filter_noise(_grounded_list(original, parsed.get("evidence")))
+                if cand_summary:
+                    summary = f"{title} {cand_summary}".strip()[:800]
+                    summary_provider = "generative"
+                if cand_keys:
+                    key_points = cand_keys
+                if cand_risks:
+                    risks = cand_risks
+                evidence = cand_evidence
+                consistency: str | None = None
+                if source_type == SOURCE_TYPE_FILING:
+                    qwen_sentiment = str(parsed.get("sentiment", "")).strip()
+                    if qwen_sentiment in VALID_SENTIMENTS:
+                        # C) 일관성 가드: 감성과 근거 방향이 모순이면 mixed/0 으로 강등
+                        qwen_sentiment, consistency = _consistency_guard(
+                            qwen_sentiment, cand_keys + cand_evidence
+                        )
+                        model_sentiment = qwen_sentiment
+                        model_name = self.settings.analysis_generation_model or model_name
+                    raw_impact = parsed.get("impact_score")
+                    if isinstance(raw_impact, (int, float)):
+                        model_impact = 0 if consistency == "conflict" else max(-2, min(2, int(raw_impact)))
+                    event_type = _normalize_event_type(parsed.get("event_type"))
+                qwen_raw = {
+                    "status": "pass",
+                    "model": self.settings.analysis_generation_model,
+                    "event_type": parsed.get("event_type"),
+                    "sentiment": parsed.get("sentiment"),
+                    "impact_score": parsed.get("impact_score"),
+                    "summary_grounded": bool(cand_summary),
+                    "consistency": consistency,
+                    "llm_input_chars": len(llm_input),
+                }
+            else:
+                qwen_raw = {"status": "fallback", "failure_reason": "qwen_no_output"}
+        elif use_qwen and self.qwen_available:
+            qwen_raw = {"status": "skipped", "reason": "gate_not_passed"}
+
+        # 3) 룰엔진 보정 (정책/치명 hard override 우선)
         decision = self.rule_engine.apply(
             title=title,
             text=cleaned_text,
             model_sentiment=model_sentiment,
             model_confidence=model_confidence,
+            model_impact=model_impact,
         )
-        sentiment = decision.sentiment
-        impact_score = decision.impact_score
+        sentiment = decision.sentiment if decision.sentiment in VALID_SENTIMENTS else "neutral"
+        impact_score = max(-2, min(2, int(decision.impact_score)))
         confidence = decision.confidence
-        sentiment = sentiment if sentiment in VALID_SENTIMENTS else "neutral"
-        impact_score = max(-2, min(2, int(impact_score)))
-        raw_response = {
+
+        raw_response: dict[str, Any] = {
             "status": "pass",
             "provider": self.settings.analysis_provider,
             "summary_provider": summary_provider,
             "hf": hf_raw,
-            "generative": gen_raw,
-            "classification_input": "generative" if gen_summary else "raw",
+            "generative": qwen_raw,
             "model_sentiment": model_sentiment,
+            "model_impact": model_impact,
             "decision": decision.to_dict(),
             "components": {
                 "summary": {"status": "pass"},
                 "classification": {"status": "pass"},
             },
         }
+
+        # 4) 하네스 검증
         try:
             _validate_summary(summary=summary, title=title)
         except HarnessValidationError as exc:
             summary = title.strip()
             key_points = []
             risks = []
+            evidence = []
             raw_response["status"] = "fallback"
             raw_response["failure_reason"] = str(exc)
             raw_response["fallback_components"] = ["summary"]
@@ -618,6 +770,8 @@ class EvidenceAnalysisService:
             risks=_dedupe_strings(risks),
             model_name=model_name,
             prompt_version=self.settings.analysis_prompt_version,
+            event_type=event_type,
+            evidence=_dedupe_strings(evidence),
             raw_response=raw_response,
         )
 
@@ -675,6 +829,147 @@ def _title_has_rule(title: str) -> bool:
         NEUTRAL_ADMIN_TITLE_KEYWORDS,
     )
     return any(keyword.lower() in lowered for group in groups for keyword in group)
+
+
+def _normalize_event_type(value: Any) -> str | None:
+    """Qwen이 낸 event_type을 허용 집합으로 정규화. 미일치는 '기타', 빈 값은 None."""
+    if not value:
+        return None
+    text_value = re.sub(r"\s+", "", str(value)).strip()
+    if not text_value:
+        return None
+    return text_value if text_value in EVENT_TYPES else "기타"
+
+
+def _grounded_text(original_text: str, candidate: str) -> str | None:
+    """수치 grounding을 통과한 후보 문자열만 반환(환각 차단). 실패 시 None."""
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+    return candidate if _verify_numerical_grounding(original_text, candidate) else None
+
+
+def _grounded_list(original_text: str, values: Any) -> list[str]:
+    """리스트 항목 중 수치 grounding을 통과한 것만 남긴다."""
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    for value in values:
+        text_value = str(value).strip()
+        if text_value and _verify_numerical_grounding(original_text, text_value):
+            result.append(text_value)
+    return result
+
+
+# 표 헤더/셀 덤프로 의심되는 출력 조각 패턴(분석 근거가 아님)
+_NOISE_FRAGMENT_TOKENS = (
+    "단위 :", "단위:", "전기대비", "전년동기대비", "증감율(%)", "흑자적자전환여부",
+    "연결실적내용:", "당기실적:", "재무제표의 종류", "결산대상기간",
+)
+_DIR_POSITIVE = ("증가", "흑자", "개선", "상승", "성장", "확대", "호조")
+_DIR_NEGATIVE = ("감소", "적자", "손실", "악화", "하락", "축소", "둔화", "부진")
+_TRIM_SIGNAL_KEYWORDS = (
+    "매출액", "매출", "영업이익", "영업손실", "당기순이익", "순이익", "순손실",
+    "당기순손실", "증감", "증가", "감소", "흑자", "적자", "손익", "취득금액",
+    "계약금액", "공급계약", "배당", "자기주식", "자사주",
+)
+
+
+def _trim_table_for_llm(text: str, *, max_chars: int = 2500, min_chars: int = 300) -> str:
+    """공시 표 본문에서 신호 있는 행만 추려 LLM 입력 길이를 줄인다(prefill 단축).
+
+    너무 적게 남으면(min_chars 미만) 신호가 약한 공시이므로 원문 앞부분으로 폴백한다.
+    """
+    kept: list[str] = []
+    total = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        has_signal = any(k.lower() in low for k in _TRIM_SIGNAL_KEYWORDS)
+        has_ratio = "%" in s and any(ch.isdigit() for ch in s)
+        if has_signal or has_ratio:
+            kept.append(s)
+            total += len(s)
+            if total >= max_chars:
+                break
+    trimmed = "\n".join(kept)
+    if len(trimmed) < min_chars:
+        return text[:6000]
+    return trimmed[:max_chars]
+
+
+def _is_noise_fragment(value: str) -> bool:
+    """표 헤더/셀 덤프로 보이는 조각이면 True(분석 근거로 부적합)."""
+    s = value.strip()
+    if not s:
+        return True
+    if any(tok in s for tok in _NOISE_FRAGMENT_TOKENS):
+        return True
+    if s.count("|") >= 2:  # 직렬화된 표 셀 행
+        return True
+    hangul = sum(1 for ch in s if "가" <= ch <= "힣")
+    return hangul < 2  # 한글 서술이 거의 없으면 노이즈
+
+
+def _filter_noise(values: list[str]) -> list[str]:
+    return [v for v in values if not _is_noise_fragment(v)]
+
+
+def _consistency_guard(sentiment: str, basis: list[str]) -> tuple[str, str | None]:
+    """감성과 근거(key_points/evidence) 방향이 모순이면 mixed 로 강등.
+
+    반환: (보정된 sentiment, 'conflict' | None).
+    """
+    joined = " ".join(basis)
+    pos = any(k in joined for k in _DIR_POSITIVE)
+    neg = any(k in joined for k in _DIR_NEGATIVE)
+    if sentiment == "negative" and pos and not neg:
+        return "mixed", "conflict"
+    if sentiment == "positive" and neg and not pos:
+        return "mixed", "conflict"
+    return sentiment, None
+
+
+def _salvage_truncated_json(snippet: str) -> str | None:
+    """토큰 한도로 잘려 닫는 괄호가 없는 JSON을, 마지막 완성된 값까지 잘라 닫아 복구한다.
+
+    문자열 상태/괄호 스택을 추적해 '요소 사이'로 안전하게 자를 수 있는 마지막 지점을 찾고,
+    뒤따르는 미완성 토큰·콤마를 버린 뒤 열린 괄호를 역순으로 닫는다.
+    """
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    cut: int | None = None
+    cut_stack: list[str] | None = None
+    for i, ch in enumerate(snippet):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+                cut, cut_stack = i + 1, list(stack)
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            cut, cut_stack = i + 1, list(stack)
+        elif ch.isdigit() or ch in "eltrufalsn.+-":  # 숫자/true/false/null 토큰 끝
+            nxt = snippet[i + 1] if i + 1 < len(snippet) else ""
+            if nxt in ",}] \n\t" or nxt == "":
+                cut, cut_stack = i + 1, list(stack)
+    if cut is None or cut_stack is None:
+        return None
+    repaired = snippet[:cut].rstrip().rstrip(",")
+    repaired += "".join(reversed(cut_stack))
+    return repaired
 
 
 def _verify_numerical_grounding(original_text: str, summary_text: str) -> bool:
