@@ -1,7 +1,7 @@
 """evidence_analysis enrichment: event_type/evidence columns + analysis_jobs queue
 
 Revision ID: b1f2a3c4d5e6
-Revises: a8a60fcd0ed2
+Revises: c2d3e4f5a6b7
 Create Date: 2026-06-08
 
 이전까지 evidence_analysis 는 alembic 에 누락되어 scripts/create_evidence_analysis_table.sql
@@ -16,7 +16,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "b1f2a3c4d5e6"
-down_revision: Union[str, None] = "a8a60fcd0ed2"
+down_revision: Union[str, None] = "c2d3e4f5a6b7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
