@@ -47,3 +47,12 @@ class DebateNotionPublishResponse(BaseModel):
     notion_page_id: str
     notion_page_url: str
     notion_published_at: datetime
+
+
+class DebatePrepareResponse(BaseModel):
+    session_id: UUID
+    user_id: UUID
+    symbol: str
+    category: str
+    status: str
+    started_at: datetime | None = None

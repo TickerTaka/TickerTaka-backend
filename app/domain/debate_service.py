@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
@@ -70,6 +71,90 @@ class DebateExecutionService:
 
         return state
 
+    async def stream_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        symbol: str,
+        symbol_name: str,
+        category: str,
+        user_portfolio: dict[str, Any] | None = None,
+        estimated_tokens: int = 0,
+    ):
+        start_result = self.tracker.try_start_session(
+            user_id=user_id,
+            symbol=symbol,
+            session_id=session_id,
+            estimated_tokens=estimated_tokens,
+        )
+        if not start_result.allowed:
+            raise DebateStartRejectedError(start_result.reason)
+
+        graph_runner = self.graph_runner or _get_default_graph()
+
+        state = load_checkpoint(session_id) or self._build_initial_state(
+            session_id=session_id,
+            user_id=user_id,
+            symbol=symbol,
+            symbol_name=symbol_name,
+            category=category,
+            user_portfolio=user_portfolio or {},
+        )
+
+        try:
+            yield _stream_event(
+                "session_started",
+                {
+                    "session_id": session_id,
+                    "symbol": symbol,
+                    "symbol_name": symbol_name,
+                    "category": category,
+                    "status": "running",
+                },
+            )
+            with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
+                async for chunk in _astream_with_config(graph_runner, state):
+                    node = next(iter(chunk))
+                    data = chunk[node]
+                    state = merge_state(state, data)
+                    save_checkpoint(state)
+                    for event in self._build_chunk_events(
+                        session_id=session_id,
+                        symbol=symbol,
+                        symbol_name=symbol_name,
+                        category=category,
+                        node=node,
+                        data=data,
+                        state=state,
+                    ):
+                        yield event
+        except Exception as exc:
+            from app.repositories.debate_repo import update_session_status
+
+            await update_session_status(session_id, "failed", str(exc))
+            yield _stream_event(
+                "error",
+                {
+                    "session_id": session_id,
+                    "message": str(exc),
+                    "status": "failed",
+                },
+            )
+            raise
+        finally:
+            self.tracker.end_session(user_id=user_id, symbol=symbol, session_id=session_id)
+
+        yield _stream_event(
+            "done",
+            {
+                "session_id": session_id,
+                "status": "completed",
+                "summary_content": state.get("summary_content", ""),
+                "key_points": state.get("key_points", []),
+            },
+        )
+
     @staticmethod
     def _build_initial_state(
         *,
@@ -103,6 +188,72 @@ class DebateExecutionService:
             "key_points": [],
         }
 
+    @staticmethod
+    def _build_chunk_events(
+        *,
+        session_id: str,
+        symbol: str,
+        symbol_name: str,
+        category: str,
+        node: str,
+        data: dict[str, Any],
+        state: DebateState,
+    ) -> list[dict[str, str]]:
+        events: list[dict[str, str]] = []
+        if node == "data_agent":
+            events.append(
+                _stream_event(
+                    "stage",
+                    {
+                        "session_id": session_id,
+                        "node": node,
+                        "stage": "context_collected",
+                        "symbol": symbol,
+                        "symbol_name": symbol_name,
+                        "category": category,
+                    },
+                )
+            )
+        if node == "moderator_pre":
+            events.append(
+                _stream_event(
+                    "agenda",
+                    {
+                        "session_id": session_id,
+                        "agenda": state.get("agenda", []),
+                    },
+                )
+            )
+        for statement in data.get("statements", []):
+            events.append(
+                _stream_event(
+                    "statement",
+                    {
+                        "session_id": session_id,
+                        "node": node,
+                        "agent_role": statement.get("agent_role", ""),
+                        "round": statement.get("round", ""),
+                        "round_order": statement.get("round_order", 0),
+                        "topic_index": statement.get("topic_index"),
+                        "content": statement.get("content", ""),
+                        "model_used": statement.get("model_used", ""),
+                        "evidence_count": len(statement.get("evidences", []) or []),
+                    },
+                )
+            )
+        if node == "moderator_summary":
+            events.append(
+                _stream_event(
+                    "summary",
+                    {
+                        "session_id": session_id,
+                        "summary_content": data.get("summary_content", ""),
+                        "key_points": data.get("key_points", []),
+                    },
+                )
+            )
+        return events
+
 
 def _get_default_graph():
     from app.agents.debate_graph import debate_graph
@@ -117,3 +268,10 @@ def _astream_with_config(graph_runner, state: DebateState):
         return graph_runner.astream(state, config)
     except TypeError:
         return graph_runner.astream(state)
+
+
+def _stream_event(event: str, payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        "event": event,
+        "data": json.dumps(payload, ensure_ascii=False),
+    }

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sse_starlette import EventSourceResponse
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, selectinload
 
@@ -14,6 +15,7 @@ from app.integrations import NotionMcpClient, NotionMcpError
 from app.models import AgentStatement, DebateSession, DebateStatus, ModeratorSummary, TickerMetadata
 from app.schemas.debate import (
     DebateCreateRequest,
+    DebatePrepareResponse,
     DebateNotionPublishResponse,
     DebateSessionResponse,
     DebateStatementResponse,
@@ -26,19 +28,8 @@ router = APIRouter(prefix="/api/debates", tags=["debates"])
 @router.post("", response_model=DebateSessionResponse, status_code=status.HTTP_201_CREATED)
 async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_db)) -> DebateSessionResponse:
     settings = get_settings()
-    ticker = db.get(TickerMetadata, payload.symbol)
-    if ticker is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {payload.symbol}")
-
-    session_row = DebateSession(
-        user_id=payload.user_id,
-        symbol=payload.symbol,
-        category=payload.category,
-        status=DebateStatus.RUNNING,
-    )
-    db.add(session_row)
-    db.commit()
-    db.refresh(session_row)
+    ticker = _get_ticker_or_404(db, payload.symbol)
+    session_row = _create_session_row(db, payload, status=DebateStatus.RUNNING)
 
     try:
         await DebateExecutionService().run_session(
@@ -66,6 +57,24 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
         ) from exc
 
     return _build_session_response(db, session_row.id)
+
+
+@router.post("/sessions", response_model=DebatePrepareResponse, status_code=status.HTTP_201_CREATED)
+def prepare_debate_session(payload: DebateCreateRequest, db: Session = Depends(get_db)) -> DebatePrepareResponse:
+    _get_ticker_or_404(db, payload.symbol)
+    session_row = _create_session_row(db, payload, status=DebateStatus.PENDING)
+    return DebatePrepareResponse(
+        session_id=session_row.id,
+        user_id=session_row.user_id,
+        symbol=session_row.symbol,
+        category=str(
+            session_row.category.value
+            if hasattr(session_row.category, "value")
+            else session_row.category
+        ),
+        status=str(session_row.status.value if hasattr(session_row.status, "value") else session_row.status),
+        started_at=session_row.started_at,
+    )
 
 
 @router.get("", response_model=DebateListResponse)
@@ -114,6 +123,134 @@ def get_debate(session_id: UUID, db: Session = Depends(get_db)) -> DebateSession
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"debate session not found: {session_id}")
     return _build_session_response(db, session_id)
+
+
+@router.get("/{session_id}/stream")
+async def stream_debate(
+    session_id: UUID,
+    avg_price: float | None = None,
+    db: Session = Depends(get_db),
+) -> EventSourceResponse:
+    session_row = db.get(DebateSession, session_id)
+    if session_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"debate session not found: {session_id}")
+
+    ticker = db.get(TickerMetadata, session_row.symbol)
+    if ticker is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {session_row.symbol}")
+
+    settings = get_settings()
+    session_id_str = str(session_row.id)
+    symbol = session_row.symbol
+    symbol_name = ticker.name_kr
+    category = _enum_value(session_row.category)
+
+    if session_row.status == DebateStatus.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="debate session is already running",
+        )
+
+    if session_row.status == DebateStatus.COMPLETED:
+        summary_row = db.scalar(select(ModeratorSummary).where(ModeratorSummary.session_id == session_id))
+        statement_rows = list(
+            db.scalars(
+                select(AgentStatement)
+                .where(AgentStatement.session_id == session_id)
+                .options(selectinload(AgentStatement.evidences))
+                .order_by(AgentStatement.round_order)
+            )
+        )
+        statement_payloads = [
+            {
+                "session_id": session_id_str,
+                "agent_role": _enum_value(stmt.agent_role),
+                "round": _enum_value(stmt.round),
+                "round_order": stmt.round_order,
+                "content": stmt.content,
+                "model_used": stmt.model_name or "",
+                "evidence_count": len(stmt.evidences or []),
+            }
+            for stmt in statement_rows
+        ]
+        summary_payload = (
+            {
+                "session_id": session_id_str,
+                "summary_content": summary_row.summary_content,
+                "key_points": summary_row.key_points or [],
+            }
+            if summary_row is not None
+            else None
+        )
+
+        async def replay_events():
+            yield _sse_event("session_started", {
+                "session_id": session_id_str,
+                "symbol": symbol,
+                "symbol_name": symbol_name,
+                "category": category,
+                "status": "completed",
+                "replay": True,
+            })
+            for stmt_payload in statement_payloads:
+                yield _sse_event("statement", stmt_payload)
+            if summary_payload is not None:
+                yield _sse_event("summary", summary_payload)
+            yield _sse_event("done", {
+                "session_id": session_id_str,
+                "status": "completed",
+                "replay": True,
+            })
+
+        return EventSourceResponse(replay_events())
+
+    if session_row.status == DebateStatus.FAILED:
+        error_message = session_row.error_message or "debate session failed"
+
+        async def failed_events():
+            yield _sse_event("error", {
+                "session_id": session_id_str,
+                "status": "failed",
+                "message": error_message,
+            })
+        return EventSourceResponse(failed_events())
+
+    db.add(session_row)
+    session_row.status = DebateStatus.RUNNING
+    db.commit()
+    db.refresh(session_row)
+
+    service = DebateExecutionService()
+
+    async def event_generator():
+        try:
+            async for event in service.stream_session(
+                session_id=session_id_str,
+                user_id=str(session_row.user_id),
+                symbol=symbol,
+                symbol_name=symbol_name,
+                category=category,
+                user_portfolio={"avg_price": avg_price} if avg_price is not None else {},
+                estimated_tokens=settings.estimated_tokens_for_category(category),
+            ):
+                yield event
+        except DebateStartRejectedError as exc:
+            from app.repositories.debate_repo import update_session_status
+
+            await update_session_status(session_id_str, "failed", str(exc))
+            yield _sse_event("error", {
+                "session_id": session_id_str,
+                "status": "rejected",
+                "message": str(exc),
+            })
+        except Exception as exc:
+            yield _sse_event("error", {
+                "session_id": session_id_str,
+                "status": "failed",
+                "message": str(exc),
+            })
+
+    return EventSourceResponse(event_generator())
 
 
 @router.post("/{session_id}/publish/notion", response_model=DebateNotionPublishResponse)
@@ -239,6 +376,39 @@ def _build_session_response(db: Session, session_id: UUID) -> DebateSessionRespo
             for stmt in statement_rows
         ],
     )
+
+
+def _get_ticker_or_404(db: Session, symbol: str) -> TickerMetadata:
+    ticker = db.get(TickerMetadata, symbol)
+    if ticker is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {symbol}")
+    return ticker
+
+
+def _create_session_row(db: Session, payload: DebateCreateRequest, *, status: DebateStatus) -> DebateSession:
+    session_row = DebateSession(
+        user_id=payload.user_id,
+        symbol=payload.symbol,
+        category=payload.category,
+        status=status,
+    )
+    db.add(session_row)
+    db.commit()
+    db.refresh(session_row)
+    return session_row
+
+
+def _enum_value(value) -> str:
+    return str(value.value if hasattr(value, "value") else value)
+
+
+def _sse_event(event: str, payload: dict) -> dict[str, str]:
+    import json
+
+    return {
+        "event": event,
+        "data": json.dumps(payload, ensure_ascii=False),
+    }
 
 
 def _build_publish_payload(
