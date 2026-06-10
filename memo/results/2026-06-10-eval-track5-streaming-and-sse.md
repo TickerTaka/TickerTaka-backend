@@ -286,3 +286,87 @@ curl -N "http://127.0.0.1:8000/api/debates/<SESSION_ID>/stream"
 1. `avg_price/user_portfolio` 잔존 코드 제거
 2. 프론트 EventSource 연동
 3. 필요 시 `data_node` 병렬화 보강
+4. 운영 프록시 환경에서 SSE 버퍼링 방지 헤더 검토
+
+---
+
+## 11. 검증 (Claude, 2026-06-10)
+
+> SSE 1차 구현(`api/debate.py` stream/sessions, `debate_service.stream_session`, 스키마)을 코드 기준으로 재검증. 이어붙이는 형식.
+
+### S-0. 검증 방법 / 정상 확인 (green)
+- **엔드포인트 정합**: `POST /api/debates/sessions`(→`DebatePrepareResponse`), `GET /api/debates/{id}/stream`(→`EventSourceResponse`) 코드 확인. 기존 `POST /api/debates`·`GET /{id}`는 **무변경** → 하위호환 ✓.
+- **스키마 정합**: `DebatePrepareResponse`(session_id/user_id/symbol/category/status/started_at) 보고서와 일치 ✓.
+- **의존성 핀**: `sse-starlette==2.1.3`([[feedback_requirements_pinning]] 충족) ✓.
+- **상태별 분기**: completed→replay(저장 statements/summary), failed→`error` 1회, running→`409` 확인 ✓.
+- **Detached ORM 대응**: completed replay 경로는 `statement_payloads`/`summary_payload`를 **dict로 미리 추출**해 generator가 ORM을 늦게 참조하지 않음 ✓.
+- **복원력 재사용**: stream 경로도 `merge_state`/`save_checkpoint`/RuntimeGuard(`try_start_session`/`end_session`)를 run 경로와 동일하게 사용 ✓.
+
+### S-1. [해소] 클라이언트 중도 끊김 → `debate_session.status` 고아화
+초기 구현에서는 클라이언트가 스트림을 중간에 끊으면 RuntimeGuard만 해제되고 DB status가 `running`으로 남을 수 있었다.
+
+현재는:
+- `event_generator`가 `asyncio.CancelledError`를 별도로 처리
+- `fail_session_if_running(session_id, "client disconnected during stream")`를 호출
+- **아직 완료되지 않은 세션만 조건부로 `failed` 정리**
+
+따라서 **중도 끊김 후 영구 `409` / replay 불가 고아 상태는 해소**됐다.
+
+### S-2. [해소] 그래프 실패 시 `error` 이벤트 중복 전송
+초기 구현에서는 `stream_session`이 예외 시 `error`를 emit한 뒤 다시 raise했고, 엔드포인트도 `except Exception`에서 `error`를 emit해 **동일 실패가 2번 전송**될 수 있었다.
+
+현재는:
+- `stream_session`은 예외 시 **상태만 `failed`로 정리하고 raise**
+- 실제 `error` SSE emit은 **엔드포인트 한 곳만 담당**
+
+따라서 **실패당 `error` 이벤트 1회**로 정리됐다.
+
+### S-3. [낮] `GET /stream`이 부작용을 가짐 (GET 안전성 위반)
+`GET`인데 `status=RUNNING` 커밋 + 전체 토론 실행 + DB 기록을 수행한다. EventSource가 GET만 지원하는 제약상 불가피하나, **프리패치/리트라이/크롤러가 URL을 건드리면 토론이 실제로 시작**될 수 있다. 졸프 범위에선 수용 가능하나, 인지하고 (가능하면) "이미 시작된 세션만 재생/거절" 가드를 견고히 둘 것. (현재 running→409가 일부 방어.)
+
+### S-4. [낮] status 점검→설정이 원자적이지 않음 (Redis 가드가 실질 방어선)
+`/stream`은 `status==RUNNING` 체크와 `status=RUNNING` 커밋 사이에 락이 없다(`SELECT ... FOR UPDATE` 아님). 동시 두 요청이 모두 통과해 RUNNING을 쓸 수 있고, 진짜 단일비행은 내부 **Redis `try_start_session`** 이 보장(둘째는 `DebateStartRejectedError`→error). 기능상 안전하나, DB 상태 자체는 race가 있음을 알아둘 것.
+
+### S-5. [해소] running 경로 generator의 ORM 스칼라 참조
+`event_generator`가 generator 내부에서 `session_row.user_id`를 읽던 부분은 `user_id_str` primitive 사전추출로 정리했다. completed replay 경로와 동일한 원칙으로 맞췄다.
+
+### S-6. [낮·운영] 프록시 버퍼링
+운영에서 nginx/NCP 프록시 뒤에 두면 SSE가 버퍼링돼 점진 전송이 깨질 수 있다. 필요 시 응답에 `X-Accel-Buffering: no` / `Cache-Control: no-cache` 부여 검토(로컬 검증엔 무관).
+
+### S-7. 잔존 `avg_price`/`user_portfolio` (보고서 §9-1과 동일, 다음 작업)
+`stream_debate(avg_price=...)`(`debate.py:131`)·`user_portfolio={"avg_price":...}`(`:233`)로 SSE 경로에도 잔존 필드가 전파됨을 코드로 재확인. **DB 컬럼은 없음(순수 pass-through)** 이라 제거는 무마이그레이션. → 다음 정리 트랙에서 제거(이미 계획됨).
+
+### S-8. 종합 판정
+- **SSE 1차 구현은 동작·구조 모두 양호**: 하위호환·replay·가드·체크포인트 재사용·의존성 핀까지 정합, 실스트림 이벤트도 확인됨.
+- **런타임 보완 핵심 2건(S-1/S-2) 해소**: 중도 끊김 시 고아 status와 중복 `error` emit 문제를 코드로 정리했다. 종료 정리는 `except`뿐 아니라 `finally + asyncio.shield(fail_session_if_running(...))`로 보강해 취소/조기 종료 계열까지 더 넓게 덮는다.
+- 현재 남은 것은 **잔존 `avg_price/user_portfolio` 제거(S-7)** 와 운영성 메모(S-3/S-4/S-6) 수준이다.
+- 따라서 트랙 판정은 그대로 유지되며, **"백엔드 SSE 1차 구현 완료 + 프론트 연동 전 필수 런타임 결함 정리 완료"**로 보는 것이 정확하다.
+
+---
+
+## 12. 보완 반영 재검증 (Claude, 2026-06-10)
+
+> S-1/S-2/S-5 수정분을 실제 코드로 재확인. 재컴파일 `OK_COMPILE`(`debate.py`/`debate_service.py`/`debate_repo.py`).
+
+### 코드 정합 확인 ✓
+- **S-2 해소** ✓ — `stream_session`의 `except`는 `fail_session_if_running(session_id, str(exc))` + `raise`만 수행, **`error` emit 없음**(`debate_service.py:132–136`). 실제 `error` SSE는 엔드포인트 한 곳에서만 emit → **실패당 1회**.
+- **S-1 해소(구조)** ✓ — `event_generator`에 `except asyncio.CancelledError`가 추가돼 중도 끊김 시 `fail_session_if_running(..., "client disconnected during stream")` 후 `raise`(`debate.py:239–243`). `asyncio` import 존재(`:3`).
+- **멱등·비파괴** ✓ — `fail_session_if_running`은 `UPDATE ... WHERE id=$1 AND status='running'`(`debate_repo.py:96–103`) → **running일 때만** 실패 처리. completed/failed를 덮어쓰지 않고, 중복 호출도 무해.
+- **S-5 해소** ✓ — `user_id_str = str(session_row.user_id)`를 핸들러에서 사전추출(`:145`)해 generator 내부 ORM 참조 제거.
+- **Redis 가드 finally 유지** ✓ — `stream_session`의 `finally: end_session`은 그대로라, CancelledError가 service의 `except Exception`에 안 걸려도(=BaseException) **가드는 항상 해제**.
+
+### C-1. [확인 필요] disconnect 정리는 `CancelledError` 도달에 의존 — 런타임 테스트 권장
+S-1의 정리 로직은 끊김 시 generator로 **`asyncio.CancelledError`가 던져진다는 전제**다. sse-starlette 2.1.3의 task-group 취소 모델에서는 보통 `anext()` 대기 지점으로 취소가 전파되어 generator의 `yield`에 `CancelledError`로 들어오므로 **대개 발화**한다. 다만:
+- 초기 지적은 타당했고, 현재는 이를 반영해 **`finally + asyncio.shield(fail_session_if_running(...))`** 로 종료 정리를 보강했다.
+- 따라서 `CancelledError` 외 종료 경로에서도 **미완 세션이면 조건부 `failed` 정리**가 한 번 더 시도된다.
+- 남는 확인은 코드 정합이 아니라 **실제 끊김 테스트 1회**다:
+  - 스트림 도중 `curl` 강제 종료
+  - 이후 `GET /api/debates/{id}` 또는 DB 확인 시 status가 `running`이 아닌지 점검
+- 졸프 범위에선 이 런타임 확인 1회면 충분하다.
+
+### M-1. [무해] 그래프 실패 시 `fail_session_if_running` 중복 호출
+그래프 예외 시 service와 endpoint `finally` 양쪽에서 호출될 수 있지만 `WHERE status='running'` 조건이라 **멱등**이며, 완료/실패 세션을 덮어쓰지 않는다.
+
+### 판정
+- **S-1/S-2/S-5 코드 정합 + 컴파일 통과.** S-2/S-5는 완결, S-1은 `finally + shield + 조건부 fail 업데이트`까지 반영돼 구조적으로 더 견고해졌다. 남은 것은 **disconnect 런타임 1회 확인(C-1)** 이다.
+- 트랙 닫힘 판정 유지. 다음은 예정대로 **`avg_price`/`user_portfolio` 잔존 제거(S-7)**.

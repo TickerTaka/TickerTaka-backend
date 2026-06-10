@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -141,6 +142,7 @@ async def stream_debate(
 
     settings = get_settings()
     session_id_str = str(session_row.id)
+    user_id_str = str(session_row.user_id)
     symbol = session_row.symbol
     symbol_name = ticker.name_kr
     category = _enum_value(session_row.category)
@@ -223,10 +225,12 @@ async def stream_debate(
     service = DebateExecutionService()
 
     async def event_generator():
+        stream_completed = False
+        failure_reason = "stream terminated before completion"
         try:
             async for event in service.stream_session(
                 session_id=session_id_str,
-                user_id=str(session_row.user_id),
+                user_id=user_id_str,
                 symbol=symbol,
                 symbol_name=symbol_name,
                 category=category,
@@ -234,21 +238,29 @@ async def stream_debate(
                 estimated_tokens=settings.estimated_tokens_for_category(category),
             ):
                 yield event
+            stream_completed = True
+        except asyncio.CancelledError:
+            failure_reason = "client disconnected during stream"
+            raise
         except DebateStartRejectedError as exc:
-            from app.repositories.debate_repo import update_session_status
-
-            await update_session_status(session_id_str, "failed", str(exc))
+            failure_reason = str(exc)
             yield _sse_event("error", {
                 "session_id": session_id_str,
                 "status": "rejected",
-                "message": str(exc),
+                "message": failure_reason,
             })
         except Exception as exc:
+            failure_reason = str(exc)
             yield _sse_event("error", {
                 "session_id": session_id_str,
                 "status": "failed",
-                "message": str(exc),
+                "message": failure_reason,
             })
+        finally:
+            if not stream_completed:
+                from app.repositories.debate_repo import fail_session_if_running
+
+                await asyncio.shield(fail_session_if_running(session_id_str, failure_reason))
 
     return EventSourceResponse(event_generator())
 

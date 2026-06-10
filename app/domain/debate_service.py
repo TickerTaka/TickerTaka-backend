@@ -62,9 +62,9 @@ class DebateExecutionService:
                     state = merge_state(state, data)
                     save_checkpoint(state)
         except Exception as exc:
-            from app.repositories.debate_repo import update_session_status
+            from app.repositories.debate_repo import fail_session_if_running
 
-            await update_session_status(session_id, "failed", str(exc))
+            await fail_session_if_running(session_id, str(exc))
             raise
         finally:
             self.tracker.end_session(user_id=user_id, symbol=symbol, session_id=session_id)
@@ -130,17 +130,9 @@ class DebateExecutionService:
                     ):
                         yield event
         except Exception as exc:
-            from app.repositories.debate_repo import update_session_status
+            from app.repositories.debate_repo import fail_session_if_running
 
-            await update_session_status(session_id, "failed", str(exc))
-            yield _stream_event(
-                "error",
-                {
-                    "session_id": session_id,
-                    "message": str(exc),
-                    "status": "failed",
-                },
-            )
+            await fail_session_if_running(session_id, str(exc))
             raise
         finally:
             self.tracker.end_session(user_id=user_id, symbol=symbol, session_id=session_id)

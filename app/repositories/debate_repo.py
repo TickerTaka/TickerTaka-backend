@@ -93,6 +93,16 @@ async def update_session_status(session_id: str, status: str, error_message: str
     logger.info(f"[db] 세션 {session_id} → {status}")
 
 
+async def fail_session_if_running(session_id: str, error_message: str | None = None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE debate_session
+               SET status='failed', error_message=$2
+             WHERE id=$1 AND status='running'
+        """, UUID(session_id), error_message)
+
+
 async def save_statement(
     session_id: str, round_: str, round_order: int, agent_role: str,
     content: str, model_name: str,
