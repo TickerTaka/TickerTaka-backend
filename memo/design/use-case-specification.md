@@ -16,6 +16,7 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
   - 뉴스 소스
   - 토론 LLM (settings 기반 모델, 기본 `gpt-4o-mini` / 현재 OpenAI 직접)
   - RAGAS 평가 LLM (현재 OpenRouter sLLM `gpt-oss-120b:free` — 변경 가능)
+  - 감성분석 sLLM (FinBERT `snunlp/KR-FinBert-SC` baseline + Qwen 보강)
   - Notion (MCP 경유 2차 저장소 — 토론 결과 발행)
 - 보조 인프라
   - PostgreSQL
@@ -148,7 +149,20 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
   - `app/api/debate.py`
   - `app/integrations/notion_mcp.py`
 
-> (예정 · 타 팀원 구현 중) **뉴스/공시 감성분석** — 이 repo 미병합. 머지 후 별도 UC로 추가 예정.
+## UC-10. 뉴스/공시 감성·투자분석
+
+- 목표: 관심종목 뉴스/공시의 감성·투자영향을 구조화 분석한다.
+- 트리거: evidence 인덱싱 시점(동기) + 비동기 워커(Qwen 보강)
+- 진입 데이터: `news_cache` / `filing_cache`
+- 처리:
+  - **동기**: 룰 + FinBERT(`snunlp/KR-FinBert-SC`) baseline → `evidence_analysis` 즉시 저장 + 게이트 통과분 `analysis_jobs` enqueue
+  - **비동기**: `python -m app.workers.analysis_worker`(별도 프로세스)가 큐 폴링 → 본문/DART 문서 fetch → **Qwen** 구조화 보강 → `evidence_analysis` 갱신
+- 결과: `sentiment` / `impact_score`(-2~+2) / `confidence` / `event_type` / `summary` / `key_points` / `risks` / `evidence`
+- 노출: `GET /api/watchlists/{user_id}/feed`의 `WatchlistFeedItem`
+- 관련 코드:
+  - `app/domain/evidence_analysis.py`, `app/domain/evidence_indexing.py`
+  - `app/workers/analysis_worker.py`
+  - `app/models/evidence_analysis.py`, `app/models/analysis_jobs.py`
 
 ## 비기능 요구
 

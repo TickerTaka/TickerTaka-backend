@@ -39,6 +39,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `app/domain/filing_ingestion.py`
 - `app/domain/evidence_retrieval.py`
 - `app/domain/evidence_indexing.py`
+- `app/domain/evidence_analysis.py`
 - `app/domain/debate_evaluation.py`
 
 책임:
@@ -47,7 +48,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - valuation 계산
 - evidence 검색
 - 사후 평가 (RAGAS — `debate_eval_result` 영속화 + 배치/리포트)
-- (예정 · 타 팀원 구현 중) 뉴스/공시 **감성분석** — 이 repo 미병합, 머지 후 `news_cache.sentiment` 등 반영 예정
+- 뉴스/공시 **감성·투자분석**: 동기 FinBERT(`snunlp/KR-FinBert-SC`) baseline 즉시 저장 + Qwen 보강 작업 enqueue (`evidence_analysis` / `analysis_jobs`)
 
 ## 3. Agent Runtime Layer
 
@@ -85,6 +86,8 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `evidence`
 - `debate_note`
 - `debate_eval_result`
+- `evidence_analysis`
+- `analysis_jobs`
 - `event_timeline`
 - `data_refresh_job`
 
@@ -111,6 +114,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - RAGAS 평가 LLM은 별도로 **OpenRouter sLLM** 사용 (`debate_evaluation.py`, 현재값 `gpt-oss-120b:free` — 모델/메트릭 변경 가능). 결과는 **`debate_eval_result` 테이블에 영속화**되고 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트까지 구현됨 (메트릭: faithfulness / answer_relevancy / context_precision)
 - ※ `openrouter_base_url` 설정은 잔존하나 토론 경로엔 미적용 (항목3 sLLM 전환 시 재배선 지점)
 - **Notion 발행(MCP)**: `app/integrations/notion_mcp.py`가 **MCP client**로 self-host Notion MCP server(`@notionhq/notion-mcp-server`, stdio·newline-delimited JSON)를 spawn → `API-post-page`로 토론 결과를 Notion DB row(page)로 발행. PostgreSQL은 SOT, Notion은 2차 mirror
+- **감성분석 sLLM**: baseline = FinBERT `snunlp/KR-FinBert-SC`(local HF), 보강 = **Qwen**(`ANALYSIS_GENERATION_MODEL`). 뉴스는 본문 스크랩(`article_scraper`), 공시는 `DartClient` 문서 fetch 후 구조화 분석
 
 ## 6. Infra Support Layer
 
@@ -130,6 +134,18 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - active session guard
 - intraday quote cache
 - vector index 보조 저장
+
+## 7. 비동기 워커 — 감성분석 Qwen 보강
+
+구성:
+- `app/workers/analysis_worker.py` (별도 프로세스: `python -m app.workers.analysis_worker`)
+- `app/repositories/analysis_jobs_repository.py`, `app/repositories/evidence_analysis_repository.py`
+
+책임:
+- `analysis_jobs` 큐를 폴링(`claim_batch`)해 무거운 **Qwen 구조화 분석**을 후처리
+- 뉴스는 본문 스크랩, 공시는 DART 문서 fetch → `evidence_analysis` 갱신
+- 모델은 **워커 프로세스에만 1회 로드**(웹 프로세스 메모리 비압박), 실패는 `attempts`/`max_attempts`로 격리
+- 동기 인덱싱이 FinBERT baseline을 즉시 저장하므로, **워커 미기동 시에도 baseline 감성은 제공**됨
 
 ## 배포/실행 환경
 
@@ -170,6 +186,9 @@ flowchart LR
     DOMAIN --> EVALDB[(debate_eval_result)]
     API --> NOTIONMCP[Notion MCP client - notion_mcp.py]
     NOTIONMCP --> NOTION[Notion MCP server -> Notion DB row]
+    DOMAIN --> ANALYSISDB[(evidence_analysis / analysis_jobs)]
+    WORKER[Analysis Worker - Qwen, 별도 프로세스] --> ANALYSISDB
+    WORKER --> SLLM[FinBERT baseline + Qwen 보강]
 ```
 
 ## 설계 원칙

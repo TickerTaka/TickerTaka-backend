@@ -28,6 +28,8 @@
 - `evidence`
 - `debate_note`
 - `debate_eval_result`
+- `evidence_analysis`
+- `analysis_jobs`
 
 ## 관계 요약
 
@@ -48,6 +50,8 @@
 | `debate_session` | 0..1:N | `debate_session` | **self-ref** `cached_from_session_id` → 토론 결과 캐시 재사용 |
 | `agent_statement` | 1:N | `evidence` | `ON DELETE CASCADE` |
 | `news/filing/price/financial/technical_cache` | 0..N:N | `evidence` | 5개 cache FK 모두 nullable·`ON DELETE SET NULL` (근거 원본 삭제돼도 발췌는 보존) |
+| `news_cache`·`filing_cache` | 0..N (soft) | `evidence_analysis` | `(source_type, source_id)` 다형 참조(하드 FK 없음), `uq(source_type, source_id, prompt_version)` |
+| (동기 인덱싱) | enqueue | `analysis_jobs` | Qwen 보강 비동기 큐, `uq(source_type, source_id, prompt_version)` |
 
 ## Mermaid ERD (속성 포함)
 
@@ -79,6 +83,9 @@ erDiagram
     TECHNICAL_INDICATOR_CACHE ||--o{ EVIDENCE : referenced_by
     NEWS_CACHE ||--o{ EVIDENCE : referenced_by
     FILING_CACHE ||--o{ EVIDENCE : referenced_by
+
+    NEWS_CACHE ||..o{ EVIDENCE_ANALYSIS : analyzed
+    FILING_CACHE ||..o{ EVIDENCE_ANALYSIS : analyzed
 
     APP_USER {
         uuid id PK
@@ -227,6 +234,35 @@ erDiagram
         int retry_count
         int max_retries
     }
+    EVIDENCE_ANALYSIS {
+        uuid id PK
+        string source_type "news|filing"
+        uuid source_id "news/filing cache id (soft ref)"
+        string symbol
+        string sentiment "positive|negative|neutral|mixed"
+        int impact_score "-2~+2"
+        numeric confidence "0~1, nullable"
+        string event_type "공시 사건유형, nullable"
+        text summary
+        jsonb key_points
+        jsonb risks
+        jsonb evidence
+        string model_name
+        string prompt_version "uq(source_type, source_id, prompt_version)"
+        jsonb raw_response
+        datetime analyzed_at
+    }
+    ANALYSIS_JOBS {
+        uuid id PK
+        string source_type "news|filing"
+        uuid source_id
+        string symbol
+        string prompt_version "uq(source_type, source_id, prompt_version)"
+        string status "pending|running|done|failed"
+        int attempts
+        text last_error
+        datetime locked_at
+    }
 ```
 
 ## Enum 카탈로그 (코드 기준)
@@ -246,7 +282,7 @@ erDiagram
 
 ## 주요 제약·인덱스 (정합성 근거)
 
-- **중복 방어(unique)**: `watchlist(user_id, symbol)`, `price_cache(symbol, price_date)`, `financial_cache(symbol, fiscal_year, fiscal_quarter)`, `technical_indicator_cache(symbol, indicator_date)`, `event_timeline(symbol, event_date, event_title)`, `news_cache.source_url`, `filing_cache.dart_receipt_no`, `agent_statement(session_id, round_order)`, `moderator_summary.session_id`, `debate_note(user_id, session_id)`.
+- **중복 방어(unique)**: `watchlist(user_id, symbol)`, `price_cache(symbol, price_date)`, `financial_cache(symbol, fiscal_year, fiscal_quarter)`, `technical_indicator_cache(symbol, indicator_date)`, `event_timeline(symbol, event_date, event_title)`, `news_cache.source_url`, `filing_cache.dart_receipt_no`, `agent_statement(session_id, round_order)`, `moderator_summary.session_id`, `debate_note(user_id, session_id)`, `evidence_analysis(source_type, source_id, prompt_version)`, `analysis_jobs(source_type, source_id, prompt_version)`.
   - → [[infra-stage-policy]]의 "PG unique/upsert가 최종 중복 방어선"이 이 제약들로 구현됨.
 - **토론 캐시 재사용**: `debate_session.cache_key`는 부분 unique 인덱스(`cache_key IS NOT NULL`), `cached_from_session_id` self-FK로 동일 입력 토론 결과를 재참조.
 - **조회 인덱스**: 세션은 `(user_id, started_at DESC)`·`(symbol, category, started_at DESC)`, 캐시는 대부분 `(symbol, 날짜 DESC)` 정렬 인덱스 보유.
@@ -302,6 +338,17 @@ erDiagram
 - 지표별 1행: `eval_type`(summary_faithfulness / summary_answer_relevancy / evidence_precision) + `score`(0.0~1.0, 실패 시 NULL) + `model_used` + `error`
 - 토론 종료 후 백그라운드 평가(`debate_evaluation.py`)와 배치(`run_ragas_eval.py`)가 기록
 - `session_id` FK `ON DELETE CASCADE`, 조회 인덱스 `idx_eval_session` / `idx_eval_type`
+
+### `evidence_analysis`
+- **뉴스/공시 구조화 투자분석(감성)** 결과 (`models/evidence_analysis.py`)
+- `sentiment`(positive/negative/neutral/mixed) + `impact_score`(-2~+2) + `confidence` + `event_type`(공시 사건유형) + `summary`/`key_points`/`risks`/`evidence`(JSONB)
+- `(source_type, source_id)`로 `news_cache`/`filing_cache`를 **다형 참조**(하드 FK 없음), `prompt_version`까지 합쳐 unique
+- 동기 인덱싱이 **FinBERT baseline**을 즉시 기록, 비동기 워커가 **Qwen 보강**으로 갱신. `WatchlistFeedItem` 응답으로 노출
+
+### `analysis_jobs`
+- **Qwen 비동기 보강 작업 큐** (`models/analysis_jobs.py`)
+- `status`(pending/running/done/failed) + `attempts` + `last_error` + `locked_at`
+- 동기 인덱싱이 게이트 통과분을 enqueue → `app/workers/analysis_worker.py`가 `claim_batch`로 폴링 처리
 
 ## 구현 표현 차이 메모
 

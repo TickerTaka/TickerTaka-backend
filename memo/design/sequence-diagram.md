@@ -223,6 +223,42 @@ sequenceDiagram
 > **저장 위치**: 속성(session_id/symbol/category/날짜)은 Notion DB property, 요약/핵심논점/주요발언은 페이지 본문 block(paragraph·bulleted).
 > **멱등성**: `debate_session.notion_page_*`에 값이 있으면 재발행 대신 기존 URL 반환. **fail-soft**: 발행 실패(502)는 토론 본체 경로에 비전파(rollback).
 
+## 6. 뉴스/공시 감성·투자분석 (동기 baseline + 비동기 Qwen)
+
+```mermaid
+sequenceDiagram
+    participant IDX as EvidenceIndexing (동기)
+    participant AS as EvidenceAnalysisService
+    participant FB as FinBERT (local HF)
+    participant PG as PostgreSQL
+    participant WK as AnalysisWorker (별도 프로세스)
+    participant SC as Scraper / DART
+    participant QW as Qwen sLLM
+
+    Note over IDX: 뉴스/공시 인덱싱 시점
+    IDX->>AS: analyze baseline (rule + FinBERT)
+    AS->>FB: classify sentiment
+    FB-->>AS: sentiment / impact baseline
+    AS->>PG: upsert evidence_analysis (baseline 즉시 저장)
+    alt Qwen 게이트 통과 & async 활성
+        AS->>PG: enqueue analysis_jobs (status=pending)
+    end
+
+    loop 워커 폴링 (analysis_worker_poll_interval)
+        WK->>PG: claim_batch(analysis_jobs)
+        PG-->>WK: pending jobs (locked)
+        WK->>SC: 뉴스 본문 스크랩 / DART 문서 fetch
+        SC-->>WK: 원문 텍스트
+        WK->>QW: 구조화 분석 enrich
+        QW-->>WK: sentiment/impact/event_type/risks/key_points
+        WK->>PG: update evidence_analysis + mark_done
+        Note over WK: 실패 시 mark_failed (attempts/max_attempts 격리)
+    end
+```
+
+> **2단 구조**: 동기 인덱싱이 FinBERT baseline을 즉시 `evidence_analysis`에 저장하므로 **워커가 안 떠 있어도 baseline 감성은 제공**된다. 무거운 Qwen 보강만 `analysis_jobs` 큐 → `python -m app.workers.analysis_worker`(별도 프로세스)가 후처리. 모델은 워커에만 1회 로드되어 웹 프로세스 메모리를 압박하지 않는다.
+> **노출**: 결과는 `GET /api/watchlists/{user_id}/feed`의 `WatchlistFeedItem` 필드(`sentiment`/`impact_score`/`event_type`/…)로 노출. 분석 전이면 null.
+
 ## 현재 시퀀스 상 주의 포인트
 
 - watchlist background sync는 병렬 큐 시스템이 아니라 FastAPI background task 기반

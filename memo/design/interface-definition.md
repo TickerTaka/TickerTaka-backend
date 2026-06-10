@@ -54,6 +54,7 @@
 - 쿼리: `limit:int = 20` (1–100으로 capped)
 - 응답 `WatchlistFeedResponse`: `items: WatchlistFeedItem[]`
 - `WatchlistFeedItem`: `id:UUID`, `symbol:str`, `symbol_name:str?`, `kind:str`("news"|"filing"), `title:str`, `summary:str?`, `source_name:str?`, `source_url:str`, `published_at:datetime?`
+  - **감성분석 필드(분석 전이면 null/빈배열)**: `sentiment:str?`("positive"|"negative"|"neutral"|"mixed"), `impact_score:int?`(-2~+2), `confidence:float?`(0~1), `event_type:str?`(공시 사건유형), `analysis_summary:str?`, `key_points:str[]`, `risks:str[]`, `evidence:str[]` — `evidence_analysis` 결과(동기 FinBERT baseline → 비동기 Qwen 보강)
 
 ### DELETE `/api/watchlists/{user_id}/{symbol}`
 
@@ -220,5 +221,5 @@
 
 - SSE debate stream endpoint (`text/event-stream`, astream 청크 forward)
 - RAGAS 평가 결과 **조회** endpoint — 결과는 이미 `debate_eval_result`에 **영속화됨**(배치 `run_ragas_eval.py` + 리포트 `ragas-<sha>.json`), 조회 API만 미구현
-- (예정 · 타 팀원 구현 중) 뉴스/공시 **감성분석** 결과 노출 — 이 repo 미병합
+- 뉴스/공시 **감성·투자분석**은 구현 완료 — `GET /api/watchlists/{user_id}/feed`의 `WatchlistFeedItem`에 노출(§1). 전용 조회 endpoint는 선택 확장
 - ※ Notion 발행 endpoint는 §3에 **정식 구현 완료**(추후 확장에서 제외)
