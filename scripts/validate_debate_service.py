@@ -50,7 +50,6 @@ async def main() -> None:
         symbol="000660",
         symbol_name="SK하이닉스",
         category="financial",
-        user_portfolio={},
     )
     assert state["summary_content"] == "요약"
     assert state["agenda"] == ["쟁점1"]

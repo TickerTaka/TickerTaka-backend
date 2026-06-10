@@ -241,20 +241,20 @@ curl -N "http://127.0.0.1:8000/api/debates/<SESSION_ID>/stream"
 
 이번 구현은 스트리밍 경로 자체는 성공했지만, 아래 보완이 남아 있다.
 
-### 9-1. 잔존 `avg_price` / `user_portfolio`
+### 9-1. `avg_price` / `user_portfolio` 잔존 제거 완료
 
 현재 서비스 방향은:
 - 관심종목 기반 데이터/뉴스/공시/지표를 종합해 투자 판단 보조
 
-즉 평균단가/포트폴리오 입력은 더 이상 핵심 요구사항이 아니다.
+즉 평균단가/포트폴리오 입력은 더 이상 핵심 요구사항이 아니다.  
+초기 SSE 구현 시점엔 과거 설계 잔존으로 아래가 남아 있었으나, 이후 정리로 제거했다.
 
-하지만 현재 코드엔 과거 설계의 잔존으로 아래가 남아 있다.
-- `DebateCreateRequest.avg_price`
-- `DebateState.user_portfolio`
-- moderator summary prompt의 `portfolio_context`
-- `/stream` query의 `avg_price`
+- `DebateCreateRequest.avg_price` 제거
+- `DebateState.user_portfolio` 제거
+- moderator summary prompt의 `portfolio_context` 제거
+- `/stream` query의 `avg_price` 제거
 
-따라서 다음 정리 단계에서 제거하는 것이 맞다.
+이 변경은 **DB 컬럼과 무관한 순수 코드 정리**라 마이그레이션 없이 반영 가능했다.
 
 ### 9-2. 프론트 연동 미완
 
@@ -283,10 +283,9 @@ curl -N "http://127.0.0.1:8000/api/debates/<SESSION_ID>/stream"
 따라서 **#5 스트리밍 & 비동기 처리 트랙은 “백엔드 SSE 1차 구현 완료” 상태**로 볼 수 있다.  
 다음 단계는:
 
-1. `avg_price/user_portfolio` 잔존 코드 제거
-2. 프론트 EventSource 연동
-3. 필요 시 `data_node` 병렬화 보강
-4. 운영 프록시 환경에서 SSE 버퍼링 방지 헤더 검토
+1. 프론트 EventSource 연동
+2. 필요 시 `data_node` 병렬화 보강
+3. 운영 프록시 환경에서 SSE 버퍼링 방지 헤더 검토
 
 ---
 
@@ -333,13 +332,21 @@ curl -N "http://127.0.0.1:8000/api/debates/<SESSION_ID>/stream"
 ### S-6. [낮·운영] 프록시 버퍼링
 운영에서 nginx/NCP 프록시 뒤에 두면 SSE가 버퍼링돼 점진 전송이 깨질 수 있다. 필요 시 응답에 `X-Accel-Buffering: no` / `Cache-Control: no-cache` 부여 검토(로컬 검증엔 무관).
 
-### S-7. 잔존 `avg_price`/`user_portfolio` (보고서 §9-1과 동일, 다음 작업)
-`stream_debate(avg_price=...)`(`debate.py:131`)·`user_portfolio={"avg_price":...}`(`:233`)로 SSE 경로에도 잔존 필드가 전파됨을 코드로 재확인. **DB 컬럼은 없음(순수 pass-through)** 이라 제거는 무마이그레이션. → 다음 정리 트랙에서 제거(이미 계획됨).
+### S-7. [해소] 잔존 `avg_price`/`user_portfolio`
+초기 구현에서 SSE 경로까지 `avg_price`와 `user_portfolio`가 pass-through로 남아 있었지만, 이후 정리로 제거했다.
+
+현재는:
+- `DebateCreateRequest`에 `avg_price` 없음
+- `/api/debates/{session_id}/stream` query에 `avg_price` 없음
+- `DebateState.user_portfolio` 없음
+- moderator summary prompt에 `portfolio_context` 없음
+
+즉 현재 서비스 전략과 맞지 않던 포트폴리오/평단가 문맥은 코드 경로에서 정리 완료됐다.
 
 ### S-8. 종합 판정
 - **SSE 1차 구현은 동작·구조 모두 양호**: 하위호환·replay·가드·체크포인트 재사용·의존성 핀까지 정합, 실스트림 이벤트도 확인됨.
 - **런타임 보완 핵심 2건(S-1/S-2) 해소**: 중도 끊김 시 고아 status와 중복 `error` emit 문제를 코드로 정리했다. 종료 정리는 `except`뿐 아니라 `finally + asyncio.shield(fail_session_if_running(...))`로 보강해 취소/조기 종료 계열까지 더 넓게 덮는다.
-- 현재 남은 것은 **잔존 `avg_price/user_portfolio` 제거(S-7)** 와 운영성 메모(S-3/S-4/S-6) 수준이다.
+- 현재 남은 것은 운영성 메모(S-3/S-4/S-6) 수준이다.
 - 따라서 트랙 판정은 그대로 유지되며, **"백엔드 SSE 1차 구현 완료 + 프론트 연동 전 필수 런타임 결함 정리 완료"**로 보는 것이 정확하다.
 
 ---
@@ -359,14 +366,15 @@ curl -N "http://127.0.0.1:8000/api/debates/<SESSION_ID>/stream"
 S-1의 정리 로직은 끊김 시 generator로 **`asyncio.CancelledError`가 던져진다는 전제**다. sse-starlette 2.1.3의 task-group 취소 모델에서는 보통 `anext()` 대기 지점으로 취소가 전파되어 generator의 `yield`에 `CancelledError`로 들어오므로 **대개 발화**한다. 다만:
 - 초기 지적은 타당했고, 현재는 이를 반영해 **`finally + asyncio.shield(fail_session_if_running(...))`** 로 종료 정리를 보강했다.
 - 따라서 `CancelledError` 외 종료 경로에서도 **미완 세션이면 조건부 `failed` 정리**가 한 번 더 시도된다.
-- 남는 확인은 코드 정합이 아니라 **실제 끊김 테스트 1회**다:
-  - 스트림 도중 `curl` 강제 종료
-  - 이후 `GET /api/debates/{id}` 또는 DB 확인 시 status가 `running`이 아닌지 점검
-- 졸프 범위에선 이 런타임 확인 1회면 충분하다.
+- 이후 실제 끊김 테스트를 수행해,
+  - 스트림 도중 `Ctrl+C`
+  - 이후 `GET /api/debates/{id}`에서 `status=failed`
+를 확인했다. 따라서 disconnect 경로의 `running` 고아 방지도 런타임에서 검증 완료됐다.
 
 ### M-1. [무해] 그래프 실패 시 `fail_session_if_running` 중복 호출
 그래프 예외 시 service와 endpoint `finally` 양쪽에서 호출될 수 있지만 `WHERE status='running'` 조건이라 **멱등**이며, 완료/실패 세션을 덮어쓰지 않는다.
 
 ### 판정
-- **S-1/S-2/S-5 코드 정합 + 컴파일 통과.** S-2/S-5는 완결, S-1은 `finally + shield + 조건부 fail 업데이트`까지 반영돼 구조적으로 더 견고해졌다. 남은 것은 **disconnect 런타임 1회 확인(C-1)** 이다.
-- 트랙 닫힘 판정 유지. 다음은 예정대로 **`avg_price`/`user_portfolio` 잔존 제거(S-7)**.
+- **S-1/S-2/S-5 코드 정합 + 컴파일 통과 + disconnect 런타임 확인 완료.**
+- `avg_price`/`user_portfolio` 잔존 정리(S-7)도 반영 완료.
+- 따라서 SSE 트랙은 **백엔드 1차 구현 + 런타임 보강 + 잔존 코드 정리까지 완료**로 닫아도 된다.

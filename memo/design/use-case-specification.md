@@ -95,7 +95,6 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
   - `user_id`
   - `symbol`
   - `category`
-  - `avg_price` (선택)
 - 성공 결과:
   - debate session 생성
   - bull / bear / moderator 토론 수행

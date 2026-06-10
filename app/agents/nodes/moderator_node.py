@@ -171,8 +171,6 @@ async def moderator_summary_node(state: DebateState) -> dict:
         f"[{s['agent_role'].upper()} / {s['round']}]\n{s['content']}"
         for s in state["statements"]
     )
-    portfolio = state.get("user_portfolio", {})
-    port_ctx  = f"\n[평균 매수가] {portfolio.get('avg_price',0):,}원\n" if portfolio else ""
 
     try:
         raw = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
@@ -181,7 +179,6 @@ async def moderator_summary_node(state: DebateState) -> dict:
             category=state["category"],
             price_context=state["price_context"],
             evidence_context=state["evidence_context"],
-            portfolio_context=port_ctx,
         ), temp=0.4)
         parsed = _parse(raw, {"summary_content": raw, "key_points": []})
         summary = parsed.get("summary_content", raw)

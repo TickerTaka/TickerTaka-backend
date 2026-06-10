@@ -26,7 +26,6 @@ def main() -> None:
         "symbol": "000660",
         "symbol_name": "SK하이닉스",
         "category": "financial",
-        "user_portfolio": {},
         "current_round": "opening",
         "round_order": 0,
         "max_rounds": 3,

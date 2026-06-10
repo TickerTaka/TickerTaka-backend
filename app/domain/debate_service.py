@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.state import DebateState
@@ -31,7 +30,6 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
-        user_portfolio: dict[str, Any] | None = None,
         estimated_tokens: int = 0,
     ) -> DebateState:
         start_result = self.tracker.try_start_session(
@@ -51,7 +49,6 @@ class DebateExecutionService:
             symbol=symbol,
             symbol_name=symbol_name,
             category=category,
-            user_portfolio=user_portfolio or {},
         )
 
         try:
@@ -79,7 +76,6 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
-        user_portfolio: dict[str, Any] | None = None,
         estimated_tokens: int = 0,
     ):
         start_result = self.tracker.try_start_session(
@@ -99,7 +95,6 @@ class DebateExecutionService:
             symbol=symbol,
             symbol_name=symbol_name,
             category=category,
-            user_portfolio=user_portfolio or {},
         )
 
         try:
@@ -155,7 +150,6 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
-        user_portfolio: dict[str, Any],
     ) -> DebateState:
         return {
             "session_id": session_id,
@@ -163,7 +157,6 @@ class DebateExecutionService:
             "symbol": symbol,
             "symbol_name": symbol_name,
             "category": category,
-            "user_portfolio": user_portfolio,
             "current_round": "opening",
             "round_order": 0,
             "max_rounds": 3,

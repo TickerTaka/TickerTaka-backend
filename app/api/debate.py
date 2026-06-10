@@ -39,7 +39,6 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
             symbol=payload.symbol,
             symbol_name=ticker.name_kr,
             category=payload.category.value,
-            user_portfolio={"avg_price": payload.avg_price} if payload.avg_price is not None else {},
             estimated_tokens=settings.estimated_tokens_for_category(payload.category.value),
         )
     except DebateStartRejectedError as exc:
@@ -129,7 +128,6 @@ def get_debate(session_id: UUID, db: Session = Depends(get_db)) -> DebateSession
 @router.get("/{session_id}/stream")
 async def stream_debate(
     session_id: UUID,
-    avg_price: float | None = None,
     db: Session = Depends(get_db),
 ) -> EventSourceResponse:
     session_row = db.get(DebateSession, session_id)
@@ -234,7 +232,6 @@ async def stream_debate(
                 symbol=symbol,
                 symbol_name=symbol_name,
                 category=category,
-                user_portfolio={"avg_price": avg_price} if avg_price is not None else {},
                 estimated_tokens=settings.estimated_tokens_for_category(category),
             ):
                 yield event

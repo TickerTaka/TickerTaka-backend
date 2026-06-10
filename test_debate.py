@@ -30,6 +30,7 @@ if NO_DB:
     _repo.save_evidence       = _noop
     _repo.save_moderator_summary = _noop
     _repo.update_session_status  = _noop
+    _repo.fail_session_if_running = _noop
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.debate_graph import debate_graph
@@ -68,7 +69,6 @@ async def run(
         "symbol":              symbol,
         "symbol_name":         symbol_name,
         "category":            category,
-        "user_portfolio":      {},
         "current_round":       "claim",
         "round_order":         0,
         "max_rounds":          12,  # 3 주제 × 4 턴

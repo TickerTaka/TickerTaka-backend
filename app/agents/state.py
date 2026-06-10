@@ -22,7 +22,6 @@ class DebateState(TypedDict):
     symbol:         str
     symbol_name:    str
     category:       str       # technical | financial | market | macro | synthesis
-    user_portfolio: dict      # {avg_price: float} 또는 {}
 
     # 라운드 제어
     current_round:       str   # claim | rebuttal | counter_rebuttal | summary

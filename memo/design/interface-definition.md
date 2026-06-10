@@ -131,7 +131,6 @@
 | `user_id` | UUID | 필수 |
 | `symbol` | str | 필수, 1–30자 |
 | `category` | enum `DebateCategory` | technical/financial/market/macro/synthesis |
-| `avg_price` | float? | 기본 null |
 
 - 응답 `DebateSessionResponse` (201):
 

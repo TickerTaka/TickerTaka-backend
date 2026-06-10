@@ -57,14 +57,13 @@ def cleanup_debate_sessions(user_id: UUID, symbol: str) -> None:
         )
 
 
-async def fake_run_session(self, *, session_id: str, user_id: str, symbol: str, symbol_name: str, category: str, user_portfolio=None, estimated_tokens: int = 0):
+async def fake_run_session(self, *, session_id: str, user_id: str, symbol: str, symbol_name: str, category: str, estimated_tokens: int = 0):
     return {
         "session_id": session_id,
         "user_id": user_id,
         "symbol": symbol,
         "symbol_name": symbol_name,
         "category": category,
-        "user_portfolio": user_portfolio or {},
         "current_round": "summary",
         "round_order": 0,
         "max_rounds": 3,
@@ -100,7 +99,6 @@ def main() -> None:
                     "user_id": str(user_id),
                     "symbol": symbol,
                     "category": "financial",
-                    "avg_price": 100000,
                 },
             )
             expect(r.status_code == 201, f"create expected 201, got {r.status_code}: {r.text}")

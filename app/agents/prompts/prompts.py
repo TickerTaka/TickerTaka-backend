@@ -137,7 +137,6 @@ MODERATOR_SUMMARY_HUMAN = """
 [종목] {symbol} ({symbol_name}) — {category}
 {price_context}
 {evidence_context}
-{portfolio_context}
 
 아래 형식으로 요약하세요:
 

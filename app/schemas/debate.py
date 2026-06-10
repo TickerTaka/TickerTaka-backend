@@ -12,7 +12,6 @@ class DebateCreateRequest(BaseModel):
     user_id: UUID
     symbol: str = Field(min_length=1, max_length=30)
     category: DebateCategory
-    avg_price: float | None = None
 
 
 class DebateStatementResponse(BaseModel):
