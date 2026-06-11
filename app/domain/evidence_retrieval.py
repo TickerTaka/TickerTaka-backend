@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import lru_cache
 import logging
+import re
 from typing import Any
 
+from rank_bm25 import BM25Okapi
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core.db import session_scope
 from app.external.chroma_client import (
     ChromaClient,
@@ -21,6 +25,7 @@ from app.repositories.news_cache_repository import NewsCacheRepository
 logger = logging.getLogger(__name__)
 
 _DEFAULT_EXCERPT_LENGTH = 320
+_TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣_]+")
 _CATEGORY_QUERY_MAP = {
     "technical": "{symbol_name} 기술적 분석 차트 이동평균 RSI MACD 거래량 추세",
     "financial": "{symbol_name} 실적 재무 분기보고서 매출 영업이익 순이익 부채",
@@ -45,6 +50,8 @@ class RetrievedEvidence:
     analysis_summary: str | None = None
     key_points: list[str] | None = None
     risks: list[str] | None = None
+    rank: int | None = None
+    score_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -69,6 +76,10 @@ class RetrievedEvidence:
             payload["key_points"] = self.key_points
         if self.risks is not None:
             payload["risks"] = self.risks
+        if self.rank is not None:
+            payload["rank"] = self.rank
+        if self.score_type is not None:
+            payload["score_type"] = self.score_type
         return payload
 
 
@@ -98,15 +109,28 @@ class EvidenceRetrievalService:
         symbol: str,
         top_k: int = 3,
     ) -> list[dict[str, Any]]:
+        settings = get_settings()
         requested_k = max(1, top_k)
-        # Query both sources, then merge by score to keep retrieval behavior simple.
         source_k = max(requested_k, 3)
-        merged = [
-            *self._search_news(query=query, symbol=symbol, limit=source_k),
-            *self._search_filings(query=query, symbol=symbol, limit=source_k),
-        ]
-        merged.sort(key=lambda item: item.score)
-        return [item.to_dict() for item in merged[:requested_k]]
+
+        vector_news = self._search_news(query=query, symbol=symbol, limit=source_k)
+        vector_filings = self._search_filings(query=query, symbol=symbol, limit=source_k)
+
+        if not settings.rag_hybrid_enabled:
+            merged = [*vector_news, *vector_filings]
+            merged.sort(key=lambda item: item.score)
+            return [item.to_dict() for item in _assign_ranks(merged[:requested_k])]
+
+        lexical_limit = max(source_k, settings.rag_lexical_candidate_limit)
+        lexical_news = self._search_news_lexical(query=query, symbol=symbol, limit=lexical_limit)
+        lexical_filings = self._search_filings_lexical(query=query, symbol=symbol, limit=lexical_limit)
+
+        fused = self._fuse_rankings(
+            ranked_lists=[vector_news, vector_filings, lexical_news, lexical_filings],
+            rrf_k=max(1, settings.rag_rrf_k),
+        )
+        reranked = self._maybe_rerank(query=query, hits=fused, top_k=requested_k)
+        return [item.to_dict() for item in _assign_ranks(reranked[:requested_k])]
 
     def _search_news(self, *, query: str, symbol: str, limit: int) -> list[RetrievedEvidence]:
         result = self._safe_query_collection(
@@ -173,6 +197,143 @@ class EvidenceRetrievalService:
             )
         return hits
 
+    def _search_news_lexical(self, *, query: str, symbol: str, limit: int) -> list[RetrievedEvidence]:
+        rows = self.news_repo.list_by_symbol(symbol)[:limit]
+        analyses = self._safe_get_analyses("news", [str(row.id) for row in rows])
+        candidates = [
+            (
+                str(row.id),
+                _news_lexical_document(row),
+                row,
+                analyses.get(str(row.id)),
+            )
+            for row in rows
+            if _news_lexical_document(row)
+        ]
+        return self._run_bm25(
+            query=query,
+            candidates=candidates,
+            builder=lambda row, document, score, analysis: RetrievedEvidence(
+                source_type=SourceType.NEWS.value,
+                source_title=row.title,
+                excerpt=_excerpt_document(document, row.title),
+                source_url=row.source_url,
+                source_label=row.source_name or "NEWS",
+                score=score,
+                news_cache_id=str(row.id),
+                score_type="bm25",
+                **_analysis_kwargs(analysis),
+            ),
+        )
+
+    def _search_filings_lexical(self, *, query: str, symbol: str, limit: int) -> list[RetrievedEvidence]:
+        rows = self.filing_repo.list_by_symbol(symbol)[:limit]
+        analyses = self._safe_get_analyses("filing", [str(row.id) for row in rows])
+        candidates = [
+            (
+                str(row.id),
+                _filing_lexical_document(row),
+                row,
+                analyses.get(str(row.id)),
+            )
+            for row in rows
+            if _filing_lexical_document(row)
+        ]
+        return self._run_bm25(
+            query=query,
+            candidates=candidates,
+            builder=lambda row, document, score, analysis: RetrievedEvidence(
+                source_type=SourceType.DART.value,
+                source_title=row.filing_title,
+                excerpt=_excerpt_document(document, row.filing_title),
+                source_url=row.source_url,
+                source_label=row.filing_type or "DART",
+                score=score,
+                filing_cache_id=str(row.id),
+                score_type="bm25",
+                **_analysis_kwargs(analysis),
+            ),
+        )
+
+    def _run_bm25(
+        self,
+        *,
+        query: str,
+        candidates: list[tuple[str, str, Any, Any]],
+        builder,
+    ) -> list[RetrievedEvidence]:
+        if not candidates:
+            return []
+        tokenized_docs = [_tokenize(text) for _, text, _, _ in candidates]
+        query_tokens = _tokenize(query)
+        if not query_tokens or not any(tokenized_docs):
+            return []
+        bm25 = BM25Okapi(tokenized_docs)
+        scores = bm25.get_scores(query_tokens)
+        ranked_pairs = sorted(
+            zip(candidates, scores, strict=False),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        hits: list[RetrievedEvidence] = []
+        for (item_id, document, row, analysis), score in ranked_pairs:
+            if score <= 0:
+                continue
+            hits.append(builder(row, document, float(score), analysis))
+        return hits
+
+    def _fuse_rankings(
+        self,
+        *,
+        ranked_lists: list[list[RetrievedEvidence]],
+        rrf_k: int,
+    ) -> list[RetrievedEvidence]:
+        fused_scores: dict[str, float] = {}
+        canonical_hits: dict[str, RetrievedEvidence] = {}
+
+        for ranked in ranked_lists:
+            for index, hit in enumerate(ranked, start=1):
+                key = _hit_key(hit)
+                fused_scores[key] = fused_scores.get(key, 0.0) + 1.0 / (rrf_k + index)
+                canonical_hits.setdefault(key, hit)
+
+        merged: list[RetrievedEvidence] = []
+        for key, score in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True):
+            hit = canonical_hits[key]
+            merged.append(_replace_hit(hit, score=score, score_type="rrf"))
+        return merged
+
+    def _maybe_rerank(
+        self,
+        *,
+        query: str,
+        hits: list[RetrievedEvidence],
+        top_k: int,
+    ) -> list[RetrievedEvidence]:
+        settings = get_settings()
+        if not settings.rag_reranker_enabled or not hits:
+            return hits[:top_k]
+
+        rerank_limit = max(top_k, settings.rag_reranker_top_n)
+        rerank_targets = hits[:rerank_limit]
+        try:
+            model = _get_reranker(settings.rag_reranker_model)
+            pairs = [(query, f"{hit.source_title}\n{hit.excerpt}") for hit in rerank_targets]
+            scores = model.predict(pairs)
+        except Exception:
+            logger.exception("reranker failed; falling back to RRF ranking")
+            return hits[:top_k]
+
+        reranked = sorted(
+            zip(rerank_targets, scores, strict=False),
+            key=lambda pair: float(pair[1]),
+            reverse=True,
+        )
+        merged = [_replace_hit(hit, score=float(score), score_type="reranker") for hit, score in reranked]
+        if len(hits) > rerank_limit:
+            merged.extend(hits[rerank_limit:])
+        return merged[:top_k]
+
     def _safe_query_collection(
         self,
         collection_name: str,
@@ -217,6 +378,7 @@ class EvidenceRetrievalService:
             source_label=row.source_name or "NEWS",
             score=float(distance if distance is not None else 0.0),
             news_cache_id=str(row.id),
+            score_type="distance",
             **_analysis_kwargs(analysis),
         )
 
@@ -238,6 +400,7 @@ class EvidenceRetrievalService:
             source_label=str(label),
             score=float(distance if distance is not None else 0.0),
             filing_cache_id=str(row.id),
+            score_type="distance",
             **_analysis_kwargs(analysis),
         )
 
@@ -335,3 +498,54 @@ def _analysis_kwargs(analysis: Any) -> dict[str, Any]:
         "key_points": list(analysis.key_points or []),
         "risks": list(analysis.risks or []),
     }
+
+
+def _tokenize(text: str) -> list[str]:
+    normalized = text.strip().lower()
+    if not normalized:
+        return []
+    return _TOKEN_PATTERN.findall(normalized)
+
+
+def _news_lexical_document(row: NewsCache) -> str:
+    return "\n".join(part for part in [row.title, row.summary or ""] if part).strip()
+
+
+def _filing_lexical_document(row: FilingCache) -> str:
+    return "\n".join(part for part in [row.filing_title, row.summary or "", row.content or ""] if part).strip()
+
+
+def _hit_key(hit: RetrievedEvidence) -> str:
+    if hit.news_cache_id:
+        return f"news:{hit.news_cache_id}"
+    if hit.filing_cache_id:
+        return f"filing:{hit.filing_cache_id}"
+    return f"{hit.source_type}:{hit.source_url}"
+
+
+def _replace_hit(
+    hit: RetrievedEvidence,
+    *,
+    score: float | None = None,
+    score_type: str | None = None,
+    rank: int | None = None,
+) -> RetrievedEvidence:
+    updates: dict[str, Any] = {}
+    if score is not None:
+        updates["score"] = score
+    if score_type is not None:
+        updates["score_type"] = score_type
+    if rank is not None:
+        updates["rank"] = rank
+    return replace(hit, **updates)
+
+
+def _assign_ranks(hits: list[RetrievedEvidence]) -> list[RetrievedEvidence]:
+    return [_replace_hit(hit, rank=index) for index, hit in enumerate(hits, start=1)]
+
+
+@lru_cache(maxsize=4)
+def _get_reranker(model_name: str):
+    from sentence_transformers import CrossEncoder
+
+    return CrossEncoder(model_name)

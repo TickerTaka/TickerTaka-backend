@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     analysis_worker_max_attempts: int = Field(default=3, alias="ANALYSIS_WORKER_MAX_ATTEMPTS")
     # 뉴스 Qwen 게이팅: FinBERT 비-neutral 또는 |impact|>=임계일 때만 보강
     analysis_news_qwen_min_impact: int = Field(default=1, alias="ANALYSIS_NEWS_QWEN_MIN_IMPACT")
+    rag_hybrid_enabled: bool = Field(default=True, alias="RAG_HYBRID_ENABLED")
+    rag_rrf_k: int = Field(default=60, alias="RAG_RRF_K")
+    rag_lexical_candidate_limit: int = Field(default=40, alias="RAG_LEXICAL_CANDIDATE_LIMIT")
+    rag_reranker_enabled: bool = Field(default=False, alias="RAG_RERANKER_ENABLED")
+    rag_reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3", alias="RAG_RERANKER_MODEL")
+    rag_reranker_top_n: int = Field(default=8, alias="RAG_RERANKER_TOP_N")
 
     # OpenRouter (하위 호환용 — 더 이상 LLM 호출에 사용하지 않음)
     openrouter_api_key:  str = Field(default="", alias="OPENROUTER_API_KEY")

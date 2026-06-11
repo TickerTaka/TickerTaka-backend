@@ -24,7 +24,7 @@ def main() -> None:
         news_row = NewsCache(
             symbol=symbol,
             title="테스트 뉴스 제목",
-            summary="반도체 업황 개선",
+            summary="반도체 업황 개선과 실적 반등 기대",
             source_name="테스트뉴스",
             source_url=f"https://news.example.com/{uuid4()}",
         )
@@ -33,7 +33,7 @@ def main() -> None:
             filing_title="분기보고서 제출",
             filing_type="분기보고서",
             content=None,
-            summary=None,
+            summary="분기보고서 요약에는 매출 성장과 설비투자 계획이 포함된다.",
             dart_receipt_no=f"{uuid4().hex[:14]}",
             source_url=f"https://dart.example.com/{uuid4()}",
         )
@@ -86,12 +86,18 @@ def main() -> None:
         source_types = {hit["source_type"] for hit in hits}
         assert "NEWS" in source_types
         assert "DART" in source_types
+        assert all(hit["score"] > 0 for hit in hits)
+        assert all(hit["rank"] >= 1 for hit in hits)
+        assert all(hit["score_type"] == "rrf" for hit in hits)
         print(
             {
                 "symbol": symbol,
                 "hit_count": len(hits),
                 "source_types": sorted(source_types),
                 "top_titles": [hit["source_title"] for hit in hits],
+                "ranks": [hit["rank"] for hit in hits],
+                "score_types": [hit["score_type"] for hit in hits],
+                "scores": [round(float(hit["score"]), 6) for hit in hits],
             }
         )
         session.rollback()

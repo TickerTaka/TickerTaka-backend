@@ -1,6 +1,7 @@
 # app/agents/nodes/data_node.py
 """Data Agent — DB 캐시 우선 조회, 없으면 yfinance 폴백"""
 from __future__ import annotations
+import asyncio
 import logging
 from app.agents.state import DebateState
 from app.domain.evidence_retrieval import (
@@ -22,17 +23,20 @@ async def data_agent_node(state: DebateState) -> dict:
     symbol = state["symbol"]
     logger.info(f"[data_agent] {symbol} 수집 시작")
 
-    raw      = await fetch_price_context(symbol)
-    finance  = await fetch_financial_context(symbol)
-    news     = await fetch_news_context(symbol)
-    filings  = await fetch_filing_context(symbol)
-    events   = await fetch_event_timeline(symbol)
+    raw, finance, news, filings, events = await asyncio.gather(
+        fetch_price_context(symbol),
+        fetch_financial_context(symbol),
+        fetch_news_context(symbol),
+        fetch_filing_context(symbol),
+        fetch_event_timeline(symbol),
+    )
     evidence_query = build_category_query(
         symbol=symbol,
         symbol_name=state["symbol_name"],
         category=state["category"],
     )
-    evidences = search_evidence_for_symbol(
+    evidences = await asyncio.to_thread(
+        search_evidence_for_symbol,
         query=evidence_query,
         symbol=symbol,
         top_k=4,
