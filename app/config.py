@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     rag_hybrid_enabled: bool = Field(default=True, alias="RAG_HYBRID_ENABLED")
     rag_rrf_k: int = Field(default=60, alias="RAG_RRF_K")
     rag_lexical_candidate_limit: int = Field(default=40, alias="RAG_LEXICAL_CANDIDATE_LIMIT")
+    # Reranker는 opt-in. 코드 기본값은 False로 두고 환경별 .env에서만 켠다.
+    # 이유: cross-encoder(약 2.27GB)는 cold start/메모리/latency 비용이 크고,
+    # before/after 정량 개선(context_precision 등)이 검증된 뒤에 운영 전환할 것.
+    # 검증 방법: scripts/eval_reranker_ab.py (off/on A/B; --ragas/--judge로 품질 비교).
+    # 실측(006360, CPU): 4/4 재정렬·정성상 더 on-topic이나 steady +7.6~13.2s → 인라인 부적합.
+    # 켤 경우 GPU 또는 오프라인 배치 한정. 상세: memo/results/2026-06-13-eval-track6b-...md
     rag_reranker_enabled: bool = Field(default=False, alias="RAG_RERANKER_ENABLED")
     rag_reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3", alias="RAG_RERANKER_MODEL")
     rag_reranker_top_n: int = Field(default=8, alias="RAG_RERANKER_TOP_N")

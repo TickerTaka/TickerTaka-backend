@@ -236,3 +236,8 @@ lexical 후보는 종목별 상위 `limit`(기본 40)건 슬라이스라, **IDF�
 - **스모크 재실행 메모**: 사용자 환경의 OpenSSL/httpx 이슈로 full `validate_evidence_retrieval` 재실행은 막혔으나, 위 **핵심 로직(rank/score_type 메타, _replace_hit 필드 보존, reranker 캐시)을 모듈 직접 실행으로 검증**했고, 직전 스모크(hit_count=2, DART+NEWS)가 retrieval 경로 자체는 이미 입증.
 
 **재검증 판정**: G-1/G-2/G-3/G-6 **코드 + 런타임 정합 확인**. 신규 회귀 없음(세션 격리·gather 동시성 안전). 남은 G-4(BM25 후보 슬라이스)·G-5(telemetry 소음)는 저위험. → **#6 RAG hybrid = 1차 구현 + 핵심 런타임 보완 완료**로 닫힘 타당.
+
+### 운영 메모
+- reranker는 현재 **실행 성공과 출력 확인까지 완료**했고, `score_type='reranker'` 경로도 검증됐다.
+- 다만 `BAAI/bge-reranker-v2-m3`는 **약 2.27GB 모델**이라, 기본값을 `on`으로 둘 경우 새 환경/새 컨테이너에서 **초기 다운로드·로딩 지연**과 **메모리 사용량 증가**가 발생한다.
+- 즉 `default=true`의 리스크는 기능 오류가 아니라 **운영 비용(latency / memory / cold start)** 이다. 개발/시연 환경에서는 수용 가능하지만, 배포 기본값은 환경 여건에 따라 판단하는 것이 맞다.

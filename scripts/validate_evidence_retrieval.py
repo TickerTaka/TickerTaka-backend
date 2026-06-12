@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from uuid import uuid4
 
+from app.config import get_settings
 from app.core.db import SessionLocal
 from app.domain.evidence_indexing import EvidenceIndexingService
 from app.domain.evidence_retrieval import EvidenceRetrievalService
@@ -15,6 +16,7 @@ FILING_VALIDATE_COLLECTION = "filing_validate_retrieval"
 
 
 def main() -> None:
+    settings = get_settings()
     chroma = ChromaClient()
     chroma.delete_collection(NEWS_VALIDATE_COLLECTION)
     chroma.delete_collection(FILING_VALIDATE_COLLECTION)
@@ -88,7 +90,8 @@ def main() -> None:
         assert "DART" in source_types
         assert all(hit["score"] > 0 for hit in hits)
         assert all(hit["rank"] >= 1 for hit in hits)
-        assert all(hit["score_type"] == "rrf" for hit in hits)
+        expected_score_type = "reranker" if settings.rag_reranker_enabled else "rrf"
+        assert all(hit["score_type"] == expected_score_type for hit in hits)
         print(
             {
                 "symbol": symbol,
@@ -98,6 +101,7 @@ def main() -> None:
                 "ranks": [hit["rank"] for hit in hits],
                 "score_types": [hit["score_type"] for hit in hits],
                 "scores": [round(float(hit["score"]), 6) for hit in hits],
+                "reranker_enabled": settings.rag_reranker_enabled,
             }
         )
         session.rollback()
