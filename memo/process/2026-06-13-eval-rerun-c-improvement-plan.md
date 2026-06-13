@@ -31,6 +31,7 @@
 | RRF 공식 `1/(rrf_k+index)` | `evidence_retrieval.py:297` | ✅ 일치 |
 | reranker 연결·default off | `evidence_retrieval.py:306-335`, `config.py:45` `RAG_RERANKER_ENABLED=false` | ✅ 일치 |
 | vLLM/Ollama/MLX 0건 | grep 0건, Qwen은 transformers 직접로드 + 기본 비활성(`config.py:34` `analysis_generation_model=None`) | ✅ 일치 |
+| **감성분석에 Qwen sLLM 사용** | `evidence_analysis.py:253-362` `LocalQwenEvidenceAnalyzer`(`AutoModelForCausalLM`+`model.generate`), 워커 `analysis_worker.py`에서 호출, 게이팅(`:561-579`) | ✅ **확인** — 단 transformers 직접로드(서빙 아님)·기본 비활성 → 항목7=0 원인 |
 | interface 문서가 SSE stream을 "추후 예정"으로 격하 | `memo/design/interface-definition.md:219-221`(§6), 실제 구현 `app/api/debate.py:128` | ✅ 일치 |
 | MCP 단방향 클라이언트만 | `app/integrations/notion_mcp.py:45-164` stdio JSON-RPC 자체구현, Python `mcp` SDK 미사용 | ✅ 일치 |
 
@@ -44,8 +45,8 @@
 | 우선 | 항목(가중) | 현재→목표 | 가중점 Δ | 핵심 작업 | 난이도 |
 |---|---|---|---|---|---|
 | **P0-E** | (공통 enabler) | [S]→[D] | (1·8·10 잠금해제) | DB 기동 + 키 주입 + E2E 1회 + artifact 생성 | 中 |
-| **P0-1** | 항목3 (×2) | 2→4 | **+4** | langfuse 연결 + sLLM 본토론 1노드 | 中 |
-| **P0-2** | 항목7 (×1) | 0→3 | **+3** | Ollama/Qwen 로컬 서빙 (항목3과 동시) | 中 |
+| **P0-1** | 항목3 (×2) | 2→3(~4) | **+2~4** | 감성분석 Qwen sLLM에 langfuse trace (토론 Agent·langfuse는 미변경 — 강사 합의) | 中 |
+| **P0-2** | 항목7 (×1) | 0→3 | **+3** | 감성분석 Qwen을 vLLM 서빙으로 전환 (P0-1과 동일 경로) | 中 |
 | **P1-1** | 항목8 (×2) | 4→5 | **+2** | golden 1→10~20 + `reports/ragas-<sha>.json` 커밋 | 低 |
 | **P1-2** | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 | 低 |
 | **P1-3** | 항목1 (×2) | 4→5 | **+2** | 동적 멀티에이전트 trace([D]) — P0-E·P0-1로 충족 | 低(의존) |
@@ -79,76 +80,127 @@
 
 ---
 
-## P0-1. 항목3 — langfuse 연결 + sLLM 본토론 진입 (×2, +4)
+## P0-1. 항목3 — 감성분석 Qwen sLLM에 langfuse trace (×2)
 
-가장 큰 미수확 가중점. 두 개의 독립 결손(langfuse 0건 / sLLM이 평가경로 한정)을 함께 닫는다.
+> **강사 합의(2026-06-13)**: 토론 Agent를 sLLM으로 바꾸거나 토론 경로에 langfuse를 붙이지 **않는다.** 대신 **이미 존재하는 감성분석 sLLM(Qwen)에만 langfuse를 적용해 trace**한다. 따라서 직전 계획의 "3-B. sLLM 본토론 진입"은 **폐기**한다.
 
-### 3-A. langfuse tracing
-- `requirements.txt`에 핀 추가: `langfuse==<2.x 최신>` ([[feedback_requirements_pinning]] — 반드시 `==` 고정).
-- `app/config.py`에 env 추가: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`(self-host 시), `LANGFUSE_ENABLED`(default false로 안전).
-- 주입 지점은 **단일**: `app/core/llm_factory.py:38-44` `ChatOpenAI(...)` 생성부. `callbacks=[CallbackHandler(...)]`를 조건부로 추가하면 bull/bear/moderator **전 호출이 자동 trace 적재**된다(노드별 코드 수정 불필요).
+### 근거 (요건 충족 논리)
+항목3 = `sLLM(≤300B) + 검증 Agent + langfuse`. 세 조각 중:
+- **검증 Agent**: `moderator_check`(`moderator_node.py:111-162`)가 이미 실동작 — 변경 없음.
+- **sLLM(≤300B)**: 감성분석 Qwen(`LocalQwenEvidenceAnalyzer`)이 이미 sLLM. (+ RAGAS 평가의 gpt-oss-120b)
+- **langfuse**: 유일한 결손. → **Qwen 분석 호출을 trace하면 닫힌다.**
 
-```python
-# llm_factory.py (개념)
-callbacks = []
-if settings.langfuse_enabled and settings.langfuse_public_key:
-    from langfuse.langchain import CallbackHandler  # langfuse v3
-    callbacks.append(CallbackHandler())
-client = ChatOpenAI(model=model_id, temperature=temperature,
-                    api_key=..., max_retries=3, timeout=60, callbacks=callbacks)
-```
-- 주의: `bull_node.py:49`/`bear_node.py`는 `get_llm(..., cached=False)`로 받아 `create_react_agent`에 넣는다. ChatOpenAI에 callbacks가 박혀 있으면 ReAct 내부 호출도 trace된다. moderator는 `_call()`(`moderator_node.py:27-29`)이 `get_llm("moderator")`를 쓰므로 동일 적용.
-
-**닫힘**: langfuse UI에 1회 토론의 data→moderator_pre→bull→check→bear→...→summary span tree가 보인다(→ 항목1 [D]도 동시 충족).
-
-### 3-B. sLLM을 본 토론 경로로
-현재 `config.py:57-60` bull/bear/moderator/fallback 전부 `gpt-4o-mini`(OpenAI). sLLM(≤300B)을 **검증 또는 토론 노드 1개 이상**에 실연결한다.
-- 옵션 A(저위험): `bear_model`만 OpenRouter sLLM(예: `openai/gpt-oss-120b:free` 또는 `meta-llama/llama-3.3-70b-instruct`)으로 교체.
-- `llm_factory.py:38-44`가 OpenAI 키만 쓰므로, **role별 base_url/key 분기**를 추가해야 한다(모델 id에 `/`가 있으면 OpenRouter로 라우팅):
+### 작업
+- `requirements.txt`에 핀 추가: `langfuse==<최신>` (`==` 고정, [[feedback_requirements_pinning]]).
+- `app/config.py`에 env: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, `LANGFUSE_ENABLED`(default false).
+- **계측 지점**: Qwen은 langchain이 아니라 transformers `model.generate`(또는 P0-2의 vLLM HTTP)로 호출되므로 **langchain CallbackHandler가 아니라 langfuse SDK로 직접 계측**한다. `LocalQwenEvidenceAnalyzer.analyze`(`evidence_analysis.py:266`)를 감싼다:
 
 ```python
-is_openrouter = "/" in model_id  # e.g. "openai/gpt-oss-120b:free"
-client = ChatOpenAI(
-    model=model_id, temperature=temperature, max_retries=3, timeout=60,
-    api_key=settings.openrouter_api_key if is_openrouter else settings.openai_api_key,
-    base_url=settings.openrouter_base_url if is_openrouter else None,
-    callbacks=callbacks,
-)
-```
-- `config.py:27-28`의 `openai_api_key` required 가드(`llm_factory.py:27-28`)는 OpenRouter-only 구성도 통과하도록 완화 필요.
+# evidence_analysis.py — analyze() 계측 (개념)
+from langfuse import observe   # 또는 langfuse client로 trace/span 수동 생성
 
-**닫힘**: 1회 토론에서 bear 노드가 sLLM(≤300B) 응답을 생성하고 langfuse trace의 모델명이 OpenRouter sLLM으로 찍힌다. 항목3 코멘트의 "본 토론은 독점 프런티어" 사유 해소 → 2→4.
+@observe(name="qwen-evidence-analysis")
+def analyze(self, title, text, *, kind, max_new_tokens=768):
+    # langfuse_context.update_current_observation(
+    #     input={"title": title, "kind": kind, "chars": len(text)},
+    #     model=self.model_name)
+    ...
+    parsed = self._parse_json(raw)
+    # ...output=parsed (sentiment/impact_score/event_type), metadata={"gate": ...} 기록
+    return parsed
+```
+- vLLM(OpenAI 호환)으로 전환(P0-2)하면 **langfuse OpenAI drop-in**(`from langfuse.openai import openai`)으로 토큰/latency까지 자동 계측 가능 — P0-2와 함께 하면 더 깔끔.
+- `LANGFUSE_ENABLED=false`일 때 `@observe`가 no-op이 되도록(또는 import 가드) 해서 운영 부담 0.
+
+**닫힘**: langfuse UI에 공시/뉴스 1건의 **Qwen 분석 trace**(입력 제목·본문길이 → 구조화 JSON 출력 → 모델명·latency·게이트)가 보인다. **토론 경로는 변경 없음.** → 항목3 langfuse 결손 해소(2→3, Qwen sLLM이 인정되면 4).
 
 ---
 
-## P0-2. 항목7 — 로컬 서빙 신설 (×1, +3)
+## P0-2. 항목7 — 감성분석 Qwen을 vLLM 서빙으로 전환 (×1)
 
-리포트 권장: macOS이므로 Ollama. 항목3 sLLM 본경로와 **같이** 해결 가능(로컬 서빙 모델을 토론/분석 노드에 연결).
+### 현황 (코드 확인됨)
+감성분석 Qwen은 이미 구현돼 있다 — `LocalQwenEvidenceAnalyzer`(`evidence_analysis.py:253-362`):
+- 로드 `_get_model()`(`:293-305`): `transformers.AutoModelForCausalLM.from_pretrained` + device `mps`/`cpu`.
+- 추론 `analyze()`(`:266-291`): `model.generate(max_new_tokens=768, do_sample=False)` → 구조화 JSON.
+- 실행: 비동기 워커 `analysis_worker.py`에서 프로세스당 1회 로드.
 
-### 옵션 A — Ollama 서비스 (권장, 가장 빠른 0→3)
-- `docker-compose.yml`에 서비스 추가:
+**문제 2가지** → 항목7=0의 원인:
+1. **transformers 직접 로드 = 서빙 스택이 아님.** criterion이 요구하는 vLLM(또는 Ollama/MLX) 부재.
+2. **기본 비활성**: `config.py:34` `analysis_generation_model=None` → `qwen_available`(`:554-557`) False.
+
+### 목표
+이 Qwen 추론을 **vLLM이 서빙하는 OpenAI 호환 엔드포인트 호출**로 바꾼다. `analyze()`의 입력(프롬프트)·출력(JSON 파싱) 계약은 그대로 두므로, 다운스트림 게이팅/consistency 로직(`evidence_analysis.py:654-707`)은 **무수정**.
+
+### 구현 — vLLM OpenAI 호환 서버 (권장)
+
+**1) 서빙**: vLLM은 OpenAI 호환 API(`/v1/chat/completions`)를 제공한다.
+- 단독 실행(GPU 머신): `vllm serve Qwen/Qwen2.5-7B-Instruct --port 8001 --max-model-len 8192`
+- 또는 compose 서비스(GPU 노드):
 ```yaml
-  ollama:
-    image: ollama/ollama:latest
-    container_name: tickertaka-ollama
-    ports: ["11434:11434"]
-    volumes: [ollamadata:/root/.ollama]
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "Qwen/Qwen2.5-7B-Instruct", "--max-model-len", "8192"]
+    ports: ["8001:8000"]
+    volumes: [hfcache:/root/.cache/huggingface]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
 ```
-  + `volumes: ollamadata:` 추가, 최초 `docker exec tickertaka-ollama ollama pull qwen2.5:7b`.
-- `config.py`에 `OLLAMA_BASE_URL=http://ollama:11434/v1` env. Ollama는 OpenAI 호환 `/v1`을 제공하므로 `llm_factory.py`의 base_url 분기에 ollama 라우트만 추가하면 토론 노드가 그대로 사용.
 
-### 옵션 B — 기존 Qwen 분석 워커 서비스화
-- 이미 `app/workers/analysis_worker.py`, `app/domain/evidence_analysis.py`(Qwen 보강 로직, `FILING_QWEN_TITLE_KEYWORDS` 등)가 있으나 `config.py:33-34` `analysis_summary_provider="extractive"` / `analysis_generation_model=None`로 **생성 경로 비활성**.
-- `ANALYSIS_GENERATION_MODEL`을 Ollama/vLLM 서빙 모델로 지정 + 워커를 compose 서비스로 분리하면 "로컬 서빙으로 근거 분석 보강"이 실동작.
+**2) config 분기** (`app/config.py`):
+```python
+analysis_generation_backend: str = Field(default="transformers", alias="ANALYSIS_GENERATION_BACKEND")  # transformers | vllm
+vllm_base_url: str = Field(default="http://vllm:8000/v1", alias="VLLM_BASE_URL")
+# 활성화: ANALYSIS_GENERATION_MODEL=Qwen/Qwen2.5-7B-Instruct
+```
 
-**닫힘**: compose에 서빙 서비스가 있고, 최소 1개 경로(토론 노드 또는 분석 워커)가 로컬 서빙 모델 응답을 사용. (5점 미만이라도 0→3은 확보)
+**3) analyzer 분기** — `LocalQwenEvidenceAnalyzer`와 같은 `analyze(title, text, kind)` 인터페이스를 갖는 `VllmEvidenceAnalyzer`를 추가하고, vLLM이면 transformers 대신 HTTP 호출:
+```python
+class VllmEvidenceAnalyzer:
+    def __init__(self, model_name, base_url, api_key="EMPTY"):
+        from openai import OpenAI
+        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self.model_name = model_name
 
-> 항목3과 항목7은 **동일 base_url 분기 코드**로 만나므로 함께 진행하면 중복 작업이 없다.
+    def analyze(self, title, text, *, kind, max_new_tokens=768):
+        resp = self._client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "system", "content": "...JSON 한 개만 출력..."},
+                      {"role": "user", "content": LocalQwenEvidenceAnalyzer._build_prompt(title, text, kind)}],
+            temperature=0, max_tokens=max_new_tokens,
+            extra_body={"guided_json": _SCHEMA},   # vLLM 구조화 출력(선택)
+        )
+        return LocalQwenEvidenceAnalyzer._parse_json(resp.choices[0].message.content)
+```
+- `_build_prompt`/`_parse_json`은 **기존 것 재사용**(static로 빼면 공유 쉬움).
+- vLLM의 `guided_json`/`response_format`으로 JSON 강제하면 파싱 실패율↓.
+
+**4) 주입부 분기** — `EvidenceAnalysisService`(`evidence_analysis.py:545-546`)에서 backend에 따라 transformers/vLLM analyzer 선택:
+```python
+if self.analyzer is None and settings.analysis_generation_model:
+    if settings.analysis_generation_backend == "vllm":
+        self.analyzer = VllmEvidenceAnalyzer(settings.analysis_generation_model, settings.vllm_base_url)
+    else:
+        self.analyzer = LocalQwenEvidenceAnalyzer(settings.analysis_generation_model)
+```
+
+### ⚠️ 검증된 환경 제약 / 충돌 (2026-06-13 실측)
+- 개발 머신(Windows+WSL2)에 **NVIDIA GPU 없음**(`nvidia-smi` 미탐지, `torch.cuda.is_available()==False`). 설치된 torch는 `2.12.0+cu130`(CUDA 빌드지만 GPU가 없어 CPU로만 동작), `transformers==4.46.3`.
+- **`pip install vllm`를 앱 venv에 하면 충돌 거의 확실**: vLLM은 torch를 특정(대개 더 낮은) 버전으로 강하게 핀 → 현재 `torch 2.12.0`을 대규모 다운그레이드 강제 → 그 위의 `sentence-transformers`/`chromadb` 임베딩/`CrossEncoder` reranker가 재설치·회귀 위험. `transformers` 핀과도 충돌. 전체 `==` 핀 정책과 정면 충돌.
+- **결론: vLLM은 반드시 앱과 분리(별도 환경/컨테이너/GPU 머신)된 OpenAI 호환 서버로만 운용.** 앱엔 `openai` HTTP 클라이언트만 추가 → torch/transformers 무변경 → 충돌 0. (위 §구현이 정확히 이 구조)
+- 검증 절차(재현): `./venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`, 별도 venv에서 `pip install vllm` 시 resolver의 torch 다운그레이드 로그 확인.
+
+### macOS / 환경 주의 (criterion: "vLLM 사용 — GPU or 맥OS")
+vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 환경이 macOS면 현실적 경로:
+- **(권장) GPU 머신에서 vLLM serve** — NCP GPU 인스턴스/실습실/Colab에서 `vllm serve`만 띄우고, 백엔드는 `VLLM_BASE_URL`만 그쪽으로 연결. 코드는 위 분기 그대로.
+- **(데모) vLLM CPU 모드** — 느리지만 1건 시연 가능.
+- MLX/Ollama는 보조(criterion이 vLLM을 명시하므로 1차 타깃은 vLLM).
+- [[infra_stage_policy]]: 졸프=로컬/단발 GPU, 운영 진입 시 NCP GPU 상시 서빙으로.
+
+**닫힘**: vLLM 서버가 Qwen을 서빙하고, 감성분석 워커(`analysis_worker.py`)가 `VLLM_BASE_URL`로 구조화 분석을 받아 `evidence_analysis`에 저장됨을 1건 이상 실증. compose/실행 문서에 vLLM 서빙 스택이 명시 → 항목7 0→3+.
+
+> P0-1(langfuse)·P0-2(vLLM)는 **둘 다 Qwen `analyze()` 한 지점**에서 만난다. vLLM(OpenAI 호환)으로 바꾸면 langfuse OpenAI drop-in으로 trace까지 한 번에 붙는다 — 함께 진행 권장.
 
 ---
 
@@ -178,8 +230,8 @@ client = ChatOpenAI(
 
 ## P1-3 / P2-2. 항목1·10 — 동적 증적으로 [S]→[D] (각 +2 / +1)
 
-**별도 기능 개발 없음.** P0-E + P0-1로 생성되는 산출물을 리포트 근거로 제출:
-- 항목1(×2): langfuse span tree = 멀티에이전트 호출 trace([D]) → 4→5(+2).
+**별도 기능 개발 없음.** P0-E의 E2E 실행 산출물을 리포트 근거로 제출(토론엔 langfuse를 안 붙이므로 trace는 SSE 시퀀스+서버 로그로 대체):
+- 항목1(×2): `GET /{id}/stream` 1회 실행 로그 = data→moderator_pre→bull→check→bear→…→summary 노드가 **순차 statement 이벤트**로 흐르는 멀티에이전트 호출 trace([D]) → 4→5(+2).
 - 항목10(×1): `curl -N` SSE 청크 도착 타임스탬프 로그(노드별 점진 도착 증명) → 4→5(+1).
 - 산출물을 `memo/results/2026-06-1x-eval-dynamic-traces.md`로 정리.
 
@@ -219,7 +271,7 @@ client = ChatOpenAI(
 ## 4. 권장 실행 순서
 
 1. **P3-3**(문서 동기화, 5분) — 즉시 +1, 무위험.
-2. **P0-E + P0-1 + P0-2**(런타임 증적 + langfuse + sLLM + Ollama) — 한 묶음. base_url 분기 + callbacks 주입 + compose Ollama. 여기서 **항목 3(+4)·7(+3)·1(+2)·10(+1) = +10**이 한 번에 열린다.
+2. **P0-E + P0-1 + P0-2**(런타임 증적 + 감성분석 Qwen에 langfuse + Qwen vLLM 서빙) — 한 묶음. **토론 경로는 건드리지 않는다.** Qwen `analyze()`를 vLLM(OpenAI 호환)으로 바꾸고 langfuse로 그 호출을 trace. 항목 1·10은 P0-E의 토론 E2E 실행(SSE 시퀀스+로그)으로 별도 충족. 여기서 **항목 3(+2~4)·7(+3)·1(+2)·10(+1)**이 함께 열린다.
 3. **P1-1**(golden 확장 + artifact, +2) — 코드 적고 ROI 높음.
 4. **P1-2**(타임아웃, +2) — 작은 변경.
 5. 여유 시 **P2-1**(IR 지표) → **P3-1**(멀티스테이지) → **P3-2**(MCP SDK).
