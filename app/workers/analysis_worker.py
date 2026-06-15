@@ -14,6 +14,7 @@ import time
 
 from app.config import get_settings
 from app.core.db import session_scope
+from app.core.tracing import get_langfuse
 from app.domain.evidence_analysis import (
     SOURCE_TYPE_FILING,
     SOURCE_TYPE_NEWS,
@@ -67,26 +68,33 @@ def run_once() -> int:
     processed = 0
     scraper = ArticleScraper()
     dart = DartClient()
-    with session_scope() as session:
-        job_repo = AnalysisJobRepository(session)
-        service = EvidenceAnalysisService(session)
-        news_repo = NewsCacheRepository(session)
-        filing_repo = FilingCacheRepository(session)
-        jobs = job_repo.claim_batch(settings.analysis_worker_batch_size)
-        for job in jobs:
-            try:
-                _process_job(
-                    job, service=service, news_repo=news_repo, filing_repo=filing_repo,
-                    scraper=scraper, dart=dart,
-                )
-                job_repo.mark_done(job)
-                processed += 1
-            except Exception as exc:  # noqa: BLE001 - job 격리
-                logger.exception("analysis job %s failed", job.id)
-                job_repo.mark_failed(
-                    job, error=f"{type(exc).__name__}: {exc}",
-                    max_attempts=settings.analysis_worker_max_attempts,
-                )
+    try:
+        with session_scope() as session:
+            job_repo = AnalysisJobRepository(session)
+            service = EvidenceAnalysisService(session)
+            news_repo = NewsCacheRepository(session)
+            filing_repo = FilingCacheRepository(session)
+            jobs = job_repo.claim_batch(settings.analysis_worker_batch_size)
+            for job in jobs:
+                try:
+                    _process_job(
+                        job, service=service, news_repo=news_repo, filing_repo=filing_repo,
+                        scraper=scraper, dart=dart,
+                    )
+                    job_repo.mark_done(job)
+                    processed += 1
+                except Exception as exc:  # noqa: BLE001 - job 격리
+                    logger.exception("analysis job %s failed", job.id)
+                    job_repo.mark_failed(
+                        job, error=f"{type(exc).__name__}: {exc}",
+                        max_attempts=settings.analysis_worker_max_attempts,
+                    )
+    finally:
+        # 워커는 단발/배치 프로세스라 flush 안 하면 trace 유실. 처리분 있을 때만 전송.
+        if processed:
+            lf = get_langfuse()
+            if lf is not None:
+                lf.flush()
     return processed
 
 
@@ -108,6 +116,10 @@ def main() -> None:
             processed = 0
         if processed == 0:
             time.sleep(settings.analysis_worker_poll_interval)
+    # 종료 시 잔여 trace 전송
+    lf = get_langfuse()
+    if lf is not None:
+        lf.flush()
 
 
 if __name__ == "__main__":

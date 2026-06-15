@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     analysis_worker_max_attempts: int = Field(default=3, alias="ANALYSIS_WORKER_MAX_ATTEMPTS")
     # 뉴스 Qwen 게이팅: FinBERT 비-neutral 또는 |impact|>=임계일 때만 보강
     analysis_news_qwen_min_impact: int = Field(default=1, alias="ANALYSIS_NEWS_QWEN_MIN_IMPACT")
+    # Langfuse 트레이싱 (sLLM 분석 경로 관측). 키 2개 + 토글 모두 있어야 활성, 아니면 no-op.
+    langfuse_public_key: str | None = Field(default=None, alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str | None = Field(default=None, alias="LANGFUSE_SECRET_KEY")
+    langfuse_host: str = Field(default="https://cloud.langfuse.com", alias="LANGFUSE_BASE_URL")
+    langfuse_enabled: bool = Field(default=False, alias="LANGFUSE_TRACING_ENABLED")
     rag_hybrid_enabled: bool = Field(default=True, alias="RAG_HYBRID_ENABLED")
     rag_rrf_k: int = Field(default=60, alias="RAG_RRF_K")
     rag_lexical_candidate_limit: int = Field(default=40, alias="RAG_LEXICAL_CANDIDATE_LIMIT")

@@ -46,6 +46,8 @@
 - **A. 입력 트리밍**(`_trim_table_for_llm`): 공시 표에서 신호 행만 추려 LLM 입력 축소 → prefill 단축(속도) + 헤더 덤프 유혹 감소(품질).
 - **B. 출력 노이즈 필터**(`_filter_noise`): grounding을 통과해도 표 헤더/셀 덤프(`단위 :`, `|` 다수, 한글 없는 조각)는 근거가 아니므로 제거.
 - **C. 일관성 가드**(`_consistency_guard`): 감성과 근거 방향이 모순(부정인데 근거가 전부 "증가")이면 `mixed/0`으로 강등.
+- **D. 결정적 summary**(2026-06-15 추가): 표 공시 summary는 1.5B 비문/표덤프 위험이 커 모델 산문을 쓰지 않고 **검증된 key_points로 조립**(`summary_provider="structured"`). 뉴스(prose)는 generative 유지. → Langfuse trace 실측 진단으로 도출([langfuse-tracing-implementation.md §5](./langfuse-tracing-implementation.md)).
+- **E. summary 노이즈 검증 강화**(2026-06-15): `_validate_summary`의 `len>300` 게이트 제거 → 파이프 2개 이상이면 짧은 표덤프도 폴백 처리.
 
 ### 2.4 주요 변경 파일
 | 영역 | 파일 |
@@ -100,9 +102,25 @@ FinBERT만 쓸 때 neutral만 찍던 표 공시를 Qwen이 읽어 판정:
 
 ---
 
-## 6. 남은 과제
+## 6. 운영 후속 작업 (남은 TODO)
 
-- **모델 품질 천장**: 1.5B는 지저분한 표에 한계. 더 높이려면 3B/7B 상향 또는 증류 기반 LoRA 파인튜닝([증류 계획](../memo/plans/evidence-analysis-distillation-plan.md)).
+### 6.1 prod DB alembic 버전 라벨 정리 (선택, 위험 ≈ 0)
+- **상황**: alembic은 DB의 적용 위치를 `alembic_version` 라벨 하나로 기록한다.
+  - prod 라벨 = `c2d3e4f5a6b7`(notion 마이그레이션), repo head = `b1f2a3c4d5e6`(evidence_analysis) → "1개 뒤처짐"으로 보임.
+  - 그러나 **실제 스키마는 최신**(evidence_analysis의 event_type/evidence, analysis_jobs 이미 존재). 라벨만 한 칸 뒤.
+- **조치**: `alembic upgrade head`. 마이그레이션이 `CREATE TABLE IF NOT EXISTS`/`ADD COLUMN IF NOT EXISTS`라 **스키마 변화 없이 라벨만 `b1f2a3c4d5e6`로 전진**(멱등 no-op).
+- **안 해도**: 기능 정상. `alembic current`가 1개 밀려 보일 뿐.
+
+### 6.2 워커 영구화 (서비스화 필요)
+- **상황**: Qwen 보강 워커(`python -m app.workers.analysis_worker`)가 현재 수동 기동(개발 머신 백그라운드 프로세스). 재부팅/세션 종료 시 죽음.
+- **죽으면**: 신규 공시는 baseline(FinBERT)까지만 저장되고 `analysis_jobs`에 pending 누적 → 워커 재기동 전까지 Qwen 보강 안 됨.
+- **조치(배포 환경별)**:
+  - systemd: `ExecStart=.../python -m app.workers.analysis_worker` + `Restart=always` + 부팅 자동 시작
+  - docker-compose: 워커 서비스 1개 추가(앱 이미지 재사용, command만 교체)
+  - Procfile: `worker: python -m app.workers.analysis_worker`
+- **전제**: 실제 앱(API)이 도는 서버에서 동작해야 의미 있음(현 개발 머신은 DB가 원격이라 데모용).
+
+### 6.3 품질/검증 후속 (별도 트랙)
+- **모델 품질 천장**: 1.5B는 지저분한 표에 한계. 3B/7B 상향 또는 증류 기반 LoRA 파인튜닝([증류 계획](../memo/plans/evidence-analysis-distillation-plan.md)).
 - **속도**: 트리밍은 입력만 줄여 출력이 긴 건(~30s)엔 한계. `max_new_tokens` 하향/evidence 개수 제한으로 추가 단축 가능(품질 trade).
-- **워커 영구화**: 현재 수동 기동. systemd/docker/Procfile로 서비스화 필요.
 - **뉴스 경로 벤치**: FinBERT prose 정확도 + 게이팅된 Qwen 보강 품질 실데이터 검증 미실시.

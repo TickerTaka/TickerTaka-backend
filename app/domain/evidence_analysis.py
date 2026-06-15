@@ -264,31 +264,56 @@ class LocalQwenEvidenceAnalyzer:
         self.model_name = model_name
 
     def analyze(self, title: str, text: str, *, kind: str, max_new_tokens: int = 768) -> dict[str, Any] | None:
-        try:
-            import torch
+        from contextlib import nullcontext
 
-            tokenizer, model, device = self._get_model()
-            messages = [
-                {"role": "system", "content": "너는 사실 기반 한국 금융 공시/뉴스 분석기다. JSON 한 개만 출력한다."},
-                {"role": "user", "content": self._build_prompt(title, text, kind)},
-            ]
-            chat = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer([chat], return_tensors="pt").to(device)
-            with torch.no_grad():
-                generated = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                    temperature=None,
-                    top_p=None,
-                    top_k=None,
-                )
-            output_ids = generated[0][inputs.input_ids.shape[-1] :]
-            raw = tokenizer.decode(output_ids, skip_special_tokens=True)
-            return self._parse_json(raw)
-        except Exception as exc:
-            logger.info("local Qwen analysis unavailable: %s", exc)
-            return None
+        from app.core.tracing import get_langfuse
+
+        lf = get_langfuse()
+        prompt = self._build_prompt(title, text, kind)
+        gen_cm = (
+            lf.start_as_current_observation(
+                name="qwen-evidence", as_type="generation", model=self.model_name,
+                input=prompt, metadata={"kind": kind, "input_chars": len(text)},
+            )
+            if lf is not None
+            else nullcontext()
+        )
+        with gen_cm as gen:
+            try:
+                import torch
+
+                tokenizer, model, device = self._get_model()
+                messages = [
+                    {"role": "system", "content": "너는 사실 기반 한국 금융 공시/뉴스 분석기다. JSON 한 개만 출력한다."},
+                    {"role": "user", "content": prompt},
+                ]
+                chat = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = tokenizer([chat], return_tensors="pt").to(device)
+                with torch.no_grad():
+                    generated = model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=False,
+                        temperature=None,
+                        top_p=None,
+                        top_k=None,
+                    )
+                output_ids = generated[0][inputs.input_ids.shape[-1] :]
+                raw = tokenizer.decode(output_ids, skip_special_tokens=True)
+                parsed = self._parse_json(raw)
+                if gen is not None:
+                    new_tokens = int(output_ids.shape[-1])
+                    gen.update(
+                        output=raw,
+                        usage_details={"input": int(inputs.input_ids.shape[-1]), "output": new_tokens},
+                        metadata={"parsed_ok": parsed is not None, "truncated": new_tokens >= max_new_tokens},
+                    )
+                return parsed
+            except Exception as exc:
+                if gen is not None:
+                    gen.update(level="ERROR", status_message=str(exc))
+                logger.info("local Qwen analysis unavailable: %s", exc)
+                return None
 
     def _get_model(self) -> Any:
         if self.model_name not in self._models:
@@ -631,6 +656,59 @@ class EvidenceAnalysisService:
         persist: bool = True,
         use_qwen: bool = False,
     ) -> EvidenceAnalysisResult:
+        """공시/뉴스 1건 분석. Langfuse 활성 시 'evidence-enrich' trace 로 감싼다.
+
+        하위 Qwen generation span 이 이 부모 span 아래 자동으로 중첩된다.
+        """
+        from contextlib import nullcontext
+
+        from app.core.tracing import get_langfuse
+
+        lf = get_langfuse()
+        parent_cm = (
+            lf.start_as_current_observation(
+                name="evidence-enrich", as_type="span",
+                input={"source_type": source_type, "symbol": symbol, "title": title},
+            )
+            if lf is not None
+            else nullcontext()
+        )
+        with parent_cm as parent:
+            result = self._analyze_text_impl(
+                source_type=source_type, symbol=symbol, title=title, text=text,
+                source_id=source_id, persist=persist, use_qwen=use_qwen,
+            )
+            if parent is not None:
+                raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+                gen = raw.get("generative") if isinstance(raw.get("generative"), dict) else {}
+                parent.update(
+                    output={"sentiment": result.sentiment, "impact_score": result.impact_score,
+                            "event_type": result.event_type, "status": raw.get("status")},
+                    metadata={
+                        "qwen_status": gen.get("status"),
+                        "gate_passed": gen.get("status") in ("pass", "fallback"),
+                        "consistency": gen.get("consistency"),
+                        "key_points_dropped": gen.get("key_points_dropped"),
+                        "failure_reason": raw.get("failure_reason"),
+                        "qwen": gen,
+                    },
+                )
+                survival = gen.get("grounding_survival")
+                if survival is not None:
+                    lf.score_current_trace(name="grounding_survival", value=float(survival))
+        return result
+
+    def _analyze_text_impl(
+        self,
+        *,
+        source_type: str,
+        symbol: str,
+        title: str,
+        text: str,
+        source_id: str | UUID,
+        persist: bool = True,
+        use_qwen: bool = False,
+    ) -> EvidenceAnalysisResult:
         cleaned_text = self.summary_builder.clean_text(text or title)
         analysis_text = f"{title}\n{cleaned_text}".strip()[: self.settings.analysis_max_chars]
         if not analysis_text:
@@ -670,14 +748,19 @@ class EvidenceAnalysisService:
                 cand_keys = _filter_noise(_grounded_list(original, parsed.get("key_points")))
                 cand_risks = _filter_noise(_grounded_list(original, parsed.get("risks")))
                 cand_evidence = _filter_noise(_grounded_list(original, parsed.get("evidence")))
-                if cand_summary:
-                    summary = f"{title} {cand_summary}".strip()[:800]
-                    summary_provider = "generative"
                 if cand_keys:
                     key_points = cand_keys
                 if cand_risks:
                     risks = cand_risks
                 evidence = cand_evidence
+                # 층1-A: 표 공시 summary 는 1.5B 비문/표덤프 위험이 커서 모델 산문을 쓰지 않고
+                # 검증된 key_points 로 결정적 조립한다. 뉴스(prose)는 기존 generative 경로 유지.
+                if source_type == SOURCE_TYPE_FILING and key_points:
+                    summary = f"{title} — {' · '.join(key_points)}".strip()[:800]
+                    summary_provider = "structured"
+                elif cand_summary:
+                    summary = f"{title} {cand_summary}".strip()[:800]
+                    summary_provider = "generative"
                 consistency: str | None = None
                 if source_type == SOURCE_TYPE_FILING:
                     qwen_sentiment = str(parsed.get("sentiment", "")).strip()
@@ -701,6 +784,9 @@ class EvidenceAnalysisService:
                     "summary_grounded": bool(cand_summary),
                     "consistency": consistency,
                     "llm_input_chars": len(llm_input),
+                    # 진단용: grounding+noise 필터로 깎인 key_points 수 / 생존율
+                    "key_points_dropped": len(parsed.get("key_points") or []) - len(cand_keys),
+                    "grounding_survival": len(cand_keys) / max(len(parsed.get("key_points") or []), 1),
                 }
             else:
                 qwen_raw = {"status": "fallback", "failure_reason": "qwen_no_output"}
@@ -796,8 +882,11 @@ def _validate_summary(*, summary: str, title: str) -> None:
     normalized_summary = re.sub(r"\s+", " ", summary).strip()
     normalized_title = re.sub(r"\s+", " ", title).strip()
 
-    pipe_density = normalized_summary.count("|") / max(len(normalized_summary), 1) * 100
-    if len(normalized_summary) > 300 and pipe_density > 3.0:
+    pipe_count = normalized_summary.count("|")
+    pipe_density = pipe_count / max(len(normalized_summary), 1) * 100
+    # 표 헤더/셀 덤프: 파이프 2개 이상이면 짧은 덤프, 밀도가 높으면 긴 덤프 → 모두 노이즈.
+    # (기존엔 len>300 게이트 때문에 짧은 표덤프 summary 가 빠져나갔다.)
+    if pipe_count >= 2 or pipe_density > 3.0:
         raise HarnessValidationError("err_table_header_noise")
     if not normalized_summary or normalized_summary == normalized_title:
         raise HarnessValidationError("err_empty_summary")
