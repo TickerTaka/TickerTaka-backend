@@ -90,6 +90,30 @@ services:
       retries: 5
       start_period: 20s
 
+  # Qwen(sLLM) 비동기 보강 워커. app 이미지를 그대로 재사용하고 command 만 교체한다.
+  # analysis_jobs 큐를 폴링해 Qwen 구조화 분석 + 하네스 + Langfuse trace 를 수행한다.
+  # 이 서비스가 없으면 watchlist 추가 시 baseline(FinBERT)까지만 저장되고 보강은 안 된다.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tickertaka-worker
+    restart: unless-stopped
+    command: python -m app.workers.analysis_worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_URL: http://chroma:8000
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - hfcache:/root/.cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+
 volumes:
   pgdata:
   chromadata:
