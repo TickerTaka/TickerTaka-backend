@@ -389,6 +389,75 @@ class LocalQwenEvidenceAnalyzer:
         return parsed if isinstance(parsed, dict) else None
 
 
+class RemoteQwenEvidenceAnalyzer:
+    """OpenAI 호환 원격 서빙(Ollama/vLLM) 기반 Qwen 구조화 분석기.
+
+    `LocalQwenEvidenceAnalyzer` 와 동일한 `analyze()` 시그니처/출력 계약을 가져
+    `EvidenceAnalysisService` 에 그대로 꽂힌다. 프롬프트(`_build_prompt`)와
+    파서(`_parse_json`)는 재사용하고, 추론만 인-프로세스 `model.generate()` →
+    OpenAI 호환 HTTP 호출로 바뀐다. `base_url` 만 바꾸면 Ollama
+    (`http://localhost:11434/v1`)·vLLM 양쪽을 동일 코드로 쓴다.
+
+    langfuse 가 설치/활성돼 있으면 `langfuse.openai` 드롭인이 이 호출을
+    자동으로 generation span 으로 적재한다(부모 evidence-enrich span 하위).
+    미설치/비활성이면 표준 openai 클라이언트로 폴백해 트레이싱만 빠진다.
+    """
+
+    _SYSTEM = "너는 사실 기반 한국 금융 공시/뉴스 분석기다. JSON 한 개만 출력한다."
+
+    def __init__(self, model_name: str, *, base_url: str, api_key: str = "EMPTY") -> None:
+        self.model_name = model_name
+        self.base_url = base_url
+        self.api_key = api_key or "EMPTY"
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            from app.core.tracing import get_langfuse
+
+            OpenAI = None
+            # langfuse 트레이싱이 실제 활성(키+토글)일 때만 드롭인을 쓴다. 그래야 이 호출이
+            # 자동 generation trace 로 적재됨(설계 §8). 비활성이면 표준 openai 로 가서
+            # langfuse 의 "client disabled" 경고를 피한다(게이트 일관성).
+            if get_langfuse() is not None:
+                try:
+                    from langfuse.openai import OpenAI  # type: ignore[no-redef]
+                except Exception:
+                    OpenAI = None
+            if OpenAI is None:
+                from openai import OpenAI  # type: ignore[no-redef]
+            self._client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+        return self._client
+
+    def analyze(self, title: str, text: str, *, kind: str, max_new_tokens: int = 768) -> dict[str, Any] | None:
+        prompt = LocalQwenEvidenceAnalyzer._build_prompt(title, text, kind)
+        messages = [
+            {"role": "system", "content": self._SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        # JSON 강제(response_format)는 최신 Ollama/vLLM 만 지원 → 거부 시 1회 무옵션 재시도.
+        # 파서(_parse_json)가 코드펜스/절단을 복구하므로 무옵션이어도 결과 계약은 유지된다.
+        for use_json_mode in (True, False):
+            kwargs: dict[str, Any] = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": max_new_tokens,
+            }
+            if use_json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            try:
+                resp = self._get_client().chat.completions.create(**kwargs)
+                return LocalQwenEvidenceAnalyzer._parse_json(resp.choices[0].message.content or "")
+            except Exception as exc:
+                if use_json_mode:
+                    logger.info("remote Qwen json_object mode failed, retrying without it: %s", exc)
+                    continue
+                logger.info("remote Qwen analysis unavailable: %s", exc)
+                return None
+        return None
+
+
 class ExtractiveSummaryBuilder:
     def build(self, *, title: str, text: str) -> tuple[str, list[str], list[str]]:
         sentences = self.meaningful_sentences(text)
@@ -560,7 +629,7 @@ class EvidenceAnalysisService:
         *,
         repository: EvidenceAnalysisRepository | None = None,
         sentiment_analyzer: LocalHFSentimentAnalyzer | None = None,
-        analyzer: LocalQwenEvidenceAnalyzer | None = None,
+        analyzer: LocalQwenEvidenceAnalyzer | RemoteQwenEvidenceAnalyzer | None = None,
     ) -> None:
         self.settings = get_settings()
         self.session = session
@@ -568,7 +637,14 @@ class EvidenceAnalysisService:
         self.sentiment_analyzer = sentiment_analyzer or LocalHFSentimentAnalyzer(self.settings.analysis_model)
         self.analyzer = analyzer
         if self.analyzer is None and self.settings.analysis_generation_model:
-            self.analyzer = LocalQwenEvidenceAnalyzer(self.settings.analysis_generation_model)
+            if self.settings.analysis_generation_backend == "remote" and self.settings.analysis_generation_base_url:
+                self.analyzer = RemoteQwenEvidenceAnalyzer(
+                    self.settings.analysis_generation_model,
+                    base_url=self.settings.analysis_generation_base_url,
+                    api_key=self.settings.analysis_generation_api_key,
+                )
+            else:
+                self.analyzer = LocalQwenEvidenceAnalyzer(self.settings.analysis_generation_model)
         self.summary_builder = ExtractiveSummaryBuilder()
         self.rule_engine = InvestmentImpactRuleEngine()
 

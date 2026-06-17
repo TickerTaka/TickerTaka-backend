@@ -129,16 +129,18 @@ if self.analyzer is None and self.settings.analysis_generation_model:
 ```
 - `qwen_available`(`:554-557`) 조건은 그대로(model 설정 시 True).
 
-### Stage 4 — langfuse trace (항목3)
-`analyze()` 호출을 langfuse로 계측. transformers/remote 공통이 되도록 `_analyze`(`:654-707`)의 analyzer 호출 지점을 감싸거나, remote면 **langfuse OpenAI drop-in** 사용:
-```python
-# requirements.txt: langfuse==<핀>
-# .env: LANGFUSE_PUBLIC_KEY / SECRET_KEY / HOST / LANGFUSE_ENABLED=true
-# 방법A(공통): analyze 호출부를 @observe(name="qwen-evidence-analysis")로 감싸 입력(title/kind/len)·출력(sentiment/impact/event_type)·model·latency 기록
-# 방법B(remote 전용): from langfuse.openai import openai  → RemoteQwenEvidenceAnalyzer의 OpenAI 클라이언트가 자동 trace(토큰/latency 포함)
-```
-- `LANGFUSE_ENABLED=false`면 no-op(운영 부담 0).
-- **닫힘**: langfuse UI에 공시/뉴스 1건의 Qwen 분석 trace가 보임 → 항목3 langfuse 결손 해소.
+### Stage 4 — langfuse trace (항목3) — ✅ 팀원이 transformers 경로에 완료(merge `098d898`)
+**이미 구현·실 trace 검증 끝남(2026-06-15, 공시 454910).** 이 단계는 "신규 구현"이 아니라 "remote 전환 시 계측 유지"로 성격이 바뀜.
+- 게이트 클라이언트: `app/core/tracing.py` `get_langfuse()` — 키 2개 + `LANGFUSE_TRACING_ENABLED` 모두 있어야 활성, 아니면 `None`(no-op). config 필드 `app/config.py:42-46`.
+- 계측 지점: `LocalQwenEvidenceAnalyzer.analyze()`(`evidence_analysis.py:266-316`)가 `lf.start_as_current_observation(as_type="generation")`로 generation span을 만들고, **`model.generate`의 토큰수/truncated/raw 출력**을 기록. 부모 span은 `analyze_text`(grounding_survival score 등). 워커 종료 시 `analysis_worker.py:119-120`에서 `lf.flush()`.
+- 설치본 **langfuse 4.7.1**(v4 통합 API). requirements는 현재 `langfuse>=3.0.0`.
+
+**⚠️ remote 전환 시 정합성(필수):** 위 generation span은 `model.generate`·`inputs.input_ids.shape` 등 **transformers 전용 객체에 의존**한다. Stage 2의 `RemoteQwenEvidenceAnalyzer`로 바꾸면 그 계측이 그대로 안 맞으므로 둘 중 하나:
+  - **방법B(권장, 구현문서 §4 예고와 일치)**: `from langfuse.openai import openai` 드롭인 → OpenAI 호환 호출(Ollama/vLLM 공통)이 토큰/latency 자동 trace. transformers 경로의 수동 span 코드는 remote 분기에서 안 탐.
+  - **방법A**: `RemoteQwenEvidenceAnalyzer.analyze()`에도 `start_as_current_observation(as_type="generation")`를 동일하게 넣되 usage_details를 `resp.usage`에서 채움.
+- `LANGFUSE_TRACING_ENABLED=false`면 no-op(운영 부담 0).
+- **코드 기준 충족 / 증적 체인은 미반영(주의)**: langfuse 계측 자체는 들어갔고 실 trace도 확인됐다(공시 454910). 단 **평가/보고 문서 체인은 아직 "langfuse 미구현"으로 남아 있다** — `memo/eval/BDAI_Pocat_Team2-3ad1682.md:20`(`rg langfuse → 0건`, 항목3 부분점수). 따라서 "항목3 결손 해소"라고 닫으려면 **재평가 리포트/결과 보고서에도 같이 반영**해야 증적 체인이 안 깨진다(별도 작업). 이 plan 단독으로 항목3을 "닫힘" 처리하지 말 것.
+- remote 전환 후에는 동일 trace가 OpenAI 호출 기준으로 다시 보이는지 재확인.
 
 ### Stage 5 — (선택) docker-compose Ollama 서비스
 운영/로컬 통합 시연용. 단 졸프 시연이 Colab/로컬 `ollama serve`로 충분하면 생략 가능.
@@ -179,25 +181,39 @@ ANALYSIS_GENERATION_BACKEND=remote          # transformers | remote
 ANALYSIS_GENERATION_BASE_URL=http://localhost:11434/v1   # Ollama. vLLM/ngrok면 그 URL
 ANALYSIS_GENERATION_MODEL=qwen2.5:3b         # vLLM이면 Qwen/Qwen2.5-3B-Instruct
 ANALYSIS_GENERATION_API_KEY=EMPTY
-LANGFUSE_ENABLED=true
+LANGFUSE_TRACING_ENABLED=True               # ← 코드가 읽는 실제 alias (app/config.py:46)
 LANGFUSE_PUBLIC_KEY=...
 LANGFUSE_SECRET_KEY=...
-LANGFUSE_HOST=...
+LANGFUSE_BASE_URL=...                        # ← LANGFUSE_HOST 아님 (app/config.py:45)
 ```
+> ⚠️ env 이름 주의: 코드는 `LANGFUSE_TRACING_ENABLED`/`LANGFUSE_BASE_URL`만 읽는다(`app/config.py:43-46`, `app/core/tracing.py:24`). `LANGFUSE_ENABLED`/`LANGFUSE_HOST`로 적으면 무시돼 trace가 안 켜진다.
 
 ## 6. 닫힘 기준
-- [ ] Ollama가 Qwen2.5-3B를 `/v1`로 서빙, 추론 1건 성공
-- [ ] `ANALYSIS_GENERATION_BACKEND=remote`로 워커가 Ollama 호출 → `evidence_analysis` 저장
+
+### 코드 구현 완료 (2026-06-18, uc 브랜치 / 그램 16GB·i7-1195G7 CPU 전제 → 기본 `qwen2.5:3b`)
+- [x] config: `ANALYSIS_GENERATION_BACKEND`(transformers|remote)/`_BASE_URL`/`_API_KEY` 추가 (`app/config.py:35-40`)
+- [x] `RemoteQwenEvidenceAnalyzer` 추가 — Local과 동일 시그니처, `_build_prompt`/`_parse_json` 재사용, `langfuse.openai` 드롭인(미설치 시 표준 openai 폴백), `response_format` 거부 시 무옵션 1회 재시도 (`app/domain/evidence_analysis.py:392~`)
+- [x] 주입 분기: `backend=="remote" and base_url` → Remote, 아니면 Local(기본 동작 무변)
+- [x] requirements: `langfuse==4.7.1` 핀(>= 위반 정정), `openai==1.109.1` 명시 핀
+- [x] `.env.example`에 BACKEND/_BASE_URL/_API_KEY + 사용법 주석
+- [x] 문법 검증(py_compile) 통과 / 기본 transformers 경로 무회귀(테스트는 model 미설정 또는 transformers 분기로 동일)
+
+### 런타임/외부 작업 (사용자 환경에서 수행 필요)
+- [ ] 그램에 Ollama 설치 → `ollama serve` + `ollama pull qwen2.5:3b`
+- [ ] `.env`: `ANALYSIS_GENERATION_BACKEND=remote` + `ANALYSIS_GENERATION_BASE_URL=http://localhost:11434/v1` + `ANALYSIS_GENERATION_MODEL=qwen2.5:3b`
+- [ ] `pip install -r requirements.txt` (langfuse 4.7.1 등 동기화 — 현재 venv는 out-of-sync)
+- [ ] 워커 기동 → 게이트 통과 공시 1건 → `evidence_analysis` 저장 확인
 - [ ] watchlist feed에 감성 필드 노출(프론트 확인)
-- [ ] langfuse에 Qwen 분석 trace 1건
-- [ ] `docs:553` 정정 + `.env.example` 갱신
+- [ ] langfuse에 Qwen 분석 trace 1건(remote는 `langfuse.openai` 자동계측)
+- [ ] `docs:553` 정정
 - [ ] (확인) 강사에게 Ollama 인정 여부 1줄 컨펌
+- [ ] **모델 크기 결정**: 서빙 후 langfuse `consistency=conflict` 비율 확인 → 1.5B로 충분/3B 유지/7B 상향 판단(팀원 design §0·§7 규율)
 
 ## 7. 리스크 / 트레이드오프
 - **품질**: Ollama는 GGUF 양자화(q4 등) → fp16 대비 미세한 품질 저하. 금융 수치 grounding은 프롬프트(본문 외 숫자 금지)+`_parse_json`+기존 consistency guard로 방어. 필요 시 `qwen2.5:7b`로 상향.
 - **모델명 규약**: Ollama=`qwen2.5:3b`, vLLM/HF=`Qwen/Qwen2.5-3B-Instruct` — backend별로 `ANALYSIS_GENERATION_MODEL`만 다르게.
 - **세션 휘발성**: Colab/ngrok 서빙은 세션마다 URL 변동 → `BASE_URL` 갱신 필요. 상시성은 NCP GPU.
-- **response_format 미지원 서버**: 일부 버전은 `json_object` 미지원 → 제거하고 salvage 파싱에 의존.
+- **response_format 미지원 서버**: 일부 버전은 `json_object` 미지원 → **구현됨**: 거부 시 옵션 없이 1회 재시도하고 `_parse_json`(코드펜스/절단 복구)에 의존.
 
 ## 8. 관련 문서
 - 상위 계획: [2026-06-13-eval-rerun-c-improvement-plan.md](/home/syt07203/TickerTaka-backend/memo/process/2026-06-13-eval-rerun-c-improvement-plan.md:1) (P0-1/P0-2)

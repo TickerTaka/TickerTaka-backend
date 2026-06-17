@@ -15,7 +15,7 @@
 |---|------|:---:|:---:|:---:|:---:|------|------|
 | 1 | Multi-Agent 구조 | 4 | ×2 | 8 | [S] | `debate_graph.py:51-66` StateGraph 6노드, `:22-47` `_router` 조건부 라우팅, `moderator_check`→`moderator_summary` 단일 수렴, `bull/bear_node` create_react_agent | moderator 3노드=Supervisor, bull/bear=Worker, 모든 sub 출력이 moderator_check 경유 후 summary 단독 생성. 동적 trace([D]) 부재로 상향 보류 |
 | 2 | 에러핸들링·폴백 | 4 | ×2 | 8 | [S] | 5노드 각 try/except+폴백(`bull_node:59-61`,`bear_node:58-60`,`data_node:48-50/165-167` 이중폴백,`moderator_node:94-96/186-189`), `embedding.py:78`·`dart/client.py:657` tenacity, `llm_factory.py:43` max_retries=3+timeout, `debate_runtime_guard.py:77-81` Redis fail-open, `except: pass` 0건 | 직전 SPOF(moderator)·tenacity 미적용 지적 대부분 해소. 잔여: 그래프 전체 타임아웃(`asyncio.wait_for`) 부재 |
-| 3 | sLLM+검증+langfuse | 2 | ×2 | 4 | [S] | `debate_evaluation.py:21` `_EVAL_MODEL="openai/gpt-oss-120b:free"` + `:52-63` OpenRouter base_url, `llm_factory.py:38-44` 본토론은 ChatOpenAI(gpt-4o-mini), `config.py:34` `analysis_generation_model=None`(Qwen 비활성), langfuse grep 0건(deps·코드 전무) | 검증에이전트(moderator_check) 실동작 충족. sLLM은 RAGAS 사후평가 1경로(gpt-oss-120b≤300B)만 — 본 토론은 독점 프런티어. **langfuse 완전 미구현이 ×2 항목의 상향 차단** |
+| 3 | sLLM+검증+langfuse | 2 | ×2 | 4 | [S] | `debate_evaluation.py:21` `_EVAL_MODEL="openai/gpt-oss-120b:free"` + `:52-63` OpenRouter base_url, `llm_factory.py:38-44` 본토론은 ChatOpenAI(gpt-4o-mini), `config.py:34` `analysis_generation_model=None`(Qwen 비활성), langfuse grep 0건(deps·코드 전무) | 검증에이전트(moderator_check) 실동작 충족. sLLM은 RAGAS 사후평가 1경로(gpt-oss-120b≤300B)만 — 본 토론은 독점 프런티어. **langfuse 완전 미구현이 ×2 항목의 상향 차단** ⚠️ **a134b5b 시점 기준. 후속 커밋서 langfuse 구현됨 → [갱신 §](#갱신-2026-06-16--항목3-langfuse-후속-구현-반영) 참조** |
 | 4 | 5대 설계문서 | 4 | ×1 | 4 | [S] | `memo/design/{use-case-specification,component-design,interface-definition,sequence-diagram,erd}.md` 5종 실존, `erd.md:58-266` erDiagram 18엔티티↔`app/models/` 일치, `sequence-diagram.md`↔`debate_graph.py:60-66` 노드체인 일치 | 직전 전부 부재(캡 1)→이번 5종 완비·코드 일치 우수. 불일치(경미): interface-definition.md에 구현완료 `POST /api/debates/sessions`·`GET /.../stream` 2개 미기재(코드우선, 문서가 코드보다 뒤처짐) |
 | 5 | Dockerise | 4 | ×1 | 4 | [D] | `Dockerfile`(python:3.12-slim, CMD uvicorn), `docker build`→exit 0, `docker compose up -d redis chroma app`→app `healthy`, `docker exec ... curl /health`→`{"status":"ok"}`, compose `:81-91` depends_on(service_healthy)+healthcheck | 직전 Dockerfile 부재(미빌드)→이번 빌드·기동·헬스체크 동적 성공. 5점 미달: 단일스테이지(이미지 10GB), postgres가 profile 뒤 |
 | 6 | MCP / A2A | 3 | ×1 | 3 | [S] | `notion_mcp.py:15-16` MCP 프로토콜 상수, `:45-164` `_StdioJsonRpcClient` initialize→tools/call 핸드셰이크 실구현, `debate.py:265-331` publish API, memo E2E 성공기록. A2A 0건 | 직전 0(선언조차 없음)→이번 실제 MCP stdio 클라이언트. 3점 한계: 단방향 클라이언트만(서버측 tool 노출·tools/list·Python mcp SDK 미사용) |
@@ -25,6 +25,42 @@
 | 10 | 스트리밍·비동기 | 4 | ×1 | 4 | [S]+[D부분] | `debate.py:8` `from sse_starlette import EventSourceResponse`, `:128-262` `GET /{id}/stream`, `debate_service.py:71-143` async gen이 `.astream()` 노드별 즉시 yield(일괄반환 아님), `data_node.py:26-32` `asyncio.gather` 5fetch 병렬 | 직전 가짜/미구현→이번 진짜 노드단위 점진 스트리밍+fetch 병렬화. 5점 미달: 토큰단위 스트리밍 미구현, bull/bear 노드 자체는 직렬, SSE 청크타이밍 동적프로빙은 DB 미기동으로 미수행 |
 
 **합계: (4+4+2+4)×2 + (4+4+3+0+4+4)×1 = 28 + 19 = 47 / 70 = 67.1% → C**
+
+> ⚠️ 위 점수표·합계는 **`a134b5b` 시점 스냅샷이며 변경하지 않는다.** 그 시점엔 langfuse가 실제로 부재했다. 항목3 langfuse는 그 **이후** 커밋에서 구현됐고, 아래 갱신 블록에 별도로 기록한다(증적 체인 보존: 원본 채점은 그대로 두고 후속 변경분만 추가).
+
+---
+
+## 갱신 (2026-06-16) — 항목3 langfuse 후속 구현 반영
+
+> 본 갱신은 `a134b5b` 채점 **이후** 머지된 변경분을 기록한다. 위 스코어카드(47/70)는 a134b5b 기준으로 보존하며, 아래는 **현재 코드(merge `098d898`) 기준으로 항목3을 재채점할 때 적용될 사실·예상**이다. 정식 점수 확정은 신규 SHA로 평가 Agent를 재실행해야 한다.
+
+### 무엇이 바뀌었나 (a134b5b → 현재)
+
+a134b5b에서 항목3을 2점에 묶은 두 차단 요인 중 **"langfuse 완전 미구현"이 해소**됐다. 후속 커밋(`d497ad7` feat(obs): Langfuse 인프라, `e500344` feat(analysis): Qwen 트레이싱 계측, merge `098d898`, 2026-06-15)로 langfuse가 **감성분석 Qwen(sLLM) 경로**에 실제 계측·검증됐다.
+
+| 증거 | file:line | 내용 |
+|---|---|---|
+| 게이트 클라이언트 | `app/core/tracing.py:23-35` | 키2+`LANGFUSE_TRACING_ENABLED` 모두 있어야 활성, 아니면 `None`(no-op). 운영 영향 0 |
+| config 필드 | `app/config.py:42-46` | `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`/`LANGFUSE_BASE_URL`/`LANGFUSE_TRACING_ENABLED` |
+| generation span | `app/domain/evidence_analysis.py:266-316` | `analyze()`가 `start_as_current_observation(as_type="generation")`로 Qwen `model.generate`의 raw/토큰수/truncated 기록 |
+| 부모 span + score | `app/domain/evidence_analysis.py:659~` | `evidence-enrich` 부모 span + `grounding_survival` score |
+| 워커 flush | `app/workers/analysis_worker.py:93,119-120` | 단발/배치 프로세스라 종료 시 `lf.flush()`로 trace 전송 |
+| 실 trace 검증 | `docs/langfuse-tracing-implementation.md:195` | 공시 454910 1건 end-to-end UI 확인. 토글 off 회귀 없음(test 14 passed) |
+| 패키지 | `requirements.txt:49` | 설치본 langfuse **4.7.1** (단 명세가 `langfuse>=3.0.0` — 핀 규칙상 `==4.7.1`로 고정 권장) |
+
+### a134b5b 리포트와의 범위 차이 (중요)
+
+a134b5b 리포트의 보완 #1은 langfuse를 **본 토론 경로(bull/bear/moderator)에 `LangfuseCallbackHandler`로 주입**하고 sLLM도 토론 경로에 끌어내라고 권고했다. 그러나 **강사 합의로 범위가 바뀌었다**(2026-06-13): 토론 경로는 손대지 않고, **이미 존재하는 감성분석 sLLM(Qwen) 한 경로에서 항목3을 충족**한다. 따라서 실제 구현은 보완 #1의 "토론 경로 langfuse"가 아니라 **"Qwen 분석 경로 langfuse"**다 — 경로는 다르나 *"langfuse 부재"라는 차단 요인 자체*는 해소된다.
+
+### 재채점 시 예상 (확정 아님)
+
+- **2 → 3**: "langfuse 완전 미구현" 차단 해소(계측 구현 + 실 trace 검증). 검증 Agent(moderator_check) 실동작은 a134b5b에서 이미 충족.
+- **3 → 4 도달 조건(아직 미충족)**:
+  1. Qwen 감성분석이 **기본 비활성**(`config.py:34` `analysis_generation_model=None`) — 활성 경로로 상시 동작해야 sLLM 본경로 인정이 견고해짐.
+  2. 항목7(서빙)이 아직 transformers 직접로드 → **Ollama/vLLM 등 OpenAI 호환 서빙으로 전환**(plan: `memo/plans/2026-06-13-ollama-qwen-serving-plan.md`)되면 항목3·7 동시 상향.
+- ×2 가중이므로 2→3은 가중점 **+2**(47→49), 2→4면 **+4**(47→51) 수준.
+
+> 정식 갱신 절차: 서빙 전환(P0-2)까지 끝낸 신규 SHA로 평가 Agent 재실행 → 그 결과를 `BDAI_Pocat_Team2-<sha>-rerun-<date>.md` 신규 파일로 발행(본 파일은 a134b5b 스냅샷으로 보존).
 
 ---
 
@@ -40,7 +76,7 @@
 
 ## 보완 필요 (우선순위 순)
 
-1. **[항목3] langfuse 실연결 (가중 ×2, 현재 2 → 4 잠재)** — 가장 큰 미수확 가중점. `langfuse`를 requirements에 추가하고 `LangfuseCallbackHandler`를 `llm_factory.py`의 ChatOpenAI 생성부 `callbacks=`에 주입해 bull/bear/moderator 전 호출을 trace 적재. 동시에 `openrouter_api_key`(이미 `config.py:56` 존재, 미사용)를 본 토론 1개 노드 이상에 연결해 sLLM을 사후평가 밖으로 끌어내면 항목3이 2→4로 상승(가중점 +4).
+1. ~~**[항목3] langfuse 실연결 (가중 ×2, 현재 2 → 4 잠재)**~~ — **✅ langfuse 부분 해소(후속 커밋 `098d898`, [갱신 § 참조](#갱신-2026-06-16--항목3-langfuse-후속-구현-반영)).** 단 **이 권고의 원래 방향(토론 경로 `LangfuseCallbackHandler` 주입)은 강사 합의로 폐기**됐다 — 토론 경로는 건드리지 않고 감성분석 Qwen 경로에 langfuse를 붙이는 방식으로 구현됨. 남은 상향 조건은 ① Qwen 기본 활성화 ② 항목7 서빙 전환(아래 #2와 동시 해결).
 2. **[항목7] 로컬 서빙 신설 (현재 0 → 3+ 잠재)** — macOS이므로 Ollama(`qwen2.5:7b`) 서비스를 compose에 추가하고 `OLLAMA_BASE_URL`로 OpenAI 호환 분기, 또는 `ANALYSIS_GENERATION_MODEL` 활성화 + Qwen 워커 서비스화. 항목3 sLLM 본경로 연결과 동시 해결 가능.
 3. **[항목1·10] 동적 trace/스트리밍 프로빙으로 [S]→[D] 격상** — postgres를 기본 기동(또는 SQLite fallback) 후 `curl -N`로 SSE `text/event-stream` 청크 타이밍 확인 + langfuse trace 첨부 시 항목1·10 각각 5점 도달 가능.
 4. **[항목8] golden set 확장 + artifact 커밋 (4 → 5 잠재)** — golden Q&A를 1→10~20쌍으로 늘리고 `reports/ragas-<sha>.json` 실행 산출물을 커밋해 "한 번 이상 실제 실행" 증적 확보.

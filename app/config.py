@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     analysis_prompt_version: str = Field(default="evidence-analysis-v2", alias="ANALYSIS_PROMPT_VERSION")
     analysis_summary_provider: str = Field(default="extractive", alias="ANALYSIS_SUMMARY_PROVIDER")
     analysis_generation_model: str | None = Field(default=None, alias="ANALYSIS_GENERATION_MODEL")
+    # Qwen 서빙 백엔드: transformers(인-프로세스 model.generate) | remote(OpenAI 호환 서빙).
+    # remote 면 Ollama(http://localhost:11434/v1) 또는 vLLM 을 base_url 로 가리킨다. 둘 다 OpenAI 호환이라
+    # 코드는 동일하고 URL 만 다르다(운영 GPU 확보 시 vLLM URL 로 교체, 코드 변경 없음).
+    analysis_generation_backend: str = Field(default="transformers", alias="ANALYSIS_GENERATION_BACKEND")
+    analysis_generation_base_url: str | None = Field(default=None, alias="ANALYSIS_GENERATION_BASE_URL")
+    analysis_generation_api_key: str = Field(default="EMPTY", alias="ANALYSIS_GENERATION_API_KEY")
     # 비동기 Qwen 보강 워커
     analysis_async_enabled: bool = Field(default=True, alias="ANALYSIS_ASYNC_ENABLED")
     analysis_worker_poll_interval: float = Field(default=2.0, alias="ANALYSIS_WORKER_POLL_INTERVAL")
