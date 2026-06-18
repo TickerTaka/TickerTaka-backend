@@ -1,0 +1,121 @@
+{
+  "git_sha": "b4f6c3d",
+  "eval_at": "2026-06-18T10:15:34.641574+00:00",
+  "dry_run": false,
+  "summary": {
+    "passed": 10,
+    "total": 10
+  },
+  "results": [
+    {
+      "case_id": "golden-001",
+      "description": "삼성전자 financial — 영업이익 증가/매출 감소 요약 충실도",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.444862464635092,
+      "evidence_precision": 0.0,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-002",
+      "description": "LG에너지솔루션 단일판매공급계약 — 대형 수주 긍정/물량 리스크",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.32212800020883164,
+      "evidence_precision": 0.0,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-003",
+      "description": "한화오션 유상증자 — 자금조달 vs 주주가치 희석",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.30627612306447266,
+      "evidence_precision": 0.9999999999,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-004",
+      "description": "카카오 횡령·배임 혐의 소송 — 지배구조 리스크(부정)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.42324851254869905,
+      "evidence_precision": 0.9999999999,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-005",
+      "description": "현대차 자기주식취득 + 배당 — 주주환원 강화(긍정)",
+      "summary_faithfulness": 0.8571428571428571,
+      "summary_answer_relevancy": 0.31107517654185984,
+      "evidence_precision": 0.0,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-006",
+      "description": "셀트리온 손익구조변경 적자전환 — 수익성 악화(부정)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.4126224326702111,
+      "evidence_precision": 0.9999999999,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-007",
+      "description": "SK하이닉스 잠정실적 흑자전환 — AI 메모리 수요(긍정)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.3139586813007492,
+      "evidence_precision": 0.0,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-008",
+      "description": "포스코홀딩스 대규모 설비투자 — 성장 vs 자본부담(혼합)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.438701613107689,
+      "evidence_precision": 0.9999999999,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-009",
+      "description": "NAVER 무상증자 — 유동성 개선 vs 펀더멘털 무변(혼합)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.2733737204683128,
+      "evidence_precision": 0.0,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    },
+    {
+      "case_id": "golden-010",
+      "description": "삼성바이오로직스 대형 위탁생산 계약 — 수주 vs 환율(혼합)",
+      "summary_faithfulness": 1.0,
+      "summary_answer_relevancy": 0.2444292090501493,
+      "evidence_precision": 0.49999999995,
+      "faith_pass": true,
+      "relev_pass": true,
+      "prec_pass": true,
+      "status": "PASS"
+    }
+  ]
+}
