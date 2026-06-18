@@ -25,18 +25,15 @@ def _get_langfuse_callback(session_id: str | None = None, tags: list[str] | None
     """Langfuse CallbackHandler 반환. 비활성화 시 None."""
     try:
         from app.core.tracing import get_langfuse
-        lf = get_langfuse()
-        if lf is None:
+        if get_langfuse() is None:
             return None
-        from langfuse.callback import CallbackHandler
+        from langfuse.langchain import CallbackHandler
         return CallbackHandler(
-            public_key=lf.client.public_key,
-            secret_key=lf.client.secret_key,
-            host=lf.client.host,
             session_id=session_id,
             tags=tags or [],
         )
-    except Exception:
+    except Exception as e:
+        logger.debug("[langfuse] callback 생성 실패 (무시): %s", e)
         return None
 
 

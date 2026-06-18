@@ -13,7 +13,8 @@ os.environ["ANONYMIZED_TELEMETRY"] = "false"
 os.environ["CHROMA_TELEMETRY_ENABLED"] = "false"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from dotenv import load_dotenv
-load_dotenv(".env.local")
+load_dotenv(".env")
+load_dotenv(".env.local", override=True)
 import logging
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.CRITICAL)

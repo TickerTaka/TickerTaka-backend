@@ -212,7 +212,7 @@ def _log_hallucination(
         lf = get_langfuse()
         if lf is None:
             return
-        lf.score(
+        lf.create_score(
             trace_id=session_id,
             name="hallucination",
             value=1.0,
