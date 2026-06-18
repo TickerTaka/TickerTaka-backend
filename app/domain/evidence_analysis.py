@@ -790,6 +790,11 @@ class EvidenceAnalysisService:
         if not analysis_text:
             analysis_text = title
         summary, key_points, risks = self.summary_builder.build(title=title, text=text or title)
+        # 추출형 baseline 도 표 헤더/셀 덤프(예: "... | 단위 : 백만원, %: 증감율(%) | ...")가
+        # key_points/risks 로 섞일 수 있다. Qwen 후보가 전부 노이즈로 걸러져(cand_* 비어) baseline 이
+        # 그대로 저장되는 경로를 방어하기 위해 Qwen 경로와 동일한 노이즈 필터를 baseline 에도 적용한다.
+        key_points = _filter_noise(key_points)
+        risks = _filter_noise(risks)
         summary_provider = self.settings.analysis_summary_provider
         event_type: str | None = None
         evidence: list[str] = []

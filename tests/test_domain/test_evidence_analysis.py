@@ -57,6 +57,32 @@ def test_analyze_text_falls_back_for_table_header_noise() -> None:
     assert result.raw_response["failure_reason"] == "err_table_header_noise"
 
 
+def test_baseline_risks_are_noise_filtered() -> None:
+    # summary 는 유효(=fallback 으로 전량 비워지지 않음)하지만 risks baseline 에 표덤프가 섞이는 경우,
+    # Qwen 후보가 비어도 baseline 표덤프가 저장되지 않아야 한다.
+    title = "매출액또는손익구조30%이상변경"
+    text = (
+        "영업이익 감소가 이어지고 있습니다. "
+        "매출 감소 | 단위 : 백만원, %: 증감율(%) | 흑자적자전환여부."
+    )
+    service = EvidenceAnalysisService(sentiment_analyzer=DummySentimentAnalyzer())
+
+    result = service.analyze_text(
+        source_type="filing",
+        source_id="a1111111-1111-1111-1111-111111111111",
+        symbol="000000",
+        title=title,
+        text=text,
+        persist=False,
+        use_qwen=False,
+    )
+
+    # 표 헤더/셀 덤프(파이프≥2 / "단위 :")가 risks 에 남으면 안 됨
+    assert all("단위 :" not in r and r.count("|") < 2 for r in result.risks)
+    # 깨끗한 서술형 리스크는 보존(전량 비움이 아님)
+    assert any("감소" in r for r in result.risks)
+
+
 def test_analyze_text_passes_meaningful_numeric_filing_summary() -> None:
     title = "타법인주식및출자증권취득결정"
     text = (
