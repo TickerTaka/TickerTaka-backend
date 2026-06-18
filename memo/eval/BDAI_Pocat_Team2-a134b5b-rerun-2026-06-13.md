@@ -119,7 +119,7 @@ a134b5b의 5점 미달 사유("golden 1건뿐 · 실행 artifact 미커밋")가 
 6. **[항목5] 멀티스테이지 빌드** — builder/runtime 분리로 10GB → 2~3GB 축소.
 7. **[항목6] MCP 서버측 + Python `mcp` SDK** — `mcp.ClientSession`+`stdio_client`로 교체(tools/list 자동), FastAPI에 MCP 서버 엔드포인트 추가로 양단 완성 시 3→4+.
 8. **[항목2] 그래프 전체 타임아웃** — `asyncio.wait_for`로 노드 hang 방어 시 4→5.
-9. **[항목4] 인터페이스 정의서 동기화** — `POST /api/debates/sessions`, `GET /.../stream`(구현완료인데 "추후예정"으로 격하 표기됨)를 정식 기재.
+9. ~~**[항목4] 인터페이스 정의서 동기화**~~ — **✅ 완료(2026-06-19)**: `interface-definition.md` §3에 `POST /api/debates/sessions`·`GET /.../stream` 정식 기재, §6 "추후예정"에서 제거. `debate.py` 7개 라우트 ↔ 문서 일치(코드 변경 0). 상세: [memo/results/2026-06-19-eval-track4-interface-doc-sync.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track4-interface-doc-sync.md:1). 점수 4→5 확정은 신규 SHA 재평가 후.
 
 ---
 

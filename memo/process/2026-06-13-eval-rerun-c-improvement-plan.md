@@ -54,7 +54,7 @@
 | P2-2 | 항목10 (×1) | 4→5 | +1 | SSE 청크타이밍 [D] 프로빙 — P0-E로 충족 | 低(의존) |
 | P3-1 | 항목5 (×1) | 4→5 | +1 | Dockerfile 멀티스테이지(10GB→2~3GB) | 低 |
 | P3-2 | 항목6 (×1) | 3→4 | +1 | Python `mcp` SDK + 서버측 tool 노출 | 中 |
-| P3-3 | 항목4 (×1) | 4→5 | +1 | interface-definition.md 동기화 | 極低 |
+| P3-3 ✅ | 항목4 (×1) | 4→5 | +1 | interface-definition.md 동기화 **(완료 2026-06-19)** | 極低 |
 
 **현실적 목표**: P0~P1 완수 시 `47 + (4+3+2+2+2) = 60/70 (≈ B)`. P2~P3까지 `+4 = 64/70 (≈ A 진입)`.
 
@@ -263,9 +263,9 @@ vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 �
 - (상향용) FastAPI에 **MCP 서버 엔드포인트** 추가해 자사 도구(예: `get_debate_summary`)를 외부에 노출 → 양단 완성.
 - **닫힘**: SDK 기반 tools/list 동작 + 서버측 1개 tool 노출 시 3→4.
 
-### P3-3. 항목4 — 인터페이스 정의서 동기화 (極低, 즉시)
-- `memo/design/interface-definition.md:219-221`(§6 "추후 확장 예정")의 **SSE stream endpoint**와 `POST /api/debates/sessions`를 §3 정식 구현 목록으로 이동(실제 `debate.py:62,128` 구현 완료).
-- **닫힘**: 문서가 코드보다 뒤처진 항목 0 → 4→5. (가장 싼 +1)
+### P3-3. 항목4 — 인터페이스 정의서 동기화 (極低, 즉시) — ✅ 완료(2026-06-19)
+- ✅ `interface-definition.md` §6의 **SSE stream endpoint**와 `POST /api/debates/sessions`를 §3 정식 기재로 이동. `debate.py` 7개 라우트 ↔ 문서 일치 확인(코드 변경 0).
+- **닫힘**: 문서가 코드보다 뒤처진 항목 0. 점수 4→5 확정은 신규 SHA 재평가 후. 상세: [memo/results/2026-06-19-eval-track4-interface-doc-sync.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track4-interface-doc-sync.md:1).
 
 ---
 
