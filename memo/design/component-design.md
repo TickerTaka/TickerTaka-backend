@@ -115,6 +115,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - ※ `openrouter_base_url` 설정은 잔존하나 토론 경로엔 미적용 (항목3 sLLM 전환 시 재배선 지점)
 - **Notion 발행(MCP)**: `app/integrations/notion_mcp.py`가 **MCP client**로 self-host Notion MCP server(`@notionhq/notion-mcp-server`, stdio·newline-delimited JSON)를 spawn → `API-post-page`로 토론 결과를 Notion DB row(page)로 발행. PostgreSQL은 SOT, Notion은 2차 mirror
 - **감성분석 sLLM**: baseline = FinBERT `snunlp/KR-FinBert-SC`(local HF), 보강 = **Qwen**(`ANALYSIS_GENERATION_MODEL`). 뉴스는 본문 스크랩(`article_scraper`), 공시는 `DartClient` 문서 fetch 후 구조화 분석
+- **Qwen 서빙 백엔드**(`ANALYSIS_GENERATION_BACKEND`): `transformers`(인-프로세스 `LocalQwenEvidenceAnalyzer`, 기본) 또는 `remote`(`RemoteQwenEvidenceAnalyzer` — OpenAI 호환 HTTP). remote는 `ANALYSIS_GENERATION_BASE_URL`로 **Ollama(`/v1`)·vLLM** 양쪽을 동일 코드로 호출(엔진 교체는 URL만). 프롬프트·파서·게이팅 로직은 두 백엔드 공유
 
 ## 6. Infra Support Layer
 
@@ -146,6 +147,17 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - 뉴스는 본문 스크랩, 공시는 DART 문서 fetch → `evidence_analysis` 갱신
 - 모델은 **워커 프로세스에만 1회 로드**(웹 프로세스 메모리 비압박), 실패는 `attempts`/`max_attempts`로 격리
 - 동기 인덱싱이 FinBERT baseline을 즉시 저장하므로, **워커 미기동 시에도 baseline 감성은 제공**됨
+
+## 8. 관측성 (Langfuse 트레이싱)
+
+구성:
+- `app/core/tracing.py` — 게이트 클라이언트 `get_langfuse()`
+- 계측 지점: `evidence_analysis.py`의 `analyze_text`(부모 `evidence-enrich` span) + Qwen `analyze()`(generation span / remote는 `langfuse.openai` 드롭인 자동계측), 워커 종료 시 `flush`
+
+책임:
+- 감성분석 sLLM(Qwen) 분석 1건을 **1 trace**로 묶어 단계별 입출력·토큰·latency·drop을 기록(진단 + 평가 항목3 관측성 충족)
+- **게이트**: `LANGFUSE_PUBLIC_KEY`+`SECRET_KEY`+`LANGFUSE_TRACING_ENABLED`가 모두 있을 때만 활성, 하나라도 없으면 `None` 반환 → 호출부 전부 no-op(운영/테스트 영향 0)
+- 토론 경로(bull/bear/moderator)에는 적용하지 않음(강사 합의 — 감성분석 sLLM 경로 한정)
 
 ## 배포/실행 환경
 

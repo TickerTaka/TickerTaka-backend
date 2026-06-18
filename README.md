@@ -4,10 +4,12 @@ AI 종목 **토론 · 감성분석 대시보드**를 위한 FastAPI 백엔드입
 
 ## 주요 기능
 
-- **AI 종목 토론** — LangGraph 기반 bull/bear/moderator 멀티에이전트 토론(`POST /api/debates`). 근거(evidence) 검색·검증·요약까지 수행.
-- **토론 품질 평가(RAGAS)** — 요약 faithfulness/answer_relevancy, 근거 context_precision를 사후 평가하고 `debate_eval_result`에 영속화. 배치(`run_ragas_eval.py`) + 회귀 테스트 포함.
+- **AI 종목 토론** — LangGraph 기반 bull/bear/moderator 멀티에이전트 토론. 일괄 반환(`POST /api/debates`)과 **실시간 SSE 스트리밍**(`POST /api/debates/sessions` → `GET /api/debates/{id}/stream`) 둘 다 제공. 근거(evidence) 검색·검증·요약까지 수행.
+- **RAG 고도화 검색** — 근거 검색은 **BM25 + 벡터 + RRF 하이브리드**(`evidence_retrieval.py`). cross-encoder reranker는 opt-in(`RAG_RERANKER_ENABLED`).
+- **토론 품질 평가(RAGAS)** — 요약 faithfulness/answer_relevancy, 근거 context_precision를 사후 평가하고 `debate_eval_result`에 영속화. 배치(`run_ragas_eval.py`) + golden set(10건) + 회귀 테스트 포함.
+- **관측성(Langfuse)** — 감성분석 sLLM(Qwen) 분석 경로를 Langfuse로 단계별 trace(`app/core/tracing.py`). 키 2개 + `LANGFUSE_TRACING_ENABLED` 모두 있을 때만 활성, 없으면 자동 no-op.
 - **Notion 발행(MCP)** — 완료된 토론을 버튼 클릭 시 Notion DB row로 발행(`POST /api/debates/{id}/publish/notion`). 백엔드가 self-host Notion MCP 서버의 `API-post-page`를 stdio로 호출.
-- **뉴스/공시 감성·투자분석** — 동기 FinBERT(`snunlp/KR-FinBert-SC`) baseline + 비동기 **Qwen** 보강 워커. 결과는 관심종목 피드(`WatchlistFeedItem`)에 노출.
+- **뉴스/공시 감성·투자분석** — 동기 FinBERT(`snunlp/KR-FinBert-SC`) baseline + 비동기 **Qwen** 보강 워커. Qwen은 **transformers 직접 로드(기본)** 또는 **Ollama/vLLM 원격 서빙**(`ANALYSIS_GENERATION_BACKEND=remote`) 선택. 결과는 관심종목 피드(`WatchlistFeedItem`)에 노출.
 - **관심종목 · 시장데이터** — 종목 검색/상세, 가격·재무·기술지표·뉴스·공시 수집(DART / PyKRX / yfinance / Naver News), background sync.
 
 ## 아키텍처 개요
@@ -92,6 +94,8 @@ NOTION_MCP_TOOL_NAME=API-post-page
 | `DART_API_KEY` | 공시 |
 | `NAVER_NEWS_CLIENT_ID/SECRET` | 뉴스 |
 | `ANALYSIS_MODEL`, `ANALYSIS_GENERATION_MODEL` | 감성 baseline(FinBERT) / Qwen 보강 |
+| `ANALYSIS_GENERATION_BACKEND`, `ANALYSIS_GENERATION_BASE_URL`, `ANALYSIS_GENERATION_API_KEY` | Qwen 서빙 백엔드(`transformers`\|`remote`). remote면 Ollama(`http://localhost:11434/v1`)/vLLM URL |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, `LANGFUSE_TRACING_ENABLED` | Langfuse 트레이싱(선택, 없으면 no-op) |
 | `NOTION_TOKEN`, `NOTION_DATABASE_ID`, `NOTION_MCP_*` | Notion MCP 발행 |
 
 전체 항목은 `.env.example` 참고.
@@ -122,5 +126,5 @@ NOTION_MCP_TOOL_NAME=API-post-page
 ```bash
 pytest                                            # 단위/통합
 pytest tests/test_agents/test_ragas_regression.py # RAGAS 회귀(실 LLM 호출, 느림)
-python run_ragas_eval.py                          # RAGAS 배치 → ragas-<sha>.json
+python run_ragas_eval.py                          # RAGAS 배치 → reports/ragas-<sha>.json
 ```
