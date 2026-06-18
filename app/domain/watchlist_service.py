@@ -65,24 +65,6 @@ def sync_watchlist_news(symbol: str) -> None:
         with session_scope() as session:
             service = NewsIngestionService(session)
             result = service.sync_news_for_ticker(symbol, mode="initial", force=True)
-            session.flush()
-
-            # News FinBERT/룰 baseline 분석 트리거 — production runtime에서
-            # 누락된 wire를 보강. (filing 경로는 sync_watchlist_filings가 이미 호출함)
-            # 실패해도 뉴스 DB 적재는 유지되어야 하므로 best-effort.
-            from app.domain.evidence_indexing import EvidenceIndexingService
-
-            indexed_rows = analyzed_rows = 0
-            try:
-                index_result = EvidenceIndexingService(session).reindex_news_for_symbol(symbol)
-                indexed_rows = index_result.indexed_rows
-                analyzed_rows = index_result.indexed_rows  # analyze_news_row가 indexed 경로에서 호출됨
-            except Exception:
-                logger.exception(
-                    "news evidence indexing failed for %s (news persisted, analysis skipped)",
-                    symbol,
-                )
-
             logger.info(
                 "watchlist background sync finished",
                 extra={
@@ -93,8 +75,6 @@ def sync_watchlist_news(symbol: str) -> None:
                     "skipped": result.skipped_count,
                     "filtered": result.filtered_count,
                     "body_saved": result.body_saved_count,
-                    "indexed_rows": indexed_rows,
-                    "analyzed_rows": analyzed_rows,
                 },
             )
     except Exception:
@@ -153,18 +133,7 @@ def sync_watchlist_filings(symbol: str) -> None:
 
         with session_scope() as session:
             filing_result = FilingIngestionService(session).sync_filings_for_ticker(symbol, mode="initial")
-            session.flush()
-            # Evidence indexing (ChromaDB) is best-effort. A client/server version
-            # mismatch was rolling the whole transaction back and dropping the
-            # freshly ingested filings. Swallow it so DB state is preserved.
-            indexed_rows = index_skipped = index_failed = 0
-            try:
-                index_result = EvidenceIndexingService(session).reindex_filing_for_symbol(symbol)
-                indexed_rows = index_result.indexed_rows
-                index_skipped = index_result.skipped_rows
-                index_failed = index_result.failed_rows
-            except Exception:
-                logger.exception("evidence indexing failed for %s (filings persisted, search disabled)", symbol)
+            index_result = EvidenceIndexingService(session).reindex_filing_for_symbol(symbol)
             logger.info(
                 "watchlist background filing sync finished",
                 extra={
@@ -173,9 +142,9 @@ def sync_watchlist_filings(symbol: str) -> None:
                     "inserted": filing_result.inserted_count,
                     "updated": filing_result.updated_count,
                     "skipped": filing_result.skipped_count,
-                    "indexed_rows": indexed_rows,
-                    "index_skipped": index_skipped,
-                    "index_failed": index_failed,
+                    "indexed_rows": index_result.indexed_rows,
+                    "index_skipped": index_result.skipped_rows,
+                    "index_failed": index_result.failed_rows,
                 },
             )
     except Exception:
