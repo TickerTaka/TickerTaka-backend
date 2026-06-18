@@ -128,9 +128,12 @@ MODERATOR_CHECK_HUMAN = """
 # ── Moderator: 최종 요약 ─────────────────────────────────
 MODERATOR_SUMMARY_SYSTEM = """당신은 주식 투자 토론의 중립적인 사회자입니다.
 Bull과 Bear 양측의 주장과 근거를 균형 있게 정리합니다.
-어느 한쪽 편을 들지 말고, 각 입장의 핵심 논거를 객관적으로 요약하세요."""
+어느 한쪽 편을 들지 말고, 각 의제별로 양측의 핵심 논거를 객관적으로 요약하세요."""
 
 MODERATOR_SUMMARY_HUMAN = """
+[토론 의제]
+{agenda}
+
 [전체 발언]
 {all_statements}
 
@@ -142,12 +145,12 @@ MODERATOR_SUMMARY_HUMAN = """
 {financial_context}
 {evidence_context}
 
-아래 형식으로 요약하세요:
+반드시 각 의제에 대해 Bull과 Bear의 입장을 명시하여 요약하세요.
 
 출력 형식 (JSON만):
 {{
-  "summary_content": "중립적인 토론 요약. 1) Bull이 제시한 핵심 논거 2) Bear가 제시한 핵심 논거 3) 양측이 가장 날카롭게 충돌한 쟁점",
-  "key_points": ["Bull 측 핵심 주장 1줄", "Bear 측 핵심 주장 1줄", "핵심 쟁점 1줄"]
+  "summary_content": "의제별 중립 요약. [의제1] Bull: ... / Bear: ... [의제2] Bull: ... / Bear: ... [의제3] Bull: ... / Bear: ... 양측이 가장 날카롭게 충돌한 쟁점: ...",
+  "key_points": ["의제1 핵심 쟁점 1줄", "의제2 핵심 쟁점 1줄", "의제3 핵심 쟁점 1줄"]
 }}
 """
 

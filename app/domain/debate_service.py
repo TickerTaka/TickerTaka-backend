@@ -57,7 +57,7 @@ class DebateExecutionService:
 
         try:
             with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-                async for chunk in _astream_with_config(graph_runner, state):
+                async for chunk in _astream_with_config(graph_runner, state, session_id=session_id, user_id=user_id):
                     node = next(iter(chunk))
                     data = chunk[node]
                     state = merge_state(state, data)
@@ -117,7 +117,7 @@ class DebateExecutionService:
                 },
             )
             with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-                async for chunk in _astream_with_config(graph_runner, state):
+                async for chunk in _astream_with_config(graph_runner, state, session_id=session_id, user_id=user_id):
                     node = next(iter(chunk))
                     data = chunk[node]
                     state = merge_state(state, data)
@@ -292,9 +292,31 @@ def _get_default_graph():
     return debate_graph
 
 
-def _astream_with_config(graph_runner, state: DebateState):
+def _astream_with_config(
+    graph_runner,
+    state: DebateState,
+    session_id: str | None = None,
+    user_id: str | None = None,
+):
     settings = get_settings()
-    config = {"recursion_limit": settings.debate_graph_recursion_limit}
+    config: dict = {"recursion_limit": settings.debate_graph_recursion_limit}
+
+    # Langfuse v4 best practice: CallbackHandler는 graph config 레벨에서 주입
+    # session_id·user_id를 metadata로 넘기면 모든 LLM 호출이 같은 세션으로 묶임
+    try:
+        from app.core.tracing import get_langfuse
+        if get_langfuse() is not None:
+            from langfuse.langchain import CallbackHandler
+            config["callbacks"] = [CallbackHandler()]
+            config["metadata"] = {
+                "langfuse_session_id": session_id,
+                "langfuse_user_id": user_id,
+                "langfuse_tags": ["debate"],
+            }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("[langfuse] callback 설정 실패 (무시): %s", e)
+
     try:
         return graph_runner.astream(state, config)
     except TypeError:

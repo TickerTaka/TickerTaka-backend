@@ -208,10 +208,8 @@ def _log_hallucination(
 ) -> None:
     """Langfuse에 사회자 개입(환각) 이벤트 기록. 비활성화 시 no-op."""
     try:
-        from app.core.tracing import get_langfuse
-        lf = get_langfuse()
-        if lf is None:
-            return
+        from langfuse import get_client
+        lf = get_client()
         lf.create_score(
             session_id=session_id,
             name="hallucination",
@@ -273,7 +271,9 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
 
     try:
+        agenda_text = "\n".join(f"{i+1}. {a}" for i, a in enumerate(state.get("agenda") or []))
         raw = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
+            agenda=agenda_text or "의제 없음",
             all_statements=all_stmts,
             debate_end_notice=_format_debate_end_notice(state) or "중단 없음",
             symbol=state["symbol"], symbol_name=state["symbol_name"],

@@ -21,19 +21,6 @@ _PROMPT_VERSION_MAP = {
 }
 
 
-def _get_langfuse_callback(session_id: str | None = None, tags: list[str] | None = None):
-    """Langfuse CallbackHandler 반환. 비활성화 시 None."""
-    try:
-        from app.core.tracing import get_langfuse
-        if get_langfuse() is None:
-            return None
-        from langfuse.langchain import CallbackHandler
-        return CallbackHandler()
-    except Exception as e:
-        logger.debug("[langfuse] callback 생성 실패 (무시): %s", e)
-        return None
-
-
 def get_llm(
     role: Literal["bull", "bear", "judge", "moderator", "fallback"] = "fallback",
     temperature: float = 0.7,
@@ -54,19 +41,14 @@ def get_llm(
     }
     model_id = model_map.get(role, settings.fallback_model)
 
-    # Langfuse 콜백 — 활성화 시 모든 LLM 호출 자동 추적
-    callbacks = []
-    cb = _get_langfuse_callback(session_id=session_id, tags=[role])
-    if cb:
-        callbacks.append(cb)
-
+    # Langfuse는 graph astream() config 레벨에서 주입 (v4 best practice)
+    # — ChatOpenAI에 직접 callbacks 주입 불필요
     client = ChatOpenAI(
         model=model_id,
         temperature=temperature,
         api_key=settings.openai_api_key,
         max_retries=3,
         timeout=60,
-        callbacks=callbacks or None,
     )
     if not cached:
         return client

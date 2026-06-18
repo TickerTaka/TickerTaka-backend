@@ -129,10 +129,21 @@ async def run(
     try:
         with tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
             settings = get_settings()
-            async for chunk in debate_graph.astream(
-                state,
-                {"recursion_limit": settings.debate_graph_recursion_limit},
-            ):
+            # Langfuse v4: CallbackHandler를 graph config로 주입, metadata로 session 묶음
+            graph_config: dict = {"recursion_limit": settings.debate_graph_recursion_limit}
+            try:
+                from app.core.tracing import get_langfuse
+                if get_langfuse() is not None:
+                    from langfuse.langchain import CallbackHandler
+                    graph_config["callbacks"] = [CallbackHandler()]
+                    graph_config["metadata"] = {
+                        "langfuse_session_id": session_id,
+                        "langfuse_user_id": user_id,
+                        "langfuse_tags": ["debate", "test"],
+                    }
+            except Exception:
+                pass
+            async for chunk in debate_graph.astream(state, graph_config):
                 node = list(chunk.keys())[0]
                 data = chunk[node]
                 elapsed = time.time() - total_start
