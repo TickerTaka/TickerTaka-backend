@@ -435,7 +435,7 @@ async def run_session(session_id: str, dry_run: bool) -> dict:
 
 async def main(args):
     sha = _git_sha()
-    out_path = f"ragas-{sha}.json"
+    out_path = f"reports/ragas-{sha}.json"
     results = []
 
     if args.session:
