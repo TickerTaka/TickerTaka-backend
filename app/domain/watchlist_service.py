@@ -65,6 +65,24 @@ def sync_watchlist_news(symbol: str) -> None:
         with session_scope() as session:
             service = NewsIngestionService(session)
             result = service.sync_news_for_ticker(symbol, mode="initial", force=True)
+            session.flush()
+
+            # News FinBERT/룰 baseline 분석 트리거. 이게 없으면 production
+            # 어디서도 reindex_news_for_symbol()이 호출되지 않아 뉴스의
+            # sentiment/impact_score/event_type이 영영 null로 남는다.
+            # 실패해도 뉴스 DB 적재는 유지되어야 하므로 best-effort.
+            from app.domain.evidence_indexing import EvidenceIndexingService
+
+            indexed_rows = 0
+            try:
+                index_result = EvidenceIndexingService(session).reindex_news_for_symbol(symbol)
+                indexed_rows = index_result.indexed_rows
+            except Exception:
+                logger.exception(
+                    "news evidence indexing failed for %s (news persisted, analysis skipped)",
+                    symbol,
+                )
+
             logger.info(
                 "watchlist background sync finished",
                 extra={
@@ -75,6 +93,7 @@ def sync_watchlist_news(symbol: str) -> None:
                     "skipped": result.skipped_count,
                     "filtered": result.filtered_count,
                     "body_saved": result.body_saved_count,
+                    "indexed_rows": indexed_rows,
                 },
             )
     except Exception:
