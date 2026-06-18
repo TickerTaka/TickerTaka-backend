@@ -282,12 +282,14 @@ async def moderator_summary_node(state: DebateState) -> dict:
             financial_context=state["financial_context"],
             evidence_context=state["evidence_context"],
         ), temp=0.4)
-        parsed = _parse(raw, {"summary_content": raw, "key_points": []})
-        summary = parsed.get("summary_content", raw)
+        parsed = _parse(raw, {"summary_content": raw, "structured_summary": raw, "key_points": []})
+        summary = parsed.get("summary_content", raw)           # 사용자 출력용 (투자 가이드 형식)
+        structured_summary = parsed.get("structured_summary", summary)  # RAGAS 평가용 (의제별 구조)
         points = parsed.get("key_points", [])
     except Exception as e:
         logger.warning("[moderator_summary] LLM 호출 실패, fallback summary 사용: %s", e)
         summary, points = _build_summary_fallback(state)
+        structured_summary = summary
         used_fallback_summary = True
 
     # 새 round 이름 → DB enum 호환 매핑
@@ -333,15 +335,18 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
 
     # RAGAS 사후 평가 — 백그라운드 실행 (토론 흐름 차단 안 함)
+    debate_was_cut = bool(state.get("debate_ended_by"))
     try:
-        if not used_fallback_summary:
+        if not used_fallback_summary and not debate_was_cut:
             _schedule_background_task(
                 _run_summary_eval(
-                    state["session_id"], state["statements"], summary,
+                    state["session_id"], state["statements"], structured_summary,
                     state.get("agenda", []),
                 ),
                 label="eval-summary",
             )
+        elif debate_was_cut:
+            logger.info("[moderator_summary] 토론 중단 케이스 — summary RAGAS 평가 건너뜀")
         else:
             logger.info("[moderator_summary] fallback summary 사용으로 summary RAGAS 평가는 건너뜀")
         from app.domain.evidence_retrieval import build_category_query

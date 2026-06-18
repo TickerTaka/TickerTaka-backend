@@ -145,11 +145,12 @@ MODERATOR_SUMMARY_HUMAN = """
 {financial_context}
 {evidence_context}
 
-반드시 각 의제에 대해 Bull과 Bear의 입장을 명시하여 요약하세요.
+아래 두 가지 요약을 모두 작성하세요.
 
 출력 형식 (JSON만):
 {{
-  "summary_content": "의제별 중립 요약. [의제1] Bull: ... / Bear: ... [의제2] Bull: ... / Bear: ... [의제3] Bull: ... / Bear: ... 양측이 가장 날카롭게 충돌한 쟁점: ...",
+  "structured_summary": "의제별 중립 요약. [의제1] Bull: ... / Bear: ... [의제2] Bull: ... / Bear: ... [의제3] Bull: ... / Bear: ... 양측이 가장 날카롭게 충돌한 쟁점: ...",
+  "summary_content": "투자자가 이해하기 쉬운 서술형 요약. '~한 점에서 매수를 고민해볼 수 있고, ~한 점이 중요하다면 보유 또는 매도를 고려하세요' 형식으로 2~3문장.",
   "key_points": ["의제1 핵심 쟁점 1줄", "의제2 핵심 쟁점 1줄", "의제3 핵심 쟁점 1줄"]
 }}
 """
