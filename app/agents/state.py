@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Annotated
 import operator
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class Statement(TypedDict):
@@ -22,6 +22,7 @@ class DebateState(TypedDict):
     symbol:         str
     symbol_name:    str
     category:       str       # technical | financial | market | macro | synthesis
+    decision_agent: NotRequired[str]  # moderator | judge
 
     # 라운드 제어
     current_round:       str   # claim | rebuttal | counter_rebuttal | summary
@@ -45,6 +46,9 @@ class DebateState(TypedDict):
     moderator_flag:      str    # ok | intervene | end
     intervention_note:   str
     hallucination_count: int
+    debate_ended_by:     NotRequired[str]  # bull | bear | ""
+    debate_end_reason:   NotRequired[str]
+    judge_result:        NotRequired[dict]
 
     # 최종 결과
     summary_content: str
