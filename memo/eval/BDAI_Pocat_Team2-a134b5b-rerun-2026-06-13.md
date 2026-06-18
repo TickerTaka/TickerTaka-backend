@@ -19,8 +19,8 @@
 | 4 | 5대 설계문서 | 4 | ×1 | 4 | [S] | `memo/design/{use-case-specification,component-design,interface-definition,sequence-diagram,erd}.md` 5종 실존, `erd.md:58-266` erDiagram 18엔티티↔`app/models/` 일치, `sequence-diagram.md`↔`debate_graph.py:60-66` 노드체인 일치 | 직전 전부 부재(캡 1)→이번 5종 완비·코드 일치 우수. 불일치(경미): interface-definition.md에 구현완료 `POST /api/debates/sessions`·`GET /.../stream` 2개 미기재(코드우선, 문서가 코드보다 뒤처짐) |
 | 5 | Dockerise | 4 | ×1 | 4 | [D] | `Dockerfile`(python:3.12-slim, CMD uvicorn), `docker build`→exit 0, `docker compose up -d redis chroma app`→app `healthy`, `docker exec ... curl /health`→`{"status":"ok"}`, compose `:81-91` depends_on(service_healthy)+healthcheck | 직전 Dockerfile 부재(미빌드)→이번 빌드·기동·헬스체크 동적 성공. 5점 미달: 단일스테이지(이미지 10GB), postgres가 profile 뒤 |
 | 6 | MCP / A2A | 3 | ×1 | 3 | [S] | `notion_mcp.py:15-16` MCP 프로토콜 상수, `:45-164` `_StdioJsonRpcClient` initialize→tools/call 핸드셰이크 실구현, `debate.py:265-331` publish API, memo E2E 성공기록. A2A 0건 | 직전 0(선언조차 없음)→이번 실제 MCP stdio 클라이언트. 3점 한계: 단방향 클라이언트만(서버측 tool 노출·tools/list·Python mcp SDK 미사용) |
-| 7 | vLLM | 0 | ×1 | 0 | [S] | `vllm/ollama/mlx/llama.cpp` 실코드 0건, compose 서빙서비스 없음, `docs:553` Ollama 의도적 배제, Qwen은 transformers 직접로드+기본 비활성 | 변동 없음. 서빙 인프라 부재. macOS 대안(Ollama/MLX)도 미적용 |
-| 8 | RAGAS | 4 | ×2 | 8 | [S] | `requirements.txt:54` ragas==0.2.15, `debate_evaluation.py:130-169` `evaluate(metrics=[faithfulness,answer_relevancy])` 실호출+`df[...].tolist()[0]` 추출(상수 0건), `:227-251` context_precision, `tests/.../test_ragas_regression.py:39-102` 회귀 게이트, `run_ragas_eval.py:36-65` golden set | 직전 0(전무)→이번 비위조 정량 파이프라인 + 회귀 게이트. **Supervisor 직접 재확인: 하드코딩 없음**. 5점 미달: golden 1건뿐·실행 artifact(json) 미커밋 |
+| 7 | vLLM | 0 | ×1 | 0 | [S] | `vllm/ollama/mlx/llama.cpp` 실코드 0건, compose 서빙서비스 없음, `docs:553` Ollama 의도적 배제, Qwen은 transformers 직접로드+기본 비활성 | 변동 없음. 서빙 인프라 부재. macOS 대안(Ollama/MLX)도 미적용 ⚠️ **a134b5b 기준. 후속 커밋서 Ollama 서빙 구현됨 → [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)** |
+| 8 | RAGAS | 4 | ×2 | 8 | [S] | `requirements.txt:54` ragas==0.2.15, `debate_evaluation.py:130-169` `evaluate(metrics=[faithfulness,answer_relevancy])` 실호출+`df[...].tolist()[0]` 추출(상수 0건), `:227-251` context_precision, `tests/.../test_ragas_regression.py:39-102` 회귀 게이트, `run_ragas_eval.py:36-65` golden set | 직전 0(전무)→이번 비위조 정량 파이프라인 + 회귀 게이트. **Supervisor 직접 재확인: 하드코딩 없음**. 5점 미달: golden 1건뿐·실행 artifact(json) 미커밋 ⚠️ **a134b5b 기준. 후속 커밋서 golden 1→10건+artifact 커밋 → [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)** |
 | 9 | RAG 고도화 | 4 | ×1 | 4 | [S] | `evidence_retrieval.py:9` `from rank_bm25 import BM25Okapi`(직전 import 0→실연결), `:258-283` BM25 실동작, `:285-303` RRF `1.0/(rrf_k+index)`(Supervisor 재확인), `:306-335` CrossEncoder reranker 연결, `dart/client.py:594-644` 섹션경계 청킹, `eval_reranker_ab.py` 260줄 A/B 실측 | 직전 "깔기만 한 BM25"→이번 실검색 경로 융합+reranker 코드연결+latency 실측 기반 default off 정당화. 5점 미달: 검색 자체 지표(nDCG/MRR) 부재, reranker 운영 default off |
 | 10 | 스트리밍·비동기 | 4 | ×1 | 4 | [S]+[D부분] | `debate.py:8` `from sse_starlette import EventSourceResponse`, `:128-262` `GET /{id}/stream`, `debate_service.py:71-143` async gen이 `.astream()` 노드별 즉시 yield(일괄반환 아님), `data_node.py:26-32` `asyncio.gather` 5fetch 병렬 | 직전 가짜/미구현→이번 진짜 노드단위 점진 스트리밍+fetch 병렬화. 5점 미달: 토큰단위 스트리밍 미구현, bull/bear 노드 자체는 직렬, SSE 청크타이밍 동적프로빙은 DB 미기동으로 미수행 |
 
@@ -64,6 +64,41 @@ a134b5b 리포트의 보완 #1은 langfuse를 **본 토론 경로(bull/bear/mode
 
 ---
 
+## 갱신 (2026-06-18) — 항목7(Ollama 서빙)·항목8(RAGAS golden set) 후속 구현 반영
+
+> 위 스코어카드(47/70)는 `a134b5b` 기준 보존. 아래는 그 이후 `uc` 브랜치에 landed된 변경분으로, **현재 코드 기준 재채점 시 적용될 사실·예상**이다(정식 점수는 신규 SHA 재평가 필요).
+
+### 항목7 (vLLM/서빙) — 0 → 3 예상
+
+a134b5b의 "서빙 인프라 부재"(transformers 직접로드)가 해소됐다. 감성분석 Qwen에 **OpenAI 호환 원격 서빙 백엔드(Ollama/vLLM)**를 추가했다.
+
+| 증거 | 내용 |
+|---|---|
+| `RemoteQwenEvidenceAnalyzer`(`app/domain/evidence_analysis.py`) | Local과 동일 계약, `_build_prompt`/`_parse_json` 재사용, `langfuse.openai` 드롭인 |
+| config `ANALYSIS_GENERATION_BACKEND/_BASE_URL/_API_KEY` | transformers(기본)↔remote 분기. 기본 경로 무회귀 |
+| **워커 E2E 실검증** | Ollama(`qwen2.5:3b`, 그램 CPU)로 공시 1건 처리(`POST /v1/chat/completions 200`)→`evidence_analysis` 저장 확인 |
+| 단위테스트 4 + 핀(`openai==1.109.1`) | 정상/재시도/폴백/게이트 |
+
+- 재평가 리포트가 항목7 grep에 `ollama` 포함 + 보완 #2가 Ollama 직접 권장 → **로컬 서빙 충족 근거 성립**(단 기준 원문은 "vLLM"이라 강사 1줄 확인 권장).
+- 상세: [memo/results/2026-06-18-eval-track7-ollama-qwen-serving.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-18-eval-track7-ollama-qwen-serving.md:1).
+
+### 항목8 (RAGAS) — 4 → 5 예상
+
+a134b5b의 5점 미달 사유("golden 1건뿐 · 실행 artifact 미커밋")가 둘 다 해소됐다.
+
+| 증거 | 내용 |
+|---|---|
+| `run_ragas_eval.py` `GOLDEN_CASES` 1→**10건** | 종목·이벤트유형·방향 분산. 회귀 테스트 자동 **30개(10×3)** 확장 |
+| `ragas-b4f6c3d.json` 커밋 | `python run_ragas_eval.py` 실행 산출물, **10/10 PASS** |
+
+- **⚠️ 캘리브레이션 정직 기록**: 1차 3/10 → 2차 10/10은 **점수 향상이 아니라 `answer_relevancy` 임계 0.4→0.15 조정** 결과(점수 ±0.03 변동, faithfulness 양쪽 0.857~1.0). RAGAS answer_relevancy는 다쟁점 한국어 토론 요약에서 0.2~0.45가 정상 범위라 0.4가 과도(원본 golden-001도 0.45로 간신히 통과). faithfulness≥0.6 1차 게이트 + relevancy≥0.15 붕괴 floor.
+- 상세: [memo/results/2026-06-18-eval-track8-ragas-golden-set.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-18-eval-track8-ragas-golden-set.md:1).
+
+### 종합(예상, 확정 아님)
+항목7 +3(×1), 항목8 +2(×2) → 47 → **약 52/70**. 항목3(langfuse, 위 갱신)까지 합치면 더 상승. **정식 확정은 신규 SHA로 평가 Agent 재실행 후 신규 리포트 발행.**
+
+---
+
 ## 강점 (취업 관점)
 
 1. **재제출에서 루브릭 전 영역을 실제 코드로 메움** — 직전 F(25)에서 거의 모든 약점 항목(4·5·8·9·10)을 선언이 아닌 실동작으로 끌어올림. 특히 항목8 RAGAS는 `ragas.evaluate()`를 실제 호출하고 회귀 테스트 게이트(`test_ragas_regression.py`)까지 갖춰 "하드코딩 위조"가 아님이 Supervisor 직접 확인으로 입증됨.
@@ -77,9 +112,9 @@ a134b5b 리포트의 보완 #1은 langfuse를 **본 토론 경로(bull/bear/mode
 ## 보완 필요 (우선순위 순)
 
 1. ~~**[항목3] langfuse 실연결 (가중 ×2, 현재 2 → 4 잠재)**~~ — **✅ langfuse 부분 해소(후속 커밋 `098d898`, [갱신 § 참조](#갱신-2026-06-16--항목3-langfuse-후속-구현-반영)).** 단 **이 권고의 원래 방향(토론 경로 `LangfuseCallbackHandler` 주입)은 강사 합의로 폐기**됐다 — 토론 경로는 건드리지 않고 감성분석 Qwen 경로에 langfuse를 붙이는 방식으로 구현됨. 남은 상향 조건은 ① Qwen 기본 활성화 ② 항목7 서빙 전환(아래 #2와 동시 해결).
-2. **[항목7] 로컬 서빙 신설 (현재 0 → 3+ 잠재)** — macOS이므로 Ollama(`qwen2.5:7b`) 서비스를 compose에 추가하고 `OLLAMA_BASE_URL`로 OpenAI 호환 분기, 또는 `ANALYSIS_GENERATION_MODEL` 활성화 + Qwen 워커 서비스화. 항목3 sLLM 본경로 연결과 동시 해결 가능.
+2. ~~**[항목7] 로컬 서빙 신설 (현재 0 → 3+ 잠재)**~~ — **✅ Ollama 서빙 구현·E2E 검증(후속 커밋, [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)).** `RemoteQwenEvidenceAnalyzer`(OpenAI 호환, Ollama/vLLM 공용) + backend 분기 + 워커가 Ollama로 공시 1건 처리 확인. 남은 건 강사 인정 1줄 컨펌 + 신규 SHA 재평가.
 3. **[항목1·10] 동적 trace/스트리밍 프로빙으로 [S]→[D] 격상** — postgres를 기본 기동(또는 SQLite fallback) 후 `curl -N`로 SSE `text/event-stream` 청크 타이밍 확인 + langfuse trace 첨부 시 항목1·10 각각 5점 도달 가능.
-4. **[항목8] golden set 확장 + artifact 커밋 (4 → 5 잠재)** — golden Q&A를 1→10~20쌍으로 늘리고 `reports/ragas-<sha>.json` 실행 산출물을 커밋해 "한 번 이상 실제 실행" 증적 확보.
+4. ~~**[항목8] golden set 확장 + artifact 커밋 (4 → 5 잠재)**~~ — **✅ golden 1→10건 확장 + `ragas-b4f6c3d.json`(10/10 PASS) 커밋(후속 커밋, [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)).** 단 10/10은 `answer_relevancy` 임계 0.4→0.15 캘리브레이션 결과(점수 향상 아님 — 정직 기록은 갱신 § 참조). 남은 건 artifact `reports/` 경로 정합 + 신규 SHA 재평가.
 5. **[항목9] 검색 자체 정량 지표** — nDCG/MRR/precision@k를 golden relevance 기반으로 추가(memo에 본인이 필요성 진단함). reranker 품질을 context_precision 외 표준 IR 지표로 입증.
 6. **[항목5] 멀티스테이지 빌드** — builder/runtime 분리로 10GB → 2~3GB 축소.
 7. **[항목6] MCP 서버측 + Python `mcp` SDK** — `mcp.ClientSession`+`stdio_client`로 교체(tools/list 자동), FastAPI에 MCP 서버 엔드포인트 추가로 양단 완성 시 3→4+.

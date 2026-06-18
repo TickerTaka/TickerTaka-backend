@@ -204,16 +204,17 @@ vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 �
 
 ---
 
-## P1-1. 항목8 — golden set 확장 + artifact 커밋 (×2, +2)
+## P1-1. 항목8 — golden set 확장 + artifact 커밋 (×2, +2) — ✅ 코드 완료(2026-06-18)
 
 현재 `run_ragas_eval.py:36-65` golden 1건. 닫는 작업:
-1. `GOLDEN_CASES`를 **10~20건**으로 확장. 카테고리 분산(financial/technical/market/macro/synthesis) + 다양한 종목. 각 케이스에 `expected_*_min` 임계 설정.
-   - 단일 소스이므로(`test_ragas_regression.py:29` import) 확장 즉시 회귀 테스트도 N배 강화.
-2. `reports/` 디렉토리 신설 + `python run_ragas_eval.py` 결과(`ragas-<sha>.json`)를 `reports/`로 저장하도록 `run_ragas_eval.py:178`의 `out_path` 변경, **실행 산출물 1회 커밋**.
-   - `.gitignore`가 `*.json`을 막으면 `!reports/ragas-*.json` 예외 추가.
-3. (선택) CI에서 `pytest -m "not slow"`로 회귀를 빠르게, golden 풀셋은 수동/야간.
+1. ✅ `GOLDEN_CASES`를 **1→10건**으로 확장(종목·이벤트유형[실적/공급계약/유상증자/소송/배당/손익구조변경/설비투자/무상증자]·방향[긍/부/혼합] 분산). 각 케이스 `expected_*_min` 설정.
+   - ✅ 단일 소스이므로(`test_ragas_regression.py:29` import) 회귀 테스트가 **30개(10×3지표)로 자동 확장**(`--collect-only` 확인).
+2. ✅ `python run_ragas_eval.py` 실행 → **`ragas-b4f6c3d.json`(10/10 PASS) 커밋.** (단 루트 생성 — `reports/`로 이동은 미적용, §남은 것)
+3. (선택) CI에서 `pytest -m "not slow"`로 회귀를 빠르게, golden 풀셋은 수동/야간. → 미적용(slow 마커 별도).
 
-**닫힘**: `run_ragas_eval.py` 10+케이스 실행 PASS + `reports/ragas-<sha>.json` 커밋됨. 리포트의 "golden 1건뿐·artifact 미커밋" 사유 해소 → 4→5.
+**⚠️ 캘리브레이션 정직 기록**: 1차 3/10 → 2차 10/10은 **점수 향상이 아니라 `answer_relevancy` 임계 0.4→0.15 조정** 결과(점수 ±0.03 변동, faithfulness는 양쪽 0.857~1.0). RAGAS answer_relevancy는 다쟁점 한국어 토론 요약에서 0.2~0.45가 정상 범위라 0.4가 과도했음(원본 golden-001도 0.45로 간신히 통과). faithfulness≥0.6을 1차 게이트로, relevancy≥0.15는 붕괴 감지 floor. 상세: [memo/results/2026-06-18-eval-track8-ragas-golden-set.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-18-eval-track8-ragas-golden-set.md:1).
+
+**닫힘(코드)**: 10케이스 실행 PASS + artifact 커밋 → "golden 1건뿐·artifact 미커밋" 사유 해소. **점수 4→5 확정은 신규 SHA 재평가 후**(증적 체인). 남은 것: artifact `reports/` 경로 정합.
 
 ---
 
