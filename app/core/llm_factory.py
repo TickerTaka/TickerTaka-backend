@@ -28,10 +28,7 @@ def _get_langfuse_callback(session_id: str | None = None, tags: list[str] | None
         if get_langfuse() is None:
             return None
         from langfuse.langchain import CallbackHandler
-        return CallbackHandler(
-            session_id=session_id,
-            tags=tags or [],
-        )
+        return CallbackHandler()
     except Exception as e:
         logger.debug("[langfuse] callback 생성 실패 (무시): %s", e)
         return None

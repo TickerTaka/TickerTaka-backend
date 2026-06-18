@@ -213,7 +213,7 @@ def _log_hallucination(
         if lf is None:
             return
         lf.create_score(
-            trace_id=session_id,
+            session_id=session_id,
             name="hallucination",
             value=1.0,
             comment=f"[{agent_role.upper()} / {round_} / 주제{topic_index+1}] {note} (누적 {count}회)",
