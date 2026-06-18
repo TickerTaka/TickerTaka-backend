@@ -24,7 +24,7 @@ AI 종목 **토론 · 감성분석 대시보드**를 위한 FastAPI 백엔드입
 | Persistence | PostgreSQL(단일 SOT) + SQLAlchemy / Alembic |
 | Infra | Redis(lock/checkpoint), ChromaDB(vector index) |
 
-> 설계 문서: `memo/design/` (use-case / component / interface / sequence / ERD)
+> 설계 문서: `docs/design/` (use-case / component / interface / sequence / ERD)
 
 ## 실행 환경 전제
 

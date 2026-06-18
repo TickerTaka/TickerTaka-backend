@@ -40,7 +40,7 @@
 - ERD
 
 권장 경로:
-- `memo/design/` 신설 후 문서 5종 저장
+- `docs/design/` 신설 후 문서 5종 저장
 - 필요 시 발표용 축약본은 `docs/` 또는 `memo/results/`에 별도 요약
 
 기준 소스:
@@ -270,7 +270,7 @@
 - 발표용 도식 정리
 
 산출물:
-- `memo/design/*.md`
+- `docs/design/*.md`
 - 시퀀스/ERD mermaid
 
 ### 트랙 B. MCP / 외부 연동
@@ -773,17 +773,17 @@ MCP를 실제로 쓰려면 MCP 클라이언트/서버 라이브러리(예: `mcp`
 
 # 1차 작업 진행 기록 — #1 5대 설계문서 (2026-06-07)
 
-우선순위 #1(5대 설계문서)의 초안을 `memo/design/`에 5종 생성했고, **실제 코드와 대조해 4건을 보정**했다. 닫힘기준("문서 5종 전부 존재 + 코드 경로 1:1 대응")의 전반부는 충족됐고, 정합성 보정으로 후반부도 강화했다.
+우선순위 #1(5대 설계문서)의 초안을 `docs/design/`에 5종 생성했고, **실제 코드와 대조해 4건을 보정**했다. 닫힘기준("문서 5종 전부 존재 + 코드 경로 1:1 대응")의 전반부는 충족됐고, 정합성 보정으로 후반부도 강화했다.
 
 ## BB. 생성된 문서 (5/5)
 
 | 문서 | 파일 | 상태 |
 |---|---|---|
-| 유스케이스 명세서 | `memo/design/use-case-specification.md` | ✅ |
-| 컴포넌트 설계서 | `memo/design/component-design.md` | ✅ |
-| 인터페이스 정의서 | `memo/design/interface-definition.md` | ✅ |
-| 시퀀스 다이어그램 | `memo/design/sequence-diagram.md` | ✅ |
-| ERD | `memo/design/erd.md` | ✅ |
+| 유스케이스 명세서 | `docs/design/use-case-specification.md` | ✅ |
+| 컴포넌트 설계서 | `docs/design/component-design.md` | ✅ |
+| 인터페이스 정의서 | `docs/design/interface-definition.md` | ✅ |
+| 시퀀스 다이어그램 | `docs/design/sequence-diagram.md` | ✅ |
+| ERD | `docs/design/erd.md` | ✅ |
 
 → **5종 전부 존재** → 평가서 항목4 "누락 캡 1" 해제 조건의 1차 요건 충족.
 

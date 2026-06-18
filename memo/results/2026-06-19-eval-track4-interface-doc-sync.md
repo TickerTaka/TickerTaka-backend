@@ -8,7 +8,7 @@
 
 ## 1. 무엇을 했나
 
-`memo/design/interface-definition.md`를 **실제 구현된 `app/api/debate.py` 라우트와 1:1 동기화**했다. 코드엔 있으나 문서가 "추후 확장 예정"(§6)으로 격하 표기하던 2개 엔드포인트를 §3 정식 섹션으로 옮겨 기재. **코드 변경 0 (문서만).**
+`docs/design/interface-definition.md`를 **실제 구현된 `app/api/debate.py` 라우트와 1:1 동기화**했다. 코드엔 있으나 문서가 "추후 확장 예정"(§6)으로 격하 표기하던 2개 엔드포인트를 §3 정식 섹션으로 옮겨 기재. **코드 변경 0 (문서만).**
 
 ## 2. 격차 (동기화 전) — 코드가 문서보다 앞서 있었음
 
@@ -49,4 +49,4 @@
 
 - 재평가 리포트 보완 #9 / 교차검증 노트: [BDAI_Pocat_Team2-a134b5b-rerun-2026-06-13.md](/home/syt07203/TickerTaka-backend/memo/eval/BDAI_Pocat_Team2-a134b5b-rerun-2026-06-13.md:1)
 - 개선 계획 P3-3: [2026-06-13-eval-rerun-c-improvement-plan.md](/home/syt07203/TickerTaka-backend/memo/process/2026-06-13-eval-rerun-c-improvement-plan.md:1)
-- 동기화 대상: `memo/design/interface-definition.md` §3
+- 동기화 대상: `docs/design/interface-definition.md` §3

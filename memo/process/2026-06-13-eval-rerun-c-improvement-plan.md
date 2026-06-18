@@ -32,7 +32,7 @@
 | reranker 연결·default off | `evidence_retrieval.py:306-335`, `config.py:45` `RAG_RERANKER_ENABLED=false` | ✅ 일치 |
 | vLLM/Ollama/MLX 0건 | grep 0건, Qwen은 transformers 직접로드 + 기본 비활성(`config.py:34` `analysis_generation_model=None`) | ✅ 일치 |
 | **감성분석에 Qwen sLLM 사용** | `evidence_analysis.py:253-362` `LocalQwenEvidenceAnalyzer`(`AutoModelForCausalLM`+`model.generate`), 워커 `analysis_worker.py`에서 호출, 게이팅(`:561-579`) | ✅ **확인** — 단 transformers 직접로드(서빙 아님)·기본 비활성 → 항목7=0 원인 |
-| interface 문서가 SSE stream을 "추후 예정"으로 격하 | `memo/design/interface-definition.md:219-221`(§6), 실제 구현 `app/api/debate.py:128` | ✅ 일치 |
+| interface 문서가 SSE stream을 "추후 예정"으로 격하 | `docs/design/interface-definition.md:219-221`(§6), 실제 구현 `app/api/debate.py:128` | ✅ 일치 |
 | MCP 단방향 클라이언트만 | `app/integrations/notion_mcp.py:45-164` stdio JSON-RPC 자체구현, Python `mcp` SDK 미사용 | ✅ 일치 |
 
 추가 발견:
