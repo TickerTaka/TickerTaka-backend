@@ -48,7 +48,7 @@
 | **P0-1** | 항목3 (×2) | 2→3(~4) | **+2~4** | 감성분석 Qwen sLLM에 langfuse trace (토론 Agent·langfuse는 미변경 — 강사 합의) | 中 |
 | **P0-2** | 항목7 (×1) | 0→3 | **+3** | 감성분석 Qwen을 vLLM 서빙으로 전환 (P0-1과 동일 경로) | 中 |
 | **P1-1** | 항목8 (×2) | 4→5 | **+2** | golden 1→10~20 + `reports/ragas-<sha>.json` 커밋 | 低 |
-| **P1-2** | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 | 低 |
+| **P1-2** ✅ | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 **(완료 2026-06-19, DEBATE_TIMEOUT_SECONDS=300)** | 低 |
 | **P1-3** | 항목1 (×2) | 4→5 | **+2** | 동적 멀티에이전트 trace([D]) — P0-E·P0-1로 충족 | 低(의존) |
 | P2-1 | 항목9 (×1) | 4→5 | +1 | golden relevance + nDCG/MRR/precision@k | 中 |
 | P2-2 | 항목10 (×1) | 4→5 | +1 | SSE 청크타이밍 [D] 프로빙 — P0-E로 충족 | 低(의존) |
@@ -218,14 +218,15 @@ vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 �
 
 ---
 
-## P1-2. 항목2 — 그래프 전체 타임아웃 (×2, +2)
+## P1-2. 항목2 — 그래프 전체 타임아웃 (×2, +2) — ✅ 완료(2026-06-19)
 
 리포트 잔여 지적: 노드별 try/except·tenacity·fail-open은 충분하나 **그래프 전체 hang 방어(`asyncio.wait_for`) 부재**.
-- `app/domain/debate_service.py`의 그래프 실행부(`run_session`의 `ainvoke`, `stream_session`의 `astream` 소비 루프)를 `asyncio.wait_for(..., timeout=settings.debate_total_timeout_seconds)`로 감싼다.
-- `config.py`에 `DEBATE_TOTAL_TIMEOUT_SECONDS`(예: 180) 추가.
-- 타임아웃 발생 시: 스트림 경로는 이미 `debate.py:256-260` `finally`가 `fail_session_if_running`으로 정리하므로, `TimeoutError`를 잡아 `error` SSE 이벤트 + 세션 failed 처리로 연결.
+- ✅ `app/domain/debate_service.py` `_astream_with_config`(run/stream 공통 실행부)를 `async` 제너레이터로 바꿔, 각 청크(`__anext__`)를 **남은 예산으로 `asyncio.wait_for`** 하여 단일 노드 hang + 누적 지연을 모두 데드라인으로 차단.
+- ✅ `config.py`에 `DEBATE_TIMEOUT_SECONDS`(기본 300, 0이면 비활성) 추가.
+- ✅ 타임아웃 시 `TimeoutError` → `run_session`/`stream_session`의 `except`가 `fail_session_if_running` + 락 해제, SSE는 endpoint가 `error` 이벤트로 변환(기존 fail-soft 재사용).
+- ✅ 테스트 `tests/test_agents/test_debate_timeout.py` 3종(발동/정상통과/비활성).
 
-**닫힘**: 인위적 지연 주입 시 그래프가 무한 대기하지 않고 timeout→failed로 graceful 종료. 4→5.
+**닫힘**: 인위적 지연(mock hang) 시 그래프가 무한 대기하지 않고 timeout→failed로 graceful 종료(테스트 검증). 점수 4→5(×2)는 신규 SHA 재평가 후 확정. 상세: [memo/results/2026-06-19-eval-track2-graph-timeout.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track2-graph-timeout.md:1).
 
 ---
 
