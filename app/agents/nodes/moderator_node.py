@@ -161,7 +161,7 @@ def moderator_check_node(state: DebateState) -> dict:
         msg = f"[사회자 개입] {note}"
         if parsed.get("corrected_fact"):
             msg += f"\n정정: {parsed['corrected_fact']}"
-        if hallucination_count >= 2:
+        if hallucination_count >= 5:
             msg += f"\n토론 중단: {last['agent_role']} 발언에서 반복적인 검증 문제가 감지되었습니다."
         extra = [{
             "agent_role":  "moderator",
@@ -191,7 +191,7 @@ def moderator_check_node(state: DebateState) -> dict:
         "statements":          extra,
         "round_order":         state["round_order"] + (1 if extra else 0),
     }
-    if verdict == "hallucination" and hallucination_count >= 2:
+    if verdict == "hallucination" and hallucination_count >= 5:
         result["moderator_flag"] = "end"
         result["debate_ended_by"] = last["agent_role"]
         result["debate_end_reason"] = note or "반복적인 발언 검증 실패"
