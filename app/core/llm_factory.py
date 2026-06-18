@@ -92,28 +92,38 @@ def get_llm(
     retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIError)),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    reraise=False,
+    reraise=True,
 )
+def _invoke_primary(
+    messages: list[BaseMessage],
+    role: Literal["bull", "bear", "judge", "moderator", "fallback"],
+    temperature: float,
+) -> str:
+    """primary 모델 호출 — 최대 3회 retry, 소진 시 raise."""
+    llm = get_llm(role, temperature=temperature)
+    return llm.invoke(messages).content
+
+
 def invoke_with_fallback(
     messages: list[BaseMessage],
     role: Literal["bull", "bear", "judge", "moderator", "fallback"] = "fallback",
     temperature: float = 0.3,
 ) -> str:
-    """retry + fallback 모델 체인으로 LLM 호출. 재시도 소진 시 fallback 모델로 강등."""
+    """primary 3회 retry → 실패 시 fallback 모델로 강등. fallback도 실패하면 raise."""
     settings = get_settings()
     try:
-        llm = get_llm(role, temperature=temperature)
-        return llm.invoke(messages).content
+        return _invoke_primary(messages, role, temperature)
     except (RateLimitError, APITimeoutError, APIError) as e:
-        logger.warning("[llm] %s 모델 실패, fallback(%s)로 재시도: %s", role, settings.fallback_model, e)
-        fallback_llm = ChatOpenAI(
-            model=settings.fallback_model,
-            temperature=temperature,
-            api_key=settings.openai_api_key,
-            max_retries=2,
-            timeout=30,
-        )
-        return fallback_llm.invoke(messages).content
+        logger.warning("[llm] %s 모델 3회 소진, fallback(%s)으로 강등: %s", role, settings.fallback_model, e)
+
+    fallback_llm = ChatOpenAI(
+        model=settings.fallback_model,
+        temperature=temperature,
+        api_key=settings.openai_api_key,
+        max_retries=2,
+        timeout=30,
+    )
+    return fallback_llm.invoke(messages).content
 
 
 __all__ = ["get_llm", "invoke_with_fallback", "get_tracker"]
