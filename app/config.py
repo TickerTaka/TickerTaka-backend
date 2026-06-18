@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     estimated_tokens_macro: int = Field(default=9000, alias="ESTIMATED_TOKENS_MACRO")
     estimated_tokens_synthesis: int = Field(default=15000, alias="ESTIMATED_TOKENS_SYNTHESIS")
     default_llm_model: str = Field(default="openai/gpt-4o-mini", alias="DEFAULT_LLM_MODEL")
-    judge_llm_model: str = Field(default="anthropic/claude-haiku-4-5", alias="JUDGE_LLM_MODEL")
+    judge_llm_model: str = Field(default="gpt-4o-mini", alias="JUDGE_LLM_MODEL")
 
     # MCP / Notion publish
     notion_token: str = Field(default="", alias="NOTION_TOKEN")

@@ -2,6 +2,8 @@ from __future__ import annotations
 import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from openai import APIError, RateLimitError, APITimeoutError
 
 from app.agents.state import DebateState
 from app.agents.prompts.prompts import BULL_SYSTEM, BULL_HUMAN
@@ -46,18 +48,9 @@ def bull_agent_node(state: DebateState) -> dict:
     )
 
     try:
-        llm    = get_llm("bull", temperature=0.7, cached=False)
-        agent  = create_react_agent(llm, _TOOLS)
-        result = agent.invoke({
-            "messages": [
-                SystemMessage(content=BULL_SYSTEM),
-                HumanMessage(content=user_input),
-            ]
-        })
-        content   = result["messages"][-1].content
-        evidences = _extract_evidences(result["messages"])
+        content, evidences = _invoke_bull(user_input)
     except Exception as e:
-        logger.error(f"[bull] 오류: {e}")
+        logger.error(f"[bull] 최종 오류 (재시도 소진): {e}")
         content, evidences = f"(오류: {e})", []
 
     new_round_order = state["round_order"] + 1
@@ -82,6 +75,24 @@ def bull_agent_node(state: DebateState) -> dict:
         "current_topic_index": next_topic_index,
         "current_round":       _ROUND_NAME.get(next_turn, "rebuttal"),
     }
+
+
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _invoke_bull(user_input: str) -> tuple[str, list]:
+    llm    = get_llm("bull", temperature=0.7, cached=False)
+    agent  = create_react_agent(llm, _TOOLS)
+    result = agent.invoke({
+        "messages": [
+            SystemMessage(content=BULL_SYSTEM),
+            HumanMessage(content=user_input),
+        ]
+    })
+    return result["messages"][-1].content, _extract_evidences(result["messages"])
 
 
 def _extract_evidences(messages) -> list[dict]:
