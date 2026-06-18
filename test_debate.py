@@ -39,6 +39,16 @@ if NO_DB:
     _repo.save_moderator_summary = _noop
     _repo.update_session_status  = _noop
     _repo.fail_session_if_running = _noop
+    # RAGAS eval DB 저장도 skip
+    import app.domain.debate_evaluation as _eval
+    _orig_summary_eval  = _eval.evaluate_summary_async
+    _orig_evidence_eval = _eval.evaluate_evidence_async
+    async def _eval_summary_no_db(session_id, statements, summary, agenda=None, save=True):
+        return await _orig_summary_eval(session_id, statements, summary, agenda, save=False)
+    async def _eval_evidence_no_db(session_id, evidences, query, agenda=None, save=True):
+        return await _orig_evidence_eval(session_id, evidences, query, agenda, save=False)
+    _eval.evaluate_summary_async  = _eval_summary_no_db
+    _eval.evaluate_evidence_async = _eval_evidence_no_db
 
 JUDGE_MODE = "--judge" in sys.argv
 if JUDGE_MODE:
