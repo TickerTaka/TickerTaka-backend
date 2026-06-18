@@ -25,9 +25,10 @@ def _final_node(state: DebateState) -> Literal["judge_agent", "moderator_summary
 
 
 def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "judge_agent", "moderator_summary"]:
-    # 환각 2회 이상 → 강제 종료
-    if state.get("hallucination_count", 0) >= 2:
-        logger.warning("[graph] 환각 2회 초과 → final 이동")
+    # 환각 5회 이상 → 강제 종료 (4턴×3주제=12 발언에서 모더레이터가 과민 판정해도
+    # 토론이 1주제만에 끊기지 않도록 임계값을 상향.)
+    if state.get("hallucination_count", 0) >= 5:
+        logger.warning("[graph] 환각 5회 초과 → final 이동")
         return _final_node(state)
 
     if state["moderator_flag"] == "end":
