@@ -154,10 +154,14 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `app/core/tracing.py` — 게이트 클라이언트 `get_langfuse()`
 - 계측 지점: `evidence_analysis.py`의 `analyze_text`(부모 `evidence-enrich` span) + Qwen `analyze()`(generation span / remote는 `langfuse.openai` 드롭인 자동계측), 워커 종료 시 `flush`
 
+계측 범위 — **양쪽 경로 모두 trace**:
+- **감성분석 sLLM(Qwen)**: `evidence_analysis.py`의 `analyze_text`(부모 `evidence-enrich` span) + Qwen `analyze()`(generation span) → 분석 1건을 1 trace로, 단계별 입출력·토큰·latency·drop 기록.
+- **토론 경로(bull/bear/moderator)**: `debate_service.py` `_astream_with_config`가 graph config에 `langfuse.langchain.CallbackHandler`를 주입(태그 `debate`)해 모든 토론 LLM 호출을 적재.
+
 책임:
-- 감성분석 sLLM(Qwen) 분석 1건을 **1 trace**로 묶어 단계별 입출력·토큰·latency·drop을 기록(진단 + 평가 항목3 관측성 충족)
+- 호출 1건을 **1 trace**로 묶어 단계별 가시화(진단 + 평가 항목3 관측성 충족)
 - **게이트**: `LANGFUSE_PUBLIC_KEY`+`SECRET_KEY`+`LANGFUSE_TRACING_ENABLED`가 모두 있을 때만 활성, 하나라도 없으면 `None` 반환 → 호출부 전부 no-op(운영/테스트 영향 0)
-- 토론 경로(bull/bear/moderator)에는 적용하지 않음(강사 합의 — 감성분석 sLLM 경로 한정)
+- (정정) 강사 합의는 **"토론 Agent를 sLLM으로 바꾸지 않아도 된다"**였을 뿐 langfuse 적용 범위 제한이 아니다. 토론은 프런티어(gpt-4o-mini) 유지하되 trace는 붙는다.
 
 ## 배포/실행 환경
 

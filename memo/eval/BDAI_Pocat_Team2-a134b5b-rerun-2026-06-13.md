@@ -50,7 +50,7 @@ a134b5b에서 항목3을 2점에 묶은 두 차단 요인 중 **"langfuse 완전
 
 ### a134b5b 리포트와의 범위 차이 (중요)
 
-a134b5b 리포트의 보완 #1은 langfuse를 **본 토론 경로(bull/bear/moderator)에 `LangfuseCallbackHandler`로 주입**하고 sLLM도 토론 경로에 끌어내라고 권고했다. 그러나 **강사 합의로 범위가 바뀌었다**(2026-06-13): 토론 경로는 손대지 않고, **이미 존재하는 감성분석 sLLM(Qwen) 한 경로에서 항목3을 충족**한다. 따라서 실제 구현은 보완 #1의 "토론 경로 langfuse"가 아니라 **"Qwen 분석 경로 langfuse"**다 — 경로는 다르나 *"langfuse 부재"라는 차단 요인 자체*는 해소된다.
+a134b5b 리포트의 보완 #1은 langfuse를 **본 토론 경로(bull/bear/moderator)에 `LangfuseCallbackHandler`로 주입**하고 sLLM도 토론 경로에 끌어내라고 권고했다. 강사 합의(2026-06-13)는 그중 **"토론 Agent를 sLLM으로 바꾸지 않아도 된다"**(토론은 프런티어 gpt-4o-mini 유지)였고, **langfuse 적용 범위 제한은 합의에 없었다**(초기 정리 오류 정정). 실제 구현은 **두 경로 모두 trace**한다: ① 감성분석 Qwen(`evidence_analysis` 수동 span) + ② **토론 경로(`debate_service._astream_with_config`가 `CallbackHandler` 주입, 태그 `debate`)**. 즉 보완 #1의 "토론 경로 langfuse"도 실제로 충족됐고, "langfuse 부재" 차단 요인은 확실히 해소된다.
 
 ### 재채점 시 예상 (확정 아님)
 
@@ -111,7 +111,7 @@ a134b5b의 5점 미달 사유("golden 1건뿐 · 실행 artifact 미커밋")가 
 
 ## 보완 필요 (우선순위 순)
 
-1. ~~**[항목3] langfuse 실연결 (가중 ×2, 현재 2 → 4 잠재)**~~ — **✅ langfuse 부분 해소(후속 커밋 `098d898`, [갱신 § 참조](#갱신-2026-06-16--항목3-langfuse-후속-구현-반영)).** 단 **이 권고의 원래 방향(토론 경로 `LangfuseCallbackHandler` 주입)은 강사 합의로 폐기**됐다 — 토론 경로는 건드리지 않고 감성분석 Qwen 경로에 langfuse를 붙이는 방식으로 구현됨. 남은 상향 조건은 ① Qwen 기본 활성화 ② 항목7 서빙 전환(아래 #2와 동시 해결).
+1. ~~**[항목3] langfuse 실연결 (가중 ×2, 현재 2 → 4 잠재)**~~ — **✅ langfuse 해소([갱신 § 참조](#갱신-2026-06-16--항목3-langfuse-후속-구현-반영)).** **두 경로 모두 trace**: 감성분석 Qwen(`evidence_analysis` 수동 span) + **토론 경로(`debate_service._astream_with_config`가 `LangfuseCallbackHandler` 주입, 태그 `debate`)**. (정정: 강사 합의는 "토론 Agent를 sLLM으로 안 바꿔도 된다"였고 langfuse 범위 제한이 아니었음 — 토론 경로 langfuse도 적용됨.) 남은 상향 조건은 Qwen 기본 활성화 + 항목7 서빙 전환.
 2. ~~**[항목7] 로컬 서빙 신설 (현재 0 → 3+ 잠재)**~~ — **✅ Ollama 서빙 구현·E2E 검증(후속 커밋, [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)).** `RemoteQwenEvidenceAnalyzer`(OpenAI 호환, Ollama/vLLM 공용) + backend 분기 + 워커가 Ollama로 공시 1건 처리 확인. 남은 건 강사 인정 1줄 컨펌 + 신규 SHA 재평가.
 3. **[항목1·10] 동적 trace/스트리밍 프로빙으로 [S]→[D] 격상** — postgres를 기본 기동(또는 SQLite fallback) 후 `curl -N`로 SSE `text/event-stream` 청크 타이밍 확인 + langfuse trace 첨부 시 항목1·10 각각 5점 도달 가능.
 4. ~~**[항목8] golden set 확장 + artifact 커밋 (4 → 5 잠재)**~~ — **✅ golden 1→10건 확장 + `ragas-b4f6c3d.json`(10/10 PASS) 커밋(후속 커밋, [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)).** 단 10/10은 `answer_relevancy` 임계 0.4→0.15 캘리브레이션 결과(점수 향상 아님 — 정직 기록은 갱신 § 참조). 남은 건 artifact `reports/` 경로 정합 + 신규 SHA 재평가.

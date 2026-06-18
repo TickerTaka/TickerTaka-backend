@@ -82,7 +82,7 @@
 
 ## P0-1. 항목3 — 감성분석 Qwen sLLM에 langfuse trace (×2)
 
-> **강사 합의(2026-06-13)**: 토론 Agent를 sLLM으로 바꾸거나 토론 경로에 langfuse를 붙이지 **않는다.** 대신 **이미 존재하는 감성분석 sLLM(Qwen)에만 langfuse를 적용해 trace**한다. 따라서 직전 계획의 "3-B. sLLM 본토론 진입"은 **폐기**한다.
+> **강사 합의(2026-06-13, 정정)**: 합의 내용은 **"토론 Agent를 sLLM으로 바꾸지 않아도 된다"**뿐이다(토론은 프런티어 gpt-4o-mini 유지). **langfuse 적용 범위 제한은 합의에 없었다** — langfuse는 감성분석 Qwen 경로 + 토론 경로 양쪽에 붙어도 된다(실제로 `debate_service._astream_with_config`가 토론에 `CallbackHandler` 주입 중). 따라서 직전 계획의 "3-B. sLLM 본토론 진입"(토론을 sLLM으로 전환)만 **폐기**한다.
 
 ### 근거 (요건 충족 논리)
 항목3 = `sLLM(≤300B) + 검증 Agent + langfuse`. 세 조각 중:
