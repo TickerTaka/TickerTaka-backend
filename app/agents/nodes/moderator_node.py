@@ -13,6 +13,7 @@ from app.agents.prompts.prompts import (
     MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN,
     JUDGE_SYSTEM, JUDGE_HUMAN,
 )
+from app.config import get_settings
 from app.core.debate_runtime_guard import get_tracker
 from app.core.llm_factory import get_llm, invoke_with_fallback
 from app.repositories.debate_repo import (
@@ -54,20 +55,11 @@ def _build_summary_fallback(state: DebateState) -> tuple[str, list[str]]:
         f"{topic}에 대한 찬반 논거가 제시되었으며, 상세 근거는 개별 발언을 참고해야 합니다."
         for topic in agenda[:3]
     ]
-
-    judge_result = state.get("judge_result") or {}
-    judge_line = ""
-    if judge_result:
-        leaning = judge_result.get("leaning", "mixed")
-        rationale = judge_result.get("rationale", "")
-        judge_line = f" Judge는 현재 발언 기준으로 {leaning} 쪽 논리가 더 설득력 있다고 보았습니다. {rationale}"
-
     end_notice = _format_debate_end_notice(state)
     summary = (
         "사회자 요약 생성 중 LLM 호출이 실패하여 축약 요약으로 대체했습니다. "
         f"{state['symbol_name']}({state['symbol']})에 대해 {len(non_moderator)}건의 찬반 발언이 기록되었고, "
         "최종 판단 전 개별 발언과 근거를 다시 확인해야 합니다."
-        f"{judge_line}"
         f"{(' ' + end_notice) if end_notice else ''}"
     )
     return summary, key_points
@@ -87,6 +79,8 @@ def _schedule_background_task(coro, *, label: str) -> None:
     def _log_task_result(done_task: asyncio.Task) -> None:
         try:
             done_task.result()
+        except asyncio.CancelledError:
+            pass  # 이벤트 루프 종료 시 정상 취소
         except Exception as exc:
             logger.error("[%s] 백그라운드 태스크 실패: %s", label, exc)
 
@@ -102,21 +96,6 @@ def _format_debate_end_notice(state: DebateState) -> str:
     if reason:
         return f"토론은 {role_label} 발언 검증 문제로 중단되었습니다: {reason}"
     return f"토론은 {role_label} 발언 검증 문제로 중단되었습니다."
-
-
-def _format_judge_result(value) -> str:
-    if not isinstance(value, dict) or not value:
-        return "Judge 판정 없음"
-    leaning = value.get("leaning", "mixed")
-    confidence = value.get("confidence", "low")
-    rationale = value.get("rationale", "")
-    action_guidance = value.get("action_guidance", "")
-    return (
-        f"- leaning: {leaning}\n"
-        f"- confidence: {confidence}\n"
-        f"- rationale: {rationale}\n"
-        f"- action_guidance: {action_guidance}"
-    )
 
 
 # ── 1. 의제 설계 ───────────────────────────────────────────
@@ -190,7 +169,7 @@ def moderator_check_node(state: DebateState) -> dict:
             "round_order": state["round_order"] + 1,
             "topic_index": last.get("topic_index", state.get("current_topic_index", 0)),
             "content":     msg,
-            "model_used":  "gpt-4o-mini",
+            "model_used":  get_settings().moderator_model,
             "evidences":   [],
         }]
 
@@ -296,7 +275,6 @@ async def moderator_summary_node(state: DebateState) -> dict:
     try:
         raw = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
             all_statements=all_stmts,
-            judge_result=_format_judge_result(state.get("judge_result")),
             debate_end_notice=_format_debate_end_notice(state) or "중단 없음",
             symbol=state["symbol"], symbol_name=state["symbol_name"],
             category=state["category"],
@@ -317,26 +295,6 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "claim":            "opening",
         "counter_rebuttal": "closing",
     }
-
-    # debate_session upsert (FK 충족)
-    try:
-        from app.core.database import get_pool  # noqa
-        _pool = await get_pool()
-        async with _pool.acquire() as conn:
-            # app_user upsert
-            await conn.execute("""
-                INSERT INTO app_user (id, email, password_hash)
-                VALUES ($1::uuid, $2, 'test')
-                ON CONFLICT (id) DO NOTHING
-            """, state["user_id"], f"{state['user_id']}@test.local")
-            # debate_session upsert
-            await conn.execute("""
-                INSERT INTO debate_session (id, user_id, symbol, category, status)
-                VALUES ($1::uuid, $2::uuid, $3, $4, 'running')
-                ON CONFLICT (id) DO NOTHING
-            """, state["session_id"], state["user_id"], state["symbol"], state["category"])
-    except Exception as e:
-        logger.warning(f"[moderator_summary] session upsert 실패 (무시): {e}")
 
     # DB 저장
     for stmt in state["statements"]:
@@ -363,7 +321,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
     await save_statement(
         session_id=state["session_id"], round_="summary",
         round_order=state["round_order"] + 1, agent_role="moderator",
-        content=summary, model_name="gpt-4o-mini",
+        content=summary, model_name=get_settings().moderator_model,
     )
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
@@ -408,7 +366,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "statements": [{
             "agent_role": "moderator", "round": "summary",
             "round_order": state["round_order"] + 1,
-            "content": summary, "model_used": "gpt-4o-mini", "evidences": [],
+            "content": summary, "model_used": get_settings().moderator_model, "evidences": [],
         }],
         "summary_content": summary,
         "key_points":      points,
