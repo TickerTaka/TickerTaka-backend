@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     max_debates_per_user_per_day: int = Field(default=20, alias="MAX_DEBATES_PER_USER_PER_DAY")
     debate_active_ttl_seconds: int = Field(default=1800, alias="DEBATE_ACTIVE_TTL_SECONDS")
     debate_graph_recursion_limit: int = Field(default=64, alias="DEBATE_GRAPH_RECURSION_LIMIT")
+    # 토론 그래프 전체 실행 데드라인(초). 노드 hang/누적 지연 방어 — 초과 시 TimeoutError 로
+    # 중단되어 기존 fail-soft(세션 failed 마킹 + 락 해제 + SSE error)로 처리. 0 이면 비활성.
+    debate_timeout_seconds: int = Field(default=300, alias="DEBATE_TIMEOUT_SECONDS")
     default_estimated_tokens_per_debate: int = Field(default=12000, alias="DEFAULT_ESTIMATED_TOKENS_PER_DEBATE")
     estimated_tokens_financial: int = Field(default=12000, alias="ESTIMATED_TOKENS_FINANCIAL")
     estimated_tokens_technical: int = Field(default=10000, alias="ESTIMATED_TOKENS_TECHNICAL")
