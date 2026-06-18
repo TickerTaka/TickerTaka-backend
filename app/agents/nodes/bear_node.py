@@ -2,11 +2,15 @@ from __future__ import annotations
 import logging
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from openai import APIError, RateLimitError, APITimeoutError
 
 from app.agents.state import DebateState
 from app.agents.prompts.prompts import BEAR_SYSTEM, BEAR_HUMAN
 from app.agents.tools.evidence_tools import search_evidence
+from app.agents.nodes.utils import extract_evidences
 from app.core.llm_factory import get_llm
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 _TOOLS = [search_evidence]  # 가격/재무 데이터는 data_agent에서 이미 제공
@@ -45,18 +49,9 @@ def bear_agent_node(state: DebateState) -> dict:
     )
 
     try:
-        llm    = get_llm("bear", temperature=0.7, cached=False)
-        agent  = create_react_agent(llm, _TOOLS)
-        result = agent.invoke({
-            "messages": [
-                SystemMessage(content=BEAR_SYSTEM),
-                HumanMessage(content=user_input),
-            ]
-        })
-        content   = result["messages"][-1].content
-        evidences = _extract_evidences(result["messages"])
+        content, evidences = _invoke_bear(user_input)
     except Exception as e:
-        logger.error(f"[bear] 오류: {e}")
+        logger.error(f"[bear] 최종 오류 (재시도 소진): {e}")
         content, evidences = f"(오류: {e})", []
 
     new_round_order = state["round_order"] + 1
@@ -79,7 +74,7 @@ def bear_agent_node(state: DebateState) -> dict:
             "round_order": new_round_order,
             "topic_index": topic_idx,
             "content":     content,
-            "model_used":  "gpt-4o-mini",
+            "model_used":  get_settings().bear_model,
             "evidences":   evidences,
         }],
         "round_order":         new_round_order,
@@ -89,23 +84,19 @@ def bear_agent_node(state: DebateState) -> dict:
     }
 
 
-def _extract_evidences(messages) -> list[dict]:
-    """LangChain ToolMessage에서 search_evidence 결과 추출 (OpenAI 포맷)."""
-    import json
-    evidences = []
-    for msg in messages:
-        # OpenAI: ToolMessage 객체, content는 JSON 문자열
-        if hasattr(msg, "type") and msg.type == "tool" and hasattr(msg, "content"):
-            try:
-                parsed = json.loads(msg.content) if isinstance(msg.content, str) else msg.content
-                if isinstance(parsed, list):
-                    evidences.extend(parsed)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        # Anthropic 포맷 호환 (tool_result block)
-        elif hasattr(msg, "content") and isinstance(msg.content, list):
-            for block in msg.content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    if isinstance(block.get("content"), list):
-                        evidences.extend(block["content"])
-    return evidences
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _invoke_bear(user_input: str) -> tuple[str, list]:
+    llm    = get_llm("bear", temperature=0.7, cached=False)
+    agent  = create_react_agent(llm, _TOOLS)
+    result = agent.invoke({
+        "messages": [
+            SystemMessage(content=BEAR_SYSTEM),
+            HumanMessage(content=user_input),
+        ]
+    })
+    return result["messages"][-1].content, extract_evidences(result["messages"])

@@ -127,22 +127,58 @@ MODERATOR_CHECK_HUMAN = """
 
 # ── Moderator: 최종 요약 ─────────────────────────────────
 MODERATOR_SUMMARY_SYSTEM = """당신은 주식 투자 토론의 중립적인 사회자입니다.
-Bull과 Bear의 토론을 종합하여 투자 판단에 도움이 되는 요약을 작성합니다.
-승자를 결정하지 않습니다."""
+Bull과 Bear 양측의 주장과 근거를 균형 있게 정리합니다.
+어느 한쪽 편을 들지 말고, 각 의제별로 양측의 핵심 논거를 객관적으로 요약하세요."""
 
 MODERATOR_SUMMARY_HUMAN = """
+[토론 의제]
+{agenda}
+
+[전체 발언]
+{all_statements}
+
+[토론 중단 정보]
+{debate_end_notice}
+
+[종목] {symbol} ({symbol_name}) — {category}
+{price_context}
+{financial_context}
+{evidence_context}
+
+아래 두 가지 요약을 모두 작성하세요.
+
+출력 형식 (JSON만):
+{{
+  "structured_summary": "의제별 중립 요약. [의제1] Bull: ... / Bear: ... [의제2] Bull: ... / Bear: ... [의제3] Bull: ... / Bear: ... 양측이 가장 날카롭게 충돌한 쟁점: ...",
+  "summary_content": "투자자가 이해하기 쉬운 서술형 요약. '~한 점에서 매수를 고민해볼 수 있고, ~한 점이 중요하다면 보유 또는 매도를 고려하세요' 형식으로 2~3문장.",
+  "key_points": ["의제1 핵심 쟁점 1줄", "의제2 핵심 쟁점 1줄", "의제3 핵심 쟁점 1줄"]
+}}
+"""
+
+# ── Judge: 최종 판정 ─────────────────────────────────────
+JUDGE_SYSTEM = """당신은 주식 토론의 Judge 에이전트입니다.
+Bull과 Bear의 발언을 검토하고 어느 쪽 논리가 더 근거 있고 설득력 있는지 판정합니다.
+투자 결과를 단정하지 말고, 제공된 발언과 데이터에 근거해 논리적 우위를 평가하세요."""
+
+JUDGE_HUMAN = """
 [전체 발언]
 {all_statements}
 
 [종목] {symbol} ({symbol_name}) — {category}
+
+[데이터]
 {price_context}
+{financial_context}
 {evidence_context}
 
-아래 형식으로 요약하세요:
+[토론 중단 정보]
+{debate_end_notice}
 
-출력 형식 (JSON만):
+아래 형식으로 JSON만 출력하세요:
 {{
-  "summary_content": "3개 주제별 핵심 요약 + 각 주제에 대한 Bull/Bear 핵심 논거",
-  "key_points": ["체크리스트1", "체크리스트2", "체크리스트3"]
+  "leaning": "bull" | "bear" | "mixed",
+  "confidence": "low" | "medium" | "high",
+  "rationale": "왜 그쪽 논거가 더 설득력 있는지 근거 중심으로 2~3문장",
+  "action_guidance": "이 판정을 바탕으로 매수/보유/매도 검토 시 확인해야 할 조건 1~2문장"
 }}
 """

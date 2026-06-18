@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.state import DebateState
@@ -30,6 +31,7 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
+        decision_agent: str = "moderator",
         estimated_tokens: int = 0,
     ) -> DebateState:
         start_result = self.tracker.try_start_session(
@@ -49,11 +51,13 @@ class DebateExecutionService:
             symbol=symbol,
             symbol_name=symbol_name,
             category=category,
+            decision_agent=decision_agent,
         )
+        state["decision_agent"] = decision_agent if decision_agent == "judge" else "moderator"
 
         try:
             with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-                async for chunk in _astream_with_config(graph_runner, state):
+                async for chunk in _astream_with_config(graph_runner, state, session_id=session_id, user_id=user_id):
                     node = next(iter(chunk))
                     data = chunk[node]
                     state = merge_state(state, data)
@@ -76,6 +80,7 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
+        decision_agent: str = "moderator",
         estimated_tokens: int = 0,
     ):
         start_result = self.tracker.try_start_session(
@@ -95,7 +100,9 @@ class DebateExecutionService:
             symbol=symbol,
             symbol_name=symbol_name,
             category=category,
+            decision_agent=decision_agent,
         )
+        state["decision_agent"] = decision_agent if decision_agent == "judge" else "moderator"
 
         try:
             yield _stream_event(
@@ -105,11 +112,12 @@ class DebateExecutionService:
                     "symbol": symbol,
                     "symbol_name": symbol_name,
                     "category": category,
+                    "decision_agent": decision_agent,
                     "status": "running",
                 },
             )
             with self.tracker.bind_context(user_id=user_id, symbol=symbol, session_id=session_id):
-                async for chunk in _astream_with_config(graph_runner, state):
+                async for chunk in _astream_with_config(graph_runner, state, session_id=session_id, user_id=user_id):
                     node = next(iter(chunk))
                     data = chunk[node]
                     state = merge_state(state, data)
@@ -139,6 +147,10 @@ class DebateExecutionService:
                 "status": "completed",
                 "summary_content": state.get("summary_content", ""),
                 "key_points": state.get("key_points", []),
+                "decision_agent": state.get("decision_agent", "moderator"),
+                "judge_result": state.get("judge_result", {}),
+                "debate_ended_by": state.get("debate_ended_by", ""),
+                "debate_end_reason": state.get("debate_end_reason", ""),
             },
         )
 
@@ -150,6 +162,7 @@ class DebateExecutionService:
         symbol: str,
         symbol_name: str,
         category: str,
+        decision_agent: str = "moderator",
     ) -> DebateState:
         return {
             "session_id": session_id,
@@ -157,18 +170,25 @@ class DebateExecutionService:
             "symbol": symbol,
             "symbol_name": symbol_name,
             "category": category,
+            "decision_agent": decision_agent if decision_agent == "judge" else "moderator",
             "current_round": "opening",
             "round_order": 0,
             "max_rounds": 3,
+            "current_topic_index": 0,
+            "current_turn": 1,
             "agenda": [],
             "price_context": "",
             "financial_context": "",
             "evidence_context": "",
             "news_chunks": [],
+            "initial_evidences": [],
             "statements": [],
             "moderator_flag": "ok",
             "intervention_note": "",
             "hallucination_count": 0,
+            "debate_ended_by": "",
+            "debate_end_reason": "",
+            "judge_result": {},
             "summary_content": "",
             "key_points": [],
         }
@@ -209,6 +229,28 @@ class DebateExecutionService:
                     },
                 )
             )
+        if node == "moderator_check" and data.get("debate_ended_by"):
+            events.append(
+                _stream_event(
+                    "debate_stopped",
+                    {
+                        "session_id": session_id,
+                        "ended_by": data.get("debate_ended_by", ""),
+                        "reason": data.get("debate_end_reason", ""),
+                        "hallucination_count": data.get("hallucination_count", 0),
+                    },
+                )
+            )
+        if node == "judge_agent":
+            events.append(
+                _stream_event(
+                    "judge",
+                    {
+                        "session_id": session_id,
+                        "judge_result": data.get("judge_result", {}),
+                    },
+                )
+            )
         for statement in data.get("statements", []):
             events.append(
                 _stream_event(
@@ -234,6 +276,10 @@ class DebateExecutionService:
                         "session_id": session_id,
                         "summary_content": data.get("summary_content", ""),
                         "key_points": data.get("key_points", []),
+                        "decision_agent": state.get("decision_agent", "moderator"),
+                        "judge_result": state.get("judge_result", {}),
+                        "debate_ended_by": state.get("debate_ended_by", ""),
+                        "debate_end_reason": state.get("debate_end_reason", ""),
                     },
                 )
             )
@@ -246,9 +292,31 @@ def _get_default_graph():
     return debate_graph
 
 
-def _astream_with_config(graph_runner, state: DebateState):
+def _astream_with_config(
+    graph_runner,
+    state: DebateState,
+    session_id: str | None = None,
+    user_id: str | None = None,
+):
     settings = get_settings()
-    config = {"recursion_limit": settings.debate_graph_recursion_limit}
+    config: dict = {"recursion_limit": settings.debate_graph_recursion_limit}
+
+    # Langfuse v4 best practice: CallbackHandler는 graph config 레벨에서 주입
+    # session_id·user_id를 metadata로 넘기면 모든 LLM 호출이 같은 세션으로 묶임
+    try:
+        from app.core.tracing import get_langfuse
+        if get_langfuse() is not None:
+            from langfuse.langchain import CallbackHandler
+            config["callbacks"] = [CallbackHandler()]
+            config["metadata"] = {
+                "langfuse_session_id": session_id,
+                "langfuse_user_id": user_id,
+                "langfuse_tags": ["debate"],
+            }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("[langfuse] callback 설정 실패 (무시): %s", e)
+
     try:
         return graph_runner.astream(state, config)
     except TypeError:

@@ -11,6 +11,7 @@ from app.agents.nodes.bear_node       import bear_agent_node
 from app.agents.nodes.moderator_node  import (
     moderator_pre_node,
     moderator_check_node,
+    judge_agent_node,
     moderator_summary_node,
 )
 
@@ -19,22 +20,26 @@ logger = logging.getLogger(__name__)
 _NUM_TOPICS = 3  # 모더레이터가 생성하는 주제 수
 
 
-def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "moderator_summary"]:
+def _final_node(state: DebateState) -> Literal["judge_agent", "moderator_summary"]:
+    return "judge_agent" if state.get("decision_agent") == "judge" else "moderator_summary"
+
+
+def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "judge_agent", "moderator_summary"]:
     # 환각 2회 이상 → 강제 종료
     if state.get("hallucination_count", 0) >= 2:
-        logger.warning("[graph] 환각 2회 초과 → summary 강제 이동")
-        return "moderator_summary"
+        logger.warning("[graph] 환각 2회 초과 → final 이동")
+        return _final_node(state)
 
     if state["moderator_flag"] == "end":
-        return "moderator_summary"
+        return _final_node(state)
 
     topic_idx = state.get("current_topic_index", 0)
     turn      = state.get("current_turn", 1)
 
     # 모든 주제 완료 → summary
     if topic_idx >= _NUM_TOPICS:
-        logger.info("[graph] 모든 주제 완료 → summary")
-        return "moderator_summary"
+        logger.info("[graph] 모든 주제 완료 → final")
+        return _final_node(state)
 
     # 사회자 개입 → 직전 에이전트 재발언
     if state["moderator_flag"] == "intervene":
@@ -55,6 +60,7 @@ def build_graph() -> StateGraph:
     b.add_node("bull_agent",        bull_agent_node)
     b.add_node("bear_agent",        bear_agent_node)
     b.add_node("moderator_check",   moderator_check_node)
+    b.add_node("judge_agent",       judge_agent_node)
     b.add_node("moderator_summary", moderator_summary_node)
 
     b.add_edge(START,             "data_agent")
@@ -63,6 +69,7 @@ def build_graph() -> StateGraph:
     b.add_edge("bull_agent",      "moderator_check")
     b.add_edge("bear_agent",      "moderator_check")
     b.add_conditional_edges("moderator_check", _router)
+    b.add_edge("judge_agent",     "moderator_summary")
     b.add_edge("moderator_summary", END)
 
     return b.compile()

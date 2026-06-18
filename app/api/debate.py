@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -39,6 +40,7 @@ async def create_debate(payload: DebateCreateRequest, db: Session = Depends(get_
             symbol=payload.symbol,
             symbol_name=ticker.name_kr,
             category=payload.category.value,
+            decision_agent=payload.decision_agent,
             estimated_tokens=settings.estimated_tokens_for_category(payload.category.value),
         )
     except DebateStartRejectedError as exc:
@@ -128,6 +130,7 @@ def get_debate(session_id: UUID, db: Session = Depends(get_db)) -> DebateSession
 @router.get("/{session_id}/stream")
 async def stream_debate(
     session_id: UUID,
+    decision_agent: Literal["moderator", "judge"] = "moderator",
     db: Session = Depends(get_db),
 ) -> EventSourceResponse:
     session_row = db.get(DebateSession, session_id)
@@ -189,6 +192,7 @@ async def stream_debate(
                 "symbol": symbol,
                 "symbol_name": symbol_name,
                 "category": category,
+                "decision_agent": decision_agent,
                 "status": "completed",
                 "replay": True,
             })
@@ -232,6 +236,7 @@ async def stream_debate(
                 symbol=symbol,
                 symbol_name=symbol_name,
                 category=category,
+                decision_agent=decision_agent,
                 estimated_tokens=settings.estimated_tokens_for_category(category),
             ):
                 yield event

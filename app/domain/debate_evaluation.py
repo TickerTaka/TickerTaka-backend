@@ -144,8 +144,13 @@ def _run_summary_ragas(session_id, statements, summary, agenda) -> SummaryEvalRe
                 answer_relevancy=None, error="missing data",
             )
 
-        # answer_relevancy의 question: 토론 의제를 합쳐서 "무엇을 요약해야 하는가" 표현
-        question = " | ".join(agenda) if agenda else "토론의 핵심 쟁점과 찬반 논거를 요약하라"
+        # answer_relevancy의 question: 자연스러운 단일 질문으로 표현
+        # RAGAS는 요약에서 질문을 역생성하여 이 question과 임베딩 유사도를 계산
+        if agenda:
+            agenda_str = ", ".join(agenda)
+            question = f"다음 의제들에 대해 Bull과 Bear의 주요 논점과 핵심 쟁점을 요약하라: {agenda_str}"
+        else:
+            question = "토론에서 Bull과 Bear의 핵심 논점과 쟁점은 무엇인가?"
 
         logger.info(f"[eval-summary] 평가 시작 (faithfulness + answer_relevancy) — session={session_id}")
 

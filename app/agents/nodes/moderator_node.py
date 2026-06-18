@@ -4,8 +4,6 @@ import json
 import logging
 import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage
-from langgraph.prebuilt import create_react_agent
-from app.agents.tools.moderator_tools import get_financial_data, get_price_data
 
 from app.agents.debate_checkpoint import clear_checkpoint
 from app.agents.state import DebateState
@@ -13,9 +11,11 @@ from app.agents.prompts.prompts import (
     MODERATOR_PRE_SYSTEM, MODERATOR_PRE_HUMAN,
     MODERATOR_CHECK_SYSTEM, MODERATOR_CHECK_HUMAN,
     MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN,
+    JUDGE_SYSTEM, JUDGE_HUMAN,
 )
+from app.config import get_settings
 from app.core.debate_runtime_guard import get_tracker
-from app.core.llm_factory import get_llm
+from app.core.llm_factory import get_llm, invoke_with_fallback
 from app.repositories.debate_repo import (
     save_statement, save_evidence,
     save_moderator_summary, update_session_status,
@@ -24,9 +24,13 @@ from app.repositories.debate_repo import (
 logger = logging.getLogger(__name__)
 
 
-def _call(system: str, human: str, temp: float = 0.3) -> str:
-    llm = get_llm("moderator", temperature=temp)
-    return llm.invoke([SystemMessage(content=system), HumanMessage(content=human)]).content
+def _call(system: str, human: str, temp: float = 0.3, role: str = "moderator") -> str:
+    """retry + fallback 체인으로 LLM 호출 (최대 3회 재시도, 실패 시 fallback 모델)."""
+    return invoke_with_fallback(
+        [SystemMessage(content=system), HumanMessage(content=human)],
+        role=role,
+        temperature=temp,
+    )
 
 
 def _parse(text: str, fallback: dict) -> dict:
@@ -51,11 +55,12 @@ def _build_summary_fallback(state: DebateState) -> tuple[str, list[str]]:
         f"{topic}에 대한 찬반 논거가 제시되었으며, 상세 근거는 개별 발언을 참고해야 합니다."
         for topic in agenda[:3]
     ]
-
+    end_notice = _format_debate_end_notice(state)
     summary = (
         "사회자 요약 생성 중 LLM 호출이 실패하여 축약 요약으로 대체했습니다. "
         f"{state['symbol_name']}({state['symbol']})에 대해 {len(non_moderator)}건의 찬반 발언이 기록되었고, "
         "최종 판단 전 개별 발언과 근거를 다시 확인해야 합니다."
+        f"{(' ' + end_notice) if end_notice else ''}"
     )
     return summary, key_points
 
@@ -74,10 +79,23 @@ def _schedule_background_task(coro, *, label: str) -> None:
     def _log_task_result(done_task: asyncio.Task) -> None:
         try:
             done_task.result()
+        except asyncio.CancelledError:
+            pass  # 이벤트 루프 종료 시 정상 취소
         except Exception as exc:
             logger.error("[%s] 백그라운드 태스크 실패: %s", label, exc)
 
     task.add_done_callback(_log_task_result)
+
+
+def _format_debate_end_notice(state: DebateState) -> str:
+    ended_by = state.get("debate_ended_by") or ""
+    reason = state.get("debate_end_reason") or ""
+    if not ended_by:
+        return ""
+    role_label = "Bull" if ended_by == "bull" else "Bear" if ended_by == "bear" else ended_by
+    if reason:
+        return f"토론은 {role_label} 발언 검증 문제로 중단되었습니다: {reason}"
+    return f"토론은 {role_label} 발언 검증 문제로 중단되었습니다."
 
 
 # ── 1. 의제 설계 ───────────────────────────────────────────
@@ -143,26 +161,106 @@ def moderator_check_node(state: DebateState) -> dict:
         msg = f"[사회자 개입] {note}"
         if parsed.get("corrected_fact"):
             msg += f"\n정정: {parsed['corrected_fact']}"
+        if hallucination_count >= 2:
+            msg += f"\n토론 중단: {last['agent_role']} 발언에서 반복적인 검증 문제가 감지되었습니다."
         extra = [{
             "agent_role":  "moderator",
             "round":       last["round"],
             "round_order": state["round_order"] + 1,
             "topic_index": last.get("topic_index", state.get("current_topic_index", 0)),
             "content":     msg,
-            "model_used":  "gpt-4o-mini",
+            "model_used":  get_settings().moderator_model,
             "evidences":   [],
         }]
 
-    return {
+    # Langfuse: 사회자 개입 기록
+    if verdict == "hallucination":
+        _log_hallucination(
+            session_id=state["session_id"],
+            agent_role=last["agent_role"],
+            round_=last.get("round", ""),
+            topic_index=last.get("topic_index", 0),
+            note=note,
+            count=hallucination_count,
+        )
+
+    result = {
         "moderator_flag":      "intervene" if verdict == "hallucination" else "ok",
         "intervention_note":   note,
         "hallucination_count": hallucination_count,
         "statements":          extra,
         "round_order":         state["round_order"] + (1 if extra else 0),
     }
+    if verdict == "hallucination" and hallucination_count >= 2:
+        result["moderator_flag"] = "end"
+        result["debate_ended_by"] = last["agent_role"]
+        result["debate_end_reason"] = note or "반복적인 발언 검증 실패"
+    return result
 
 
-# ── 3. 최종 요약 + DB 저장 ────────────────────────────────
+def _log_hallucination(
+    session_id: str,
+    agent_role: str,
+    round_: str,
+    topic_index: int,
+    note: str,
+    count: int,
+) -> None:
+    """Langfuse에 사회자 개입(환각) 이벤트 기록. 비활성화 시 no-op."""
+    try:
+        from langfuse import get_client
+        lf = get_client()
+        lf.create_score(
+            session_id=session_id,
+            name="hallucination",
+            value=1.0,
+            comment=f"[{agent_role.upper()} / {round_} / 주제{topic_index+1}] {note} (누적 {count}회)",
+        )
+    except Exception as e:
+        logger.debug("[langfuse] score 기록 실패 (무시): %s", e)
+
+
+# ── 3. Judge 판정 ────────────────────────────────────────────
+def judge_agent_node(state: DebateState) -> dict:
+    logger.info("[judge] 최종 판정")
+    all_stmts = "\n\n".join(
+        f"[{s['agent_role'].upper()} / {s['round']}]\n{s['content']}"
+        for s in state["statements"]
+        if s.get("agent_role") in ("bull", "bear", "moderator")
+    )
+    fallback = {
+        "leaning": "mixed",
+        "confidence": "low",
+        "rationale": "Bull과 Bear 양쪽 모두 확인할 논점이 있어 한쪽으로 단정하기 어렵습니다.",
+        "action_guidance": "매수 전에는 상승 근거가 실제 수치로 이어지는지, 보유 또는 매도 전에는 리스크가 단기 이슈인지 구조적 문제인지 확인하세요.",
+    }
+
+    try:
+        raw = _call(JUDGE_SYSTEM, JUDGE_HUMAN.format(
+            all_statements=all_stmts,
+            symbol=state["symbol"],
+            symbol_name=state["symbol_name"],
+            category=state["category"],
+            price_context=state["price_context"],
+            financial_context=state["financial_context"],
+            evidence_context=state["evidence_context"],
+            debate_end_notice=_format_debate_end_notice(state) or "중단 없음",
+        ), temp=0.2, role="judge")
+        parsed = _parse(raw, fallback)
+    except Exception as e:
+        logger.warning("[judge] LLM 호출 실패, fallback 판정 사용: %s", e)
+        parsed = fallback
+
+    leaning = parsed.get("leaning", "mixed")
+    if leaning not in ("bull", "bear", "mixed"):
+        parsed["leaning"] = "mixed"
+    confidence = parsed.get("confidence", "low")
+    if confidence not in ("low", "medium", "high"):
+        parsed["confidence"] = "low"
+    return {"judge_result": parsed}
+
+
+# ── 4. 최종 요약 + DB 저장 ────────────────────────────────
 async def moderator_summary_node(state: DebateState) -> dict:
     logger.info("[moderator_summary] 요약 + DB 저장")
     used_fallback_summary = False
@@ -173,19 +271,25 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
 
     try:
+        agenda_text = "\n".join(f"{i+1}. {a}" for i, a in enumerate(state.get("agenda") or []))
         raw = _call(MODERATOR_SUMMARY_SYSTEM, MODERATOR_SUMMARY_HUMAN.format(
+            agenda=agenda_text or "의제 없음",
             all_statements=all_stmts,
+            debate_end_notice=_format_debate_end_notice(state) or "중단 없음",
             symbol=state["symbol"], symbol_name=state["symbol_name"],
             category=state["category"],
             price_context=state["price_context"],
+            financial_context=state["financial_context"],
             evidence_context=state["evidence_context"],
         ), temp=0.4)
-        parsed = _parse(raw, {"summary_content": raw, "key_points": []})
-        summary = parsed.get("summary_content", raw)
+        parsed = _parse(raw, {"summary_content": raw, "structured_summary": raw, "key_points": []})
+        summary = parsed.get("summary_content", raw)           # 사용자 출력용 (투자 가이드 형식)
+        structured_summary = parsed.get("structured_summary", summary)  # RAGAS 평가용 (의제별 구조)
         points = parsed.get("key_points", [])
     except Exception as e:
         logger.warning("[moderator_summary] LLM 호출 실패, fallback summary 사용: %s", e)
         summary, points = _build_summary_fallback(state)
+        structured_summary = summary
         used_fallback_summary = True
 
     # 새 round 이름 → DB enum 호환 매핑
@@ -193,26 +297,6 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "claim":            "opening",
         "counter_rebuttal": "closing",
     }
-
-    # debate_session upsert (FK 충족)
-    try:
-        from app.core.database import get_pool  # noqa
-        _pool = await get_pool()
-        async with _pool.acquire() as conn:
-            # app_user upsert
-            await conn.execute("""
-                INSERT INTO app_user (id, email, password_hash)
-                VALUES ($1::uuid, $2, 'test')
-                ON CONFLICT (id) DO NOTHING
-            """, state["user_id"], f"{state['user_id']}@test.local")
-            # debate_session upsert
-            await conn.execute("""
-                INSERT INTO debate_session (id, user_id, symbol, category, status)
-                VALUES ($1::uuid, $2::uuid, $3, $4, 'running')
-                ON CONFLICT (id) DO NOTHING
-            """, state["session_id"], state["user_id"], state["symbol"], state["category"])
-    except Exception as e:
-        logger.warning(f"[moderator_summary] session upsert 실패 (무시): {e}")
 
     # DB 저장
     for stmt in state["statements"]:
@@ -239,7 +323,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
     await save_statement(
         session_id=state["session_id"], round_="summary",
         round_order=state["round_order"] + 1, agent_role="moderator",
-        content=summary, model_name="gpt-4o-mini",
+        content=summary, model_name=get_settings().moderator_model,
     )
     await save_moderator_summary(state["session_id"], summary, points)
     await update_session_status(state["session_id"], "completed")
@@ -251,15 +335,18 @@ async def moderator_summary_node(state: DebateState) -> dict:
     )
 
     # RAGAS 사후 평가 — 백그라운드 실행 (토론 흐름 차단 안 함)
+    debate_was_cut = bool(state.get("debate_ended_by"))
     try:
-        if not used_fallback_summary:
+        if not used_fallback_summary and not debate_was_cut:
             _schedule_background_task(
                 _run_summary_eval(
-                    state["session_id"], state["statements"], summary,
+                    state["session_id"], state["statements"], structured_summary,
                     state.get("agenda", []),
                 ),
                 label="eval-summary",
             )
+        elif debate_was_cut:
+            logger.info("[moderator_summary] 토론 중단 케이스 — summary RAGAS 평가 건너뜀")
         else:
             logger.info("[moderator_summary] fallback summary 사용으로 summary RAGAS 평가는 건너뜀")
         from app.domain.evidence_retrieval import build_category_query
@@ -284,7 +371,7 @@ async def moderator_summary_node(state: DebateState) -> dict:
         "statements": [{
             "agent_role": "moderator", "round": "summary",
             "round_order": state["round_order"] + 1,
-            "content": summary, "model_used": "gpt-4o-mini", "evidences": [],
+            "content": summary, "model_used": get_settings().moderator_model, "evidences": [],
         }],
         "summary_content": summary,
         "key_points":      points,
