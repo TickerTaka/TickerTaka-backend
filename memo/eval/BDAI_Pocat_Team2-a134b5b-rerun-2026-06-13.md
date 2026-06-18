@@ -116,7 +116,7 @@ a134b5b의 5점 미달 사유("golden 1건뿐 · 실행 artifact 미커밋")가 
 3. **[항목1·10] 동적 trace/스트리밍 프로빙으로 [S]→[D] 격상** — postgres를 기본 기동(또는 SQLite fallback) 후 `curl -N`로 SSE `text/event-stream` 청크 타이밍 확인 + langfuse trace 첨부 시 항목1·10 각각 5점 도달 가능.
 4. ~~**[항목8] golden set 확장 + artifact 커밋 (4 → 5 잠재)**~~ — **✅ golden 1→10건 확장 + `ragas-b4f6c3d.json`(10/10 PASS) 커밋(후속 커밋, [갱신 § 참조](#갱신-2026-06-18--항목7ollama-서빙항목8ragas-golden-set-후속-구현-반영)).** 단 10/10은 `answer_relevancy` 임계 0.4→0.15 캘리브레이션 결과(점수 향상 아님 — 정직 기록은 갱신 § 참조). 남은 건 artifact `reports/` 경로 정합 + 신규 SHA 재평가.
 5. **[항목9] 검색 자체 정량 지표** — nDCG/MRR/precision@k를 golden relevance 기반으로 추가(memo에 본인이 필요성 진단함). reranker 품질을 context_precision 외 표준 IR 지표로 입증.
-6. **[항목5] 멀티스테이지 빌드** — builder/runtime 분리로 10GB → 2~3GB 축소.
+6. ~~**[항목5] 멀티스테이지 빌드**~~ — **✅ 구조 완료(2026-06-19)**: builder/runtime 2-스테이지 분리, 빌드 도구 최종 이미지 제외, 빌드·`/health` 동적 검증. 단 **크기는 9.99GB→9.58GB(약 0.41GB↓)에 그침** — 9.58GB 대부분이 torch+CUDA 휠이라 멀티스테이지로 못 뺌. 2~3GB는 **CPU 전용 torch** 교체가 추가로 필요(별도 트랙). 상세: [memo/results/2026-06-19-eval-track5-dockerfile-multistage.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track5-dockerfile-multistage.md:1).
 7. **[항목6] MCP 서버측 + Python `mcp` SDK** — `mcp.ClientSession`+`stdio_client`로 교체(tools/list 자동), FastAPI에 MCP 서버 엔드포인트 추가로 양단 완성 시 3→4+.
 8. **[항목2] 그래프 전체 타임아웃** — `asyncio.wait_for`로 노드 hang 방어 시 4→5.
 9. ~~**[항목4] 인터페이스 정의서 동기화**~~ — **✅ 완료(2026-06-19)**: `interface-definition.md` §3에 `POST /api/debates/sessions`·`GET /.../stream` 정식 기재, §6 "추후예정"에서 제거. `debate.py` 7개 라우트 ↔ 문서 일치(코드 변경 0). 상세: [memo/results/2026-06-19-eval-track4-interface-doc-sync.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track4-interface-doc-sync.md:1). 점수 4→5 확정은 신규 SHA 재평가 후.
