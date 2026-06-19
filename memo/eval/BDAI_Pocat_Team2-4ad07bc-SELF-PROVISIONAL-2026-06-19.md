@@ -21,7 +21,7 @@
 | 3 | sLLM+검증+langfuse | ×2 | 2 | **4** | langfuse **양쪽 경로**(Qwen 분석 + 토론 CallbackHandler) 실 trace 검증 + sLLM(Qwen) + 검증(moderator_check) | upside 5(Qwen 기본활성 시); 보수적 4 |
 | 4 | 5대 설계문서 | ×1 | 4 | **5** | interface 문서 ↔ 코드 7라우트 동기화(SSE/sessions 정식 기재) | 문서-코드 정합 회복 |
 | 5 | Dockerise | ×1 | 4 | **4~5** | 멀티스테이지(builder/runtime) 전환 + 빌드·/health 검증 | **9.99→9.58GB(소폭)·postgres profile 미변경** → 4 유지 가능. CPU-torch 시 5 |
-| 6 | MCP / A2A | ×1 | 3 | **4** | 공식 `mcp` SDK(FastMCP) 서버 `app/mcp_server.py` 6 tool 노출(route 재사용) → 클라+서버 양방향. tools/list·SDK 충족 | 클라이언트(notion) SDK 교체는 미적용 |
+| 6 | MCP / A2A | ×1 | 3 | **4 (→5 잠재)** | ① 서버: 공식 `mcp` SDK(FastMCP) `app/mcp_server.py` 6 tool 노출(uc 반영) ② 클라이언트: notion 자체 JSON-RPC → `mcp.ClientSession`/`stdio_client` 교체(`feat/mcp-client-sdk`) → **클라+서버 모두 공식 SDK** | 클라 교체는 **feat 브랜치**·**실 Notion 발행 E2E 미검증·미merge**. 검증+merge 시 5 |
 | 7 | vLLM(서빙) | ×1 | 0 | **3** | Ollama 원격 서빙(`RemoteQwenEvidenceAnalyzer`) + 워커 E2E 실검증 | 기준 원문 "vLLM" → 강사 인정 확인 시 안정. upside 4 |
 | 8 | RAGAS | ×2 | 4 | **5** | golden 1→10 + artifact 커밋 + 회귀 30개 | **10/10은 answer_relevancy 임계 0.4→0.15 캘리브레이션 결과(점수향상 아님, 정직 기록)** |
 | 9 | RAG 고도화 | ×1 | 4 | **5** | IR 지표(nDCG/MRR/p@k) + 골든 relevance로 reranker 품질 입증(nDCG +0.235) | 경량(1종목·4쿼리·LLM초안 라벨) |
@@ -54,7 +54,7 @@
 
 ## 미착수 / 후속
 - **보완 9개 전부 코드·증적 반영 완료**(항목6 서버측 포함). 남은 선택 후속:
-  - 항목6 **클라이언트(notion) 표준 SDK 교체**(현재 자체 JSON-RPC, 동작 중이라 risk → 별도)
+  - 항목6 **클라이언트 SDK 교체 = `feat/mcp-client-sdk`에 구현 완료**(import·추출기·무회귀 검증). **단 실 Notion 발행 E2E 미검증·main/uc 미merge** → 검증+merge 후 항목6 5점 가능
   - 항목5 **CPU-torch 전환**(이미지 9.58→2~3GB)
   - 항목3/7 **Qwen 기본 활성화** + Ollama 서빙 상시화
 - **정식 점수 확정**: 동일 코드 신규 SHA로 **공식 평가 Agent 재실행** 필수(본 문서는 임시 자가평가).
