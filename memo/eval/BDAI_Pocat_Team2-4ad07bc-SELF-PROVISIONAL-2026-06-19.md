@@ -21,16 +21,16 @@
 | 3 | sLLM+검증+langfuse | ×2 | 2 | **4** | langfuse **양쪽 경로**(Qwen 분석 + 토론 CallbackHandler) 실 trace 검증 + sLLM(Qwen) + 검증(moderator_check) | upside 5(Qwen 기본활성 시); 보수적 4 |
 | 4 | 5대 설계문서 | ×1 | 4 | **5** | interface 문서 ↔ 코드 7라우트 동기화(SSE/sessions 정식 기재) | 문서-코드 정합 회복 |
 | 5 | Dockerise | ×1 | 4 | **4~5** | 멀티스테이지(builder/runtime) 전환 + 빌드·/health 검증 | **9.99→9.58GB(소폭)·postgres profile 미변경** → 4 유지 가능. CPU-torch 시 5 |
-| 6 | MCP / A2A | ×1 | 3 | **4 (→5 잠재)** | ① 서버: 공식 `mcp` SDK(FastMCP) `app/mcp_server.py` 6 tool 노출(uc 반영) ② 클라이언트: notion 자체 JSON-RPC → `mcp.ClientSession`/`stdio_client` 교체(`feat/mcp-client-sdk`) → **클라+서버 모두 공식 SDK** | 클라 교체는 **feat 브랜치**·**실 Notion 발행 E2E 미검증·미merge**. 검증+merge 시 5 |
+| 6 | MCP / A2A | ×1 | 3 | **5** | ① 서버: 공식 `mcp` SDK(FastMCP) `app/mcp_server.py` 6 tool 노출(uc) — **stdio self-test PASS** ② 클라이언트: notion → `mcp.ClientSession`/`stdio_client` 교체(`feat/mcp-client-sdk`) — **실 Notion 발행 PASS(페이지 생성)** → 클라+서버 모두 공식 SDK·검증 완료 | feat 브랜치 상태(merge 시 uc/main 반영) |
 | 7 | vLLM(서빙) | ×1 | 0 | **3** | Ollama 원격 서빙(`RemoteQwenEvidenceAnalyzer`) + 워커 E2E 실검증 | 기준 원문 "vLLM" → 강사 인정 확인 시 안정. upside 4 |
 | 8 | RAGAS | ×2 | 4 | **5** | golden 1→10 + artifact 커밋 + 회귀 30개 | **10/10은 answer_relevancy 임계 0.4→0.15 캘리브레이션 결과(점수향상 아님, 정직 기록)** |
 | 9 | RAG 고도화 | ×1 | 4 | **5** | IR 지표(nDCG/MRR/p@k) + 골든 relevance로 reranker 품질 입증(nDCG +0.235) | 경량(1종목·4쿼리·LLM초안 라벨) |
 | 10 | 스트리밍·비동기 | ×1 | 4 | **5** | [D] SSE 청크 도착 타임스탬프(~43초 분산) = 실시간 스트리밍 입증 | 동적 증적 확보 |
 
-### 잠정 합계 (보수적) — 갱신: 항목6 완료 반영
-`(5+5+4+5)×2 + (5+4~5+4+3+5+5)×1 = 38 + 26~27 = 64~65 / 70` (항목5를 4/5 중 어디로 보냐에 따라)
+### 잠정 합계 (보수적) — 갱신: 항목6 양측 SDK 검증 완료 반영
+`(5+5+4+5)×2 + (5+4~5+5+3+5+5)×1 = 38 + 27~28 = 65~66 / 70` (항목5를 4/5 중 어디로 보냐에 따라)
 
-→ 공식 47 → **잠정 ~64-65/70** (자가추정, 보완 9개 전부 반영). a134b5b 대비 **+17~18**. 등급은 공식 Agent 판정 사항(참고: 47/70=C였음 → 64/70=91%면 상위 등급권이나 **자가평가라 확정 불가**).
+→ 공식 47 → **잠정 ~65-66/70** (자가추정, 보완 9개 전부 반영·항목6 양측 SDK 검증). a134b5b 대비 **+18~19**. 등급은 공식 Agent 판정 사항(**자가평가라 확정 불가**).
 
 ---
 
