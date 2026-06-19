@@ -1,19 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import os
 import re
 import shlex
-import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from app.config import get_settings
 
-_JSONRPC_VERSION = "2.0"
-_MCP_PROTOCOL_VERSION = "2024-11-05"
 _NOTION_RICH_TEXT_LIMIT = 2000
 _NOTION_BLOCK_LIMIT = 100
 _NOTION_URL_RE = re.compile(r"https://www\.notion\.so/[^\s\"'>]+")
@@ -42,128 +40,25 @@ class DebatePublishPayload:
     statements: list[dict[str, Any]]
 
 
-class _StdioJsonRpcClient:
-    def __init__(self, command: str, args: list[str], *, env: dict[str, str], timeout_seconds: int) -> None:
-        self._command = command
-        self._args = args
-        self._env = env
-        self._timeout_seconds = timeout_seconds
-        self._proc: subprocess.Popen[bytes] | None = None
-        self._next_id = 1
-        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._last_stderr = ""
+def _run_async(coro) -> Any:
+    """동기 컨텍스트에서 async 코루틴을 안전히 실행.
 
-    def __enter__(self) -> "_StdioJsonRpcClient":
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="notion-mcp-read")
-        self._proc = subprocess.Popen(
-            [self._command, *self._args],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=self._env,
-        )
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self._terminate_process()
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
-            self._executor = None
-
-    def initialize(self) -> None:
-        _ = self.request(
-            "initialize",
-            {
-                "protocolVersion": _MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "tickertaka-backend", "version": "0.1.0"},
-            },
-        )
-        self.notify("notifications/initialized", {})
-
-    def request(self, method: str, params: dict[str, Any]) -> Any:
-        req_id = self._next_id
-        self._next_id += 1
-        self._send({"jsonrpc": _JSONRPC_VERSION, "id": req_id, "method": method, "params": params})
-        while True:
-            message = self._read_with_timeout()
-            if "id" not in message:
-                continue
-            if message["id"] != req_id:
-                continue
-            if "error" in message:
-                raise NotionMcpError(f"MCP request failed: {message['error']}")
-            result = message.get("result")
-            if isinstance(result, dict) and result.get("isError") is True:
-                raise NotionMcpError(f"MCP tool error: {result}")
-            return result
-
-    def notify(self, method: str, params: dict[str, Any]) -> None:
-        self._send({"jsonrpc": _JSONRPC_VERSION, "method": method, "params": params})
-
-    def _send(self, payload: dict[str, Any]) -> None:
-        if self._proc is None or self._proc.stdin is None:
-            raise NotionMcpError("MCP process is not running")
-        body = json.dumps(payload).encode("utf-8") + b"\n"
-        self._proc.stdin.write(body)
-        self._proc.stdin.flush()
-
-    def _read_with_timeout(self) -> dict[str, Any]:
-        if self._executor is None:
-            raise NotionMcpError("MCP read executor is not running")
-        future = self._executor.submit(self._read)
-        try:
-            return future.result(timeout=self._timeout_seconds)
-        except concurrent.futures.TimeoutError as exc:
-            self._terminate_process()
-            stderr = f" stderr={self._last_stderr}" if self._last_stderr else ""
-            raise NotionMcpError(
-                f"MCP request timed out after {self._timeout_seconds}s.{stderr}"
-            ) from exc
-
-    def _read(self) -> dict[str, Any]:
-        if self._proc is None or self._proc.stdout is None:
-            raise NotionMcpError("MCP process is not running")
-        while True:
-            line = self._proc.stdout.readline()
-            if not line:
-                self._collect_stderr()
-                stderr = f" stderr={self._last_stderr}" if self._last_stderr else ""
-                raise NotionMcpError(f"Empty MCP response body.{stderr}")
-            decoded = line.decode("utf-8").strip()
-            if not decoded:
-                continue
-            try:
-                return json.loads(decoded)
-            except json.JSONDecodeError as exc:
-                self._collect_stderr()
-                stderr = f" stderr={self._last_stderr}" if self._last_stderr else ""
-                raise NotionMcpError(f"Failed to decode MCP response body.{stderr}") from exc
-
-    def _terminate_process(self) -> None:
-        if self._proc is None:
-            return
-        if self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait(timeout=2)
-        self._collect_stderr()
-
-    def _collect_stderr(self) -> None:
-        if self._proc is None or self._proc.stderr is None:
-            return
-        try:
-            stderr = self._proc.stderr.read().decode("utf-8", errors="replace").strip()
-        except Exception:
-            stderr = ""
-        if stderr:
-            self._last_stderr = stderr[-2000:]
+    실행 중 event loop가 없으면 asyncio.run, 있으면(=async 호출부) 별도 스레드의
+    새 loop에서 돌려 nested-loop 에러를 피한다 → publish_debate의 sync 인터페이스 보존.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="notion-mcp") as ex:
+        return ex.submit(lambda: asyncio.run(coro)).result()
 
 
 class NotionMcpClient:
+    """Notion MCP 서버에 **공식 `mcp` SDK 클라이언트**(`ClientSession`+`stdio_client`)로 접속해
+    토론을 발행한다. (이전: 자체 stdio JSON-RPC 구현 → 표준 SDK로 교체, tools/call 핸드셰이크는 SDK가 처리)
+    """
+
     def __init__(self) -> None:
         self._settings = get_settings()
 
@@ -175,32 +70,45 @@ class NotionMcpClient:
         if not self._settings.notion_mcp_server_command:
             raise NotionMcpError("NOTION_MCP_SERVER_COMMAND is not configured")
 
-        env = os.environ.copy()
-        env["NOTION_TOKEN"] = self._settings.notion_token
-
         arguments = {
             "parent": {"database_id": self._settings.notion_database_id},
             "properties": self._build_properties(payload),
             "children": self._build_children(payload),
         }
-        with _StdioJsonRpcClient(
-            self._settings.notion_mcp_server_command,
-            shlex.split(self._settings.notion_mcp_server_args),
-            env=env,
-            timeout_seconds=self._settings.notion_mcp_timeout_seconds,
-        ) as client:
-            client.initialize()
-            result = client.request(
-                "tools/call",
-                {
-                    "name": self._settings.notion_mcp_tool_name,
-                    "arguments": arguments,
-                },
-            )
+        result = _run_async(self._call_tool(arguments))
         page_id, page_url = self._extract_page_fields(result)
         if not page_id or not page_url:
             raise NotionMcpError("MCP response did not include Notion page id/url")
         return NotionPublishResult(page_id=page_id, page_url=page_url)
+
+    async def _call_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        env = os.environ.copy()
+        env["NOTION_TOKEN"] = self._settings.notion_token
+        params = StdioServerParameters(
+            command=self._settings.notion_mcp_server_command,
+            args=shlex.split(self._settings.notion_mcp_server_args),
+            env=env,
+        )
+        timeout = self._settings.notion_mcp_timeout_seconds
+
+        async def _do() -> dict[str, Any]:
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()  # SDK가 initialize/initialized 핸드셰이크 처리
+                    result = await session.call_tool(
+                        self._settings.notion_mcp_tool_name, arguments=arguments
+                    )
+            if getattr(result, "isError", False):
+                raise NotionMcpError(f"MCP tool error: {result.model_dump(mode='json')}")
+            return result.model_dump(mode="json")  # content/structuredContent/text → 기존 추출기 호환
+
+        try:
+            return await asyncio.wait_for(_do(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise NotionMcpError(f"MCP request timed out after {timeout}s.") from exc
 
     def _build_properties(self, payload: DebatePublishPayload) -> dict[str, Any]:
         # API-post-page properties use Notion REST typed objects keyed by property name.
