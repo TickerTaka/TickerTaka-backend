@@ -42,10 +42,10 @@ beautifulsoup4==4.12.3
 trafilatura==2.0.0
 
 # 설정/인증
-pydantic==2.9.2
+pydantic==2.13.4   # mcp>=1.28(>=2.11 요구)로 2.9.2→2.13.4 범프(2.x 마이너, 테스트 통과)
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-pyjwt==2.9.0
+pyjwt==2.13.0   # mcp(>=2.10.1 요구)로 2.9.0→2.13.0 범프
 passlib[bcrypt]==1.7.4
 langfuse==4.7.1
 mcp==1.28.0   # MCP 서버(app/mcp_server.py) — 도메인 기능을 tool로 노출 (#6)
