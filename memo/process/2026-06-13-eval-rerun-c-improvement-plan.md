@@ -50,7 +50,7 @@
 | **P1-1** | 항목8 (×2) | 4→5 | **+2** | golden 1→10~20 + `reports/ragas-<sha>.json` 커밋 | 低 |
 | **P1-2** ✅ | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 **(완료 2026-06-19, DEBATE_TIMEOUT_SECONDS=300)** | 低 |
 | **P1-3** ✅ | 항목1 (×2) | 4→5 | **+2** | 동적 멀티에이전트 trace([D]) **(완료 2026-06-19, 실토론 SSE+moderator 개입 관측)** | 低(의존) |
-| P2-1 | 항목9 (×1) | 4→5 | +1 | golden relevance + nDCG/MRR/precision@k | 中 |
+| P2-1 ✅ | 항목9 (×1) | 4→5 | +1 | golden relevance + nDCG/MRR/precision@k **(완료 2026-06-19, reranker nDCG +0.235 입증)** | 中 |
 | P2-2 ✅ | 항목10 (×1) | 4→5 | +1 | SSE 청크타이밍 [D] 프로빙 **(완료 2026-06-19, reports/debate-sse-e11a0291.log)** | 低(의존) |
 | P3-1 ✅ | 항목5 (×1) | 4→5 | +1 | Dockerfile 멀티스테이지 **(완료 2026-06-19; 구조 분리·검증. 크기 9.99→9.58GB, 2~3GB는 CPU-torch 후속)** | 低 |
 | P3-2 | 항목6 (×1) | 3→4 | +1 | Python `mcp` SDK + 서버측 tool 노출 | 中 |
