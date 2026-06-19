@@ -48,6 +48,7 @@ python-dotenv==1.0.1
 pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
 langfuse==4.7.1
+mcp==1.28.0   # MCP 서버(app/mcp_server.py) — 도메인 기능을 tool로 노출 (#6)
 
 # 재시도
 tenacity==8.5.0
