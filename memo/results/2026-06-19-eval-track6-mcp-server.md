@@ -35,6 +35,10 @@
 
 → 서버측 tool 노출 + tools/list + 공식 `mcp` SDK **3요소 충족**.
 
+### 3-1. 실 외부 클라이언트 검증 (2026-06-20) — Claude Desktop
+**self-test를 넘어 실제 외부 AI 클라이언트로 검증 완료**: Claude Desktop(Microsoft Store/MSIX 버전)에 우리 MCP 서버를 등록 → Developer에 `tickertaka` **running**, 대화에서 "토론 가능한 종목 목록" 요청 시 `list_available_symbols` tool 호출 → **24종목 정상 반환**. 즉 **외부 AI ↔ 우리 서비스** 경로가 실제로 동작.
+> MSIX 버전 config 경로 주의: `%APPDATA%\Roaming\Claude`가 아니라 `…\AppData\Local\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`("구성 편집"이 여는 파일)에 `mcpServers` 추가. (WSL spawn: `wsl.exe bash -lc "cd ~/TickerTaka-backend && exec venv/bin/python -m app.mcp_server"`)
+
 ## 4. Claude Desktop 연결법 (사용자 측)
 
 서버는 stdio 로 기동: `python -m app.mcp_server`. Claude Desktop(Windows)에서 WSL 의 서버를 spawn 하려면 `claude_desktop_config.json`:
