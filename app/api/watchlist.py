@@ -209,7 +209,12 @@ def get_watchlist_feed(
 
 
 @router.delete("/{user_id}/{symbol}")
-def delete_watchlist(user_id: UUID, symbol: str, db: Session = Depends(get_db)) -> dict[str, str]:
+def delete_watchlist(
+    user_id: UUID,
+    symbol: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
     service = WatchlistService(db)
     try:
         service.delete_watchlist(user_id, symbol)
@@ -220,4 +225,11 @@ def delete_watchlist(user_id: UUID, symbol: str, db: Session = Depends(get_db)) 
     except WatchlistNotFoundError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    # 다른 사용자가 같은 symbol을 안 보고 있으면, 가격/뉴스/공시/재무/벡터 캐시 전부 wipe.
+    # 다음에 재추가 시 sync 가 처음부터 최신 데이터를 받아온다.
+    from app.domain.watchlist_service import purge_symbol_cache
+
+    background_tasks.add_task(purge_symbol_cache, symbol)
+
     return {"status": "deleted", "user_id": str(user_id), "symbol": symbol}

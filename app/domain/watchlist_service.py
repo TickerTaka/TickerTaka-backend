@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.db import session_scope
@@ -58,6 +59,89 @@ class WatchlistService:
         if item is None:
             raise WatchlistNotFoundError(f"watchlist not found: {user_id}/{symbol}")
         self.repo.delete(item)
+
+
+def purge_symbol_cache(symbol: str) -> dict[str, int]:
+    """관심종목 삭제 시 호출. 해당 종목의 모든 캐시(가격/재무/기술/뉴스/공시/평가)
+    + Redis 실시간 시세 + Chroma 벡터를 일괄 제거한다.
+
+    다른 사용자가 같은 종목을 watchlist에 갖고 있으면 캐시를 살려둔다(공유 캐시 보호).
+    토론 세션은 그대로 유지하지만, FK 참조가 끊겨 일부 evidence 링크가 깨질 수 있다.
+    """
+    counts: dict[str, int] = {}
+    try:
+        with session_scope() as session:
+            from app.models import (
+                FilingCache,
+                FinancialCache,
+                NewsCache,
+                PriceCache,
+                TechnicalIndicatorCache,
+                Watchlist as WatchlistModel,
+            )
+
+            # 다른 사용자가 같은 symbol을 보고 있으면 캐시 wipe 스킵
+            still_watched = session.scalar(
+                text("SELECT EXISTS(SELECT 1 FROM watchlist WHERE symbol = :s)").bindparams(s=symbol)
+            )
+            if still_watched:
+                logger.info("symbol %s still watched by other users — skipping cache purge", symbol)
+                return {"skipped": 1}
+
+            for model, label in (
+                (PriceCache, "price"),
+                (FinancialCache, "financial"),
+                (TechnicalIndicatorCache, "technical"),
+                (NewsCache, "news"),
+                (FilingCache, "filing"),
+            ):
+                try:
+                    n = session.query(model).filter(model.symbol == symbol).delete(synchronize_session=False)
+                    counts[label] = n
+                except Exception:
+                    logger.exception("purge step '%s' failed for %s", label, symbol)
+                    counts[label] = -1
+
+            # analysis_jobs queue (있으면)
+            try:
+                n = session.execute(
+                    text("DELETE FROM analysis_jobs WHERE symbol = :s"),
+                    {"s": symbol},
+                ).rowcount
+                counts["analysis_jobs"] = n or 0
+            except Exception:
+                # 테이블 없거나 symbol 컬럼 없을 수 있음 — 무시
+                pass
+    except Exception:
+        logger.exception("purge_symbol_cache DB phase failed for %s", symbol)
+
+    # Redis 실시간 시세 키 삭제
+    try:
+        from app.core.redis import get_redis, make_key
+
+        r = get_redis()
+        if r is not None:
+            r.delete(make_key("quote", "latest", symbol))
+            counts["redis_quote"] = 1
+    except Exception:
+        logger.exception("purge redis quote failed for %s", symbol)
+
+    # ChromaDB 뉴스/공시 벡터 삭제
+    try:
+        from app.external.chroma_client import ChromaClient
+
+        client = ChromaClient()
+        for collection_name in ("news", "filing"):
+            try:
+                client.delete(where={"symbol": symbol}, name=collection_name)
+                counts[f"chroma_{collection_name}"] = 1
+            except Exception:
+                logger.exception("purge chroma collection '%s' failed for %s", collection_name, symbol)
+    except Exception:
+        logger.exception("purge chroma phase failed for %s", symbol)
+
+    logger.info("purge_symbol_cache finished for %s: %s", symbol, counts)
+    return counts
 
 
 def sync_watchlist_news(symbol: str) -> None:
