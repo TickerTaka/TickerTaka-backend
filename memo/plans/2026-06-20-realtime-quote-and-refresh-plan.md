@@ -1,6 +1,9 @@
 # 계획 — 실시간(지연) 현재가 + 관심종목 새로고침 (추후 구현)
 
-- 작성: 2026-06-20 / 상태: **설계만, 구현 보류**(우선순위 낮음)
+- 작성: 2026-06-20 / 상태: **백엔드 구현 완료**(2026-06-20) — 프론트 핸드오프(§4)만 남음
+  - `GET /api/stocks/{symbol}/quote` (`app/api/market_data.py`)
+  - `POST /api/watchlists/{user_id}/refresh` + `POST /api/watchlists/{user_id}/{symbol}/refresh` (`app/api/watchlist.py`)
+  - throttle 설정 `WATCHLIST_REFRESH_THROTTLE_SECONDS`(기본 600) — `app/config.py`
 - 배경: 프론트 피드가 "추가 시점 1회 수집"이라 옛 데이터가 보임 + 현재가 실시간 요구
 
 ---

@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     naver_news_client_id:     str = Field(default="", alias="NAVER_NEWS_CLIENT_ID")
     naver_news_client_secret: str = Field(default="", alias="NAVER_NEWS_CLIENT_SECRET")
 
+    # 관심종목 새로고침 throttle — 같은 종목을 N초 내 재수집하지 않도록 막는다(비용/중복 방어).
+    watchlist_refresh_throttle_seconds: int = Field(
+        default=600, ge=0, alias="WATCHLIST_REFRESH_THROTTLE_SECONDS"
+    )
+
     # 인증
     jwt_secret:       str = Field(default="dev-secret-key-min-32-characters!!", alias="JWT_SECRET")
     jwt_expire_hours: int = Field(default=24, alias="JWT_EXPIRE_HOURS")

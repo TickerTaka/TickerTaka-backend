@@ -75,6 +75,24 @@ class StockPricesResponse(BaseModel):
     prices: list[PricePoint]
 
 
+class QuoteResponse(BaseModel):
+    """지연 현재가 스냅샷. 관심종목 화면의 현재가 숫자 폴링용.
+
+    `is_delayed=True`면 (무료 yfinance 특성상) KRX 기준 약 15분 지연이므로
+    프론트는 "약 15분 지연" 라벨을 함께 표시하는 것을 권장한다.
+    """
+
+    symbol: str
+    price: float
+    prev_close: float | None = None
+    change: float | None = None
+    change_rate: float | None = None
+    volume: int | None = None
+    source: str = Field(examples=["yfinance"])
+    is_delayed: bool = Field(default=True, examples=[True])
+    ts: datetime
+
+
 class NewsItem(BaseModel):
     id: UUID
     symbol: str

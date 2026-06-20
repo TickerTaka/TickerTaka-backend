@@ -28,6 +28,7 @@ from app.schemas.market_data import (
     NewsItem,
     NewsListResponse,
     PricePoint,
+    QuoteResponse,
     StockDetailResponse,
     StockPricesResponse,
     TechnicalSnapshot,
@@ -193,6 +194,43 @@ def get_stock_prices(
     )
     rows.reverse()
     return StockPricesResponse(symbol=symbol, prices=[_price_point(row) for row in rows])
+
+
+@router.get(
+    "/api/stocks/{symbol}/quote",
+    response_model=QuoteResponse,
+    summary="지연 현재가 (관심종목 화면 폴링용)",
+    description=(
+        "Redis 캐시된 지연 현재가 스냅샷을 반환한다(장중 5분/장외 30분/주말 24h TTL).\n\n"
+        "프론트는 현재가 숫자만 이 엔드포인트로 짧은 주기(장중 5~15초) 폴링하면 된다. "
+        "일봉 차트는 기존 `/prices`를 그대로 쓴다. `is_delayed=True`면 약 15분 지연 라벨 권장."
+    ),
+)
+def get_stock_quote(symbol: str, db: Session = Depends(get_db)) -> QuoteResponse:
+    if db.get(TickerMetadata, symbol) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ticker not found: {symbol}")
+
+    from app.domain.intraday_quote import IntradayQuoteService
+
+    try:
+        quote = IntradayQuoteService().get_latest_quote(symbol)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"quote unavailable for {symbol}",
+        ) from exc
+
+    return QuoteResponse(
+        symbol=quote.symbol,
+        price=quote.price,
+        prev_close=quote.prev_close,
+        change=quote.change,
+        change_rate=quote.change_rate,
+        volume=quote.volume,
+        source=quote.source,
+        is_delayed=quote.is_delayed,
+        ts=quote.ts,
+    )
 
 
 @router.get("/api/stocks/{symbol}/news", response_model=NewsListResponse)

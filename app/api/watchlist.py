@@ -33,10 +33,49 @@ from app.schemas.watchlist import (
     WatchlistCreateResponse,
     WatchlistItemResponse,
     WatchlistListResponse,
+    WatchlistRefreshResponse,
 )
 
 router = APIRouter(prefix="/api/watchlists", tags=["watchlists"])
 logger = logging.getLogger(__name__)
+
+
+def _enqueue_symbol_sync(background_tasks: BackgroundTasks, symbol: str) -> None:
+    """한 종목의 무거운 재수집(뉴스/재무/가격/공시/평가)을 백그라운드 태스크로 큐잉."""
+    background_tasks.add_task(sync_watchlist_news, symbol)
+    background_tasks.add_task(sync_watchlist_financials, symbol)
+    background_tasks.add_task(sync_watchlist_prices, symbol)
+    background_tasks.add_task(sync_watchlist_filings, symbol)
+    background_tasks.add_task(sync_watchlist_valuation, symbol)
+
+
+def _claim_refresh_slot(symbol: str) -> bool:
+    """throttle 슬롯을 원자적으로 점유한다.
+
+    최근 throttle 윈도우(WATCHLIST_REFRESH_THROTTLE_SECONDS) 안에 이미 새로고침된
+    종목이면 False(=skip), 새로 점유하면 True. Redis SET NX EX 로 원자 처리한다.
+    Redis가 없거나 throttle=0 이면 항상 True(스로틀 비활성).
+    """
+    from app.config import get_settings
+    from app.core.redis import get_redis, make_key
+
+    ttl = get_settings().watchlist_refresh_throttle_seconds
+    if ttl <= 0:
+        return True
+    r = get_redis()
+    if r is None:
+        return True
+    try:
+        was_set = r.set(
+            make_key("refresh", "last", symbol),
+            datetime.now(timezone.utc).isoformat(),
+            nx=True,
+            ex=ttl,
+        )
+        return bool(was_set)
+    except Exception:
+        logger.exception("refresh throttle check failed for %s — allowing refresh", symbol)
+        return True
 
 
 def _to_item_response(item) -> WatchlistItemResponse:
@@ -78,11 +117,7 @@ def create_watchlist(
         ) from exc
 
     try:
-        background_tasks.add_task(sync_watchlist_news, watchlist.symbol)
-        background_tasks.add_task(sync_watchlist_financials, watchlist.symbol)
-        background_tasks.add_task(sync_watchlist_prices, watchlist.symbol)
-        background_tasks.add_task(sync_watchlist_filings, watchlist.symbol)
-        background_tasks.add_task(sync_watchlist_valuation, watchlist.symbol)
+        _enqueue_symbol_sync(background_tasks, watchlist.symbol)
         sync_enqueued = True
     except Exception:
         logger.exception("failed to enqueue watchlist sync for %s", watchlist.symbol)
@@ -206,6 +241,73 @@ def get_watchlist_feed(
         )
     feed.sort(key=lambda it: it.published_at or _MIN_DT, reverse=True)
     return WatchlistFeedResponse(items=feed[:capped])
+
+
+@router.post(
+    "/{user_id}/refresh",
+    response_model=WatchlistRefreshResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="관심종목 전체 새로고침 (비차단)",
+    description=(
+        "사용자의 모든 관심종목에 대해 무거운 재수집(뉴스·공시·재무·가격·평가)을 "
+        "백그라운드로 큐잉하고 즉시 202를 반환한다. 최근 throttle 윈도우 안에 "
+        "이미 새로고침된 종목은 `skipped`로 빠진다.\n\n"
+        "프론트: 버튼 클릭 → 호출 → \"갱신 중…\" 표시 → 수 초 후 `/feed` 재조회. "
+        "현재가 숫자는 이 버튼과 무관하게 `/api/stocks/{symbol}/quote`로 따로 폴링한다."
+    ),
+)
+def refresh_watchlist(
+    user_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WatchlistRefreshResponse:
+    service = WatchlistService(db)
+    try:
+        items = service.list_watchlists(user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    refreshing: list[str] = []
+    skipped: list[str] = []
+    for w in items:
+        if _claim_refresh_slot(w.symbol):
+            _enqueue_symbol_sync(background_tasks, w.symbol)
+            refreshing.append(w.symbol)
+        else:
+            skipped.append(w.symbol)
+
+    return WatchlistRefreshResponse(status="refreshing", symbols=refreshing, skipped=skipped)
+
+
+@router.post(
+    "/{user_id}/{symbol}/refresh",
+    response_model=WatchlistRefreshResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="관심종목 개별 새로고침 (비차단)",
+    description="단일 종목만 재수집한다. throttle 윈도우 안이면 `skipped`로 반환한다.",
+)
+def refresh_watchlist_symbol(
+    user_id: UUID,
+    symbol: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> WatchlistRefreshResponse:
+    service = WatchlistService(db)
+    try:
+        items = service.list_watchlists(user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if symbol not in {w.symbol for w in items}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"watchlist not found: {user_id}/{symbol}",
+        )
+
+    if _claim_refresh_slot(symbol):
+        _enqueue_symbol_sync(background_tasks, symbol)
+        return WatchlistRefreshResponse(status="refreshing", symbols=[symbol], skipped=[])
+    return WatchlistRefreshResponse(status="refreshing", symbols=[], skipped=[symbol])
 
 
 @router.delete("/{user_id}/{symbol}")
