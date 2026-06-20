@@ -51,6 +51,38 @@ python -m app.workers.analysis_worker
 
 > 워커가 없어도 FinBERT baseline 감성은 인덱싱 시 즉시 제공됩니다. Qwen 구조화 보강만 워커가 후처리합니다.
 
+## Ollama / vLLM 원격 서빙 (선택)
+
+기본값(`transformers`)은 Qwen을 인-프로세스로 직접 로드한다. **Ollama 또는 vLLM**으로 외부 서빙하면 모델 로드를 앱/워커 밖으로 분리할 수 있다. 둘 다 OpenAI 호환이라 **코드 변경 없이 URL만** 바꾸면 된다.
+
+### Ollama (CPU 가능, 무료)
+
+```bash
+# 원커맨드: 서버 기동 + qwen2.5:3b 모델 자동 pull
+docker compose --profile ollama up -d
+```
+
+`.env` 전환:
+
+```env
+ANALYSIS_GENERATION_BACKEND=remote
+ANALYSIS_GENERATION_BASE_URL=http://localhost:11434/v1   # Docker 내부: http://ollama:11434/v1
+ANALYSIS_GENERATION_MODEL=qwen2.5:3b
+```
+
+### vLLM (GPU 환경)
+
+Ollama와 동일한 OpenAI 호환 인터페이스를 사용하므로 URL만 교체:
+
+```env
+ANALYSIS_GENERATION_BACKEND=remote
+ANALYSIS_GENERATION_BASE_URL=http://<vllm-host>:8000/v1
+ANALYSIS_GENERATION_MODEL=Qwen/Qwen2.5-3B-Instruct
+ANALYSIS_GENERATION_API_KEY=<vllm-api-key>   # Ollama는 EMPTY
+```
+
+> `RemoteQwenEvidenceAnalyzer`(`app/domain/evidence_analysis.py`)가 `base_url`로 `openai.ChatCompletion` 호출 → Ollama·vLLM 양쪽 동일 코드.
+
 ## Docker (app 컨테이너)
 
 ```bash
