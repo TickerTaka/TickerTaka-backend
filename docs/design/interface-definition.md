@@ -131,6 +131,9 @@
 | `user_id` | UUID | 필수 |
 | `symbol` | str | 필수, 1–30자 |
 | `category` | enum `DebateCategory` | technical/financial/market/macro/synthesis |
+| `decision_agent` | str | 선택, 기본 `moderator` (`moderator`\|`judge`) — 토론 종결 판정 주체 선택 |
+
+> `decision_agent="judge"`면 토론 종료 후 `moderator_summary` 대신 **`judge_agent`** 노드가 승패/판정을 내린 뒤 요약한다(아래 §3 디베이트 그래프·시퀀스 참조). `POST /api/debates/sessions`(스트리밍)도 동일 바디.
 
 - 응답 `DebateSessionResponse` (201):
 
@@ -154,6 +157,24 @@
 - ※ `notion_*` 3필드로 프론트는 "노션에 저장 ↔ 노션에서 보기" 버튼 상태를 토글
 - 오류: ticker 없음 → `404`, 동일 user/symbol 진행중(가드 거절) → `409`, 런타임 실패 → `503`/`500`
 
+### POST `/api/debates/sessions`
+
+- 목적: 토론 **세션 사전 생성**(스트리밍 토론 준비). 세션 row를 `pending`으로 만들고 즉시 반환 → 이후 `GET /{session_id}/stream`으로 실행/스트리밍.
+- 요청 `DebateCreateRequest` (위 POST `/api/debates`와 동일): `user_id`, `symbol`, `category`
+- 응답 `DebatePrepareResponse` (201):
+
+| 필드 | 타입 |
+|---|---|
+| `session_id` | UUID |
+| `user_id` | UUID |
+| `symbol` | str |
+| `category` | str |
+| `status` | str (`pending`) |
+| `started_at` | datetime? |
+
+- ※ 일괄 반환형 `POST /api/debates`와 달리, 이 엔드포인트는 **SSE 스트리밍용** 세션만 선생성한다(실제 토론 실행은 stream에서 시작).
+- 오류: ticker 없음 → `404`
+
 ### GET `/api/debates`
 
 - 목적: 토론 세션 목록
@@ -165,6 +186,28 @@
 
 - 목적: 개별 토론 결과 (statements 포함 full)
 - 응답 `DebateSessionResponse` (위와 동일)
+
+### GET `/api/debates/{session_id}/stream`
+
+- 목적: 토론을 **SSE(`text/event-stream`)로 실시간 스트리밍**. LangGraph `astream` 노드 산출을 청크 단위로 즉시 forward(일괄 반환 아님).
+- 쿼리: `decision_agent: "moderator" | "judge"` (기본 `moderator`)
+- 응답: `EventSourceResponse` (sse-starlette). 이벤트:
+
+| event | data |
+|---|---|
+| `session_started` | session_id, symbol, symbol_name, category, decision_agent, status |
+| `statement` | agent_role, round, round_order, content, model_used, evidence_count |
+| `summary` | session_id, summary_content, key_points[] |
+| `done` | session_id, status |
+| `error` | session_id, status(`rejected`/`failed`), message |
+
+- **세션 상태별 분기**:
+  - `pending` → 실시간 실행하며 스트리밍(`running`으로 전환)
+  - `completed` → DB의 발언/요약을 읽어 **replay**(이벤트에 `replay:true`)
+  - `failed` → `error` 이벤트
+  - `running` → `409`(이미 실행 중)
+- **연결 정리**: 클라이언트 disconnect(`CancelledError`) 시 `fail_session_if_running`으로 세션을 실패 처리해 좀비 세션 방지.
+- 오류: 세션/ticker 없음 → `404`, 이미 실행 중 → `409`
 
 ### DELETE `/api/debates/{session_id}`
 
@@ -218,7 +261,7 @@
 
 ## 6. 추후 확장 예정 인터페이스
 
-- SSE debate stream endpoint (`text/event-stream`, astream 청크 forward)
-- RAGAS 평가 결과 **조회** endpoint — 결과는 이미 `debate_eval_result`에 **영속화됨**(배치 `run_ragas_eval.py` + 리포트 `ragas-<sha>.json`), 조회 API만 미구현
+- RAGAS 평가 결과 **조회** endpoint — 결과는 이미 `debate_eval_result`에 **영속화됨**(배치 `run_ragas_eval.py` + 리포트 `reports/ragas-<sha>.json`), 조회 API만 미구현
 - 뉴스/공시 **감성·투자분석**은 구현 완료 — `GET /api/watchlists/{user_id}/feed`의 `WatchlistFeedItem`에 노출(§1). 전용 조회 endpoint는 선택 확장
+- ※ **SSE debate stream**(`GET /api/debates/{session_id}/stream`)·**세션 사전생성**(`POST /api/debates/sessions`)은 §3에 **정식 구현 완료**(추후 확장에서 제외)
 - ※ Notion 발행 endpoint는 §3에 **정식 구현 완료**(추후 확장에서 제외)

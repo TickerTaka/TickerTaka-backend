@@ -552,6 +552,11 @@ summary = " ".join(parts)[:800]
 
 #### 실행 방식: Ollama 없이 transformers 직접 사용
 
+> **⚠️ 정정 (2026-06-18):** 아래 "transformers 직접 사용이 맞다"는 결론은 **요약 보강 한정 초기 판단**이었다. 이후 **평가 항목7(로컬 서빙)** 대응으로 방향이 바뀌어, 감성분석 Qwen에 **OpenAI 호환 원격 서빙 백엔드(Ollama/vLLM)를 추가**했다.
+> - transformers 직접 로드는 **기본값으로 유지**(`ANALYSIS_GENERATION_BACKEND=transformers`)되고, `remote`로 전환하면 Ollama/vLLM를 호출한다(`RemoteQwenEvidenceAnalyzer`).
+> - 즉 "서버 분리 이점이 없다"는 당시 전제가 항목7 요건 앞에서 무효화됐다(자세한 근거·트레이드오프는 [memo/plans/2026-06-13-ollama-qwen-serving-plan.md](../memo/plans/2026-06-13-ollama-qwen-serving-plan.md), 결과는 [memo/results/2026-06-18-eval-track7-ollama-qwen-serving.md](../memo/results/2026-06-18-eval-track7-ollama-qwen-serving.md)).
+> - 아래 비교표는 **당시 맥락 보존용**으로 남긴다.
+
 GGUF 포맷이 아닌 HuggingFace 원본 모델을 transformers로 직접 로딩한다.
 
 이유:

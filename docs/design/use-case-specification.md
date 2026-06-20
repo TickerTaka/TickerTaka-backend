@@ -90,7 +90,9 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
 ## UC-06. AI 토론 시작
 
 - 목표: 사용자가 특정 종목에 대해 AI 토론을 실행한다.
-- 진입점: `POST /api/debates`
+- 진입점(2경로):
+  - **일괄 반환형**: `POST /api/debates` — 완료 후 결과 일괄 반환
+  - **SSE 스트리밍형**: `POST /api/debates/sessions`(세션 선생성, `pending`) → `GET /api/debates/{session_id}/stream` — 노드 산출을 실시간 이벤트로 스트리밍(`session_started`/`statement`/`summary`/`done`/`error`)
 - 주요 입력:
   - `user_id`
   - `symbol`
@@ -99,6 +101,7 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
   - debate session 생성
   - bull / bear / moderator 토론 수행
   - statements 및 summary 저장
+  - (스트리밍) 완료 세션 재요청 시 DB replay, 클라이언트 disconnect 시 세션 정리(`fail_session_if_running`)
 - 관련 코드:
   - `app/api/debate.py`
   - `app/domain/debate_service.py`
@@ -126,7 +129,7 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
 - 현재 구현 (RAGAS — 평가 모델/메트릭은 변경 가능):
   - summary faithfulness + answer relevancy
   - evidence context precision
-  - 결과는 **`debate_eval_result` 테이블에 영속화**, 배치(`run_ragas_eval.py`)·리포트(`ragas-<sha>.json`)·회귀테스트(`test_ragas_regression.py`)까지 구현. golden set 확장이 남은 단계
+  - 결과는 **`debate_eval_result` 테이블에 영속화**, 배치(`run_ragas_eval.py`)·리포트(`reports/ragas-<sha>.json`)·회귀테스트(`test_ragas_regression.py`)까지 구현. **golden set 10건 확장 완료**(회귀 30개 = 10×3지표)
 - 관련 코드:
   - `app/agents/nodes/moderator_node.py`
   - `app/domain/debate_evaluation.py`
@@ -156,6 +159,8 @@ TickerTaka 백엔드의 핵심 사용자 흐름을 평가/발표 기준으로 �
 - 처리:
   - **동기**: 룰 + FinBERT(`snunlp/KR-FinBert-SC`) baseline → `evidence_analysis` 즉시 저장 + 게이트 통과분 `analysis_jobs` enqueue
   - **비동기**: `python -m app.workers.analysis_worker`(별도 프로세스)가 큐 폴링 → 본문/DART 문서 fetch → **Qwen** 구조화 보강 → `evidence_analysis` 갱신
+  - **Qwen 서빙**: `ANALYSIS_GENERATION_BACKEND`로 transformers 직접 로드(기본) 또는 Ollama/vLLM 원격 서빙(OpenAI 호환) 선택
+  - **관측성**: Langfuse 활성 시 Qwen 분석 1건이 trace로 기록(`app/core/tracing.py`, 토글/키 없으면 no-op)
 - 결과: `sentiment` / `impact_score`(-2~+2) / `confidence` / `event_type` / `summary` / `key_points` / `risks` / `evidence`
 - 노출: `GET /api/watchlists/{user_id}/feed`의 `WatchlistFeedItem`
 - 관련 코드:

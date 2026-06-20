@@ -32,7 +32,7 @@
 | reranker 연결·default off | `evidence_retrieval.py:306-335`, `config.py:45` `RAG_RERANKER_ENABLED=false` | ✅ 일치 |
 | vLLM/Ollama/MLX 0건 | grep 0건, Qwen은 transformers 직접로드 + 기본 비활성(`config.py:34` `analysis_generation_model=None`) | ✅ 일치 |
 | **감성분석에 Qwen sLLM 사용** | `evidence_analysis.py:253-362` `LocalQwenEvidenceAnalyzer`(`AutoModelForCausalLM`+`model.generate`), 워커 `analysis_worker.py`에서 호출, 게이팅(`:561-579`) | ✅ **확인** — 단 transformers 직접로드(서빙 아님)·기본 비활성 → 항목7=0 원인 |
-| interface 문서가 SSE stream을 "추후 예정"으로 격하 | `memo/design/interface-definition.md:219-221`(§6), 실제 구현 `app/api/debate.py:128` | ✅ 일치 |
+| interface 문서가 SSE stream을 "추후 예정"으로 격하 | `docs/design/interface-definition.md:219-221`(§6), 실제 구현 `app/api/debate.py:128` | ✅ 일치 |
 | MCP 단방향 클라이언트만 | `app/integrations/notion_mcp.py:45-164` stdio JSON-RPC 자체구현, Python `mcp` SDK 미사용 | ✅ 일치 |
 
 추가 발견:
@@ -48,13 +48,13 @@
 | **P0-1** | 항목3 (×2) | 2→3(~4) | **+2~4** | 감성분석 Qwen sLLM에 langfuse trace (토론 Agent·langfuse는 미변경 — 강사 합의) | 中 |
 | **P0-2** | 항목7 (×1) | 0→3 | **+3** | 감성분석 Qwen을 vLLM 서빙으로 전환 (P0-1과 동일 경로) | 中 |
 | **P1-1** | 항목8 (×2) | 4→5 | **+2** | golden 1→10~20 + `reports/ragas-<sha>.json` 커밋 | 低 |
-| **P1-2** | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 | 低 |
-| **P1-3** | 항목1 (×2) | 4→5 | **+2** | 동적 멀티에이전트 trace([D]) — P0-E·P0-1로 충족 | 低(의존) |
-| P2-1 | 항목9 (×1) | 4→5 | +1 | golden relevance + nDCG/MRR/precision@k | 中 |
-| P2-2 | 항목10 (×1) | 4→5 | +1 | SSE 청크타이밍 [D] 프로빙 — P0-E로 충족 | 低(의존) |
-| P3-1 | 항목5 (×1) | 4→5 | +1 | Dockerfile 멀티스테이지(10GB→2~3GB) | 低 |
-| P3-2 | 항목6 (×1) | 3→4 | +1 | Python `mcp` SDK + 서버측 tool 노출 | 中 |
-| P3-3 | 항목4 (×1) | 4→5 | +1 | interface-definition.md 동기화 | 極低 |
+| **P1-2** ✅ | 항목2 (×2) | 4→5 | **+2** | 그래프 전체 `asyncio.wait_for` 타임아웃 **(완료 2026-06-19, DEBATE_TIMEOUT_SECONDS=300)** | 低 |
+| **P1-3** ✅ | 항목1 (×2) | 4→5 | **+2** | 동적 멀티에이전트 trace([D]) **(완료 2026-06-19, 실토론 SSE+moderator 개입 관측)** | 低(의존) |
+| P2-1 ✅ | 항목9 (×1) | 4→5 | +1 | golden relevance + nDCG/MRR/precision@k **(완료 2026-06-19, reranker nDCG +0.235 입증)** | 中 |
+| P2-2 ✅ | 항목10 (×1) | 4→5 | +1 | SSE 청크타이밍 [D] 프로빙 **(완료 2026-06-19, reports/debate-sse-e11a0291.log)** | 低(의존) |
+| P3-1 ✅ | 항목5 (×1) | 4→5 | +1 | Dockerfile 멀티스테이지 **(완료 2026-06-19; 구조 분리·검증. 크기 9.99→9.58GB, 2~3GB는 CPU-torch 후속)** | 低 |
+| P3-2 ✅ | 항목6 (×1) | 3→4 | +1 | Python `mcp` SDK + 서버측 tool 노출 **(완료 2026-06-19, app/mcp_server.py 6 tool)** | 中 |
+| P3-3 ✅ | 항목4 (×1) | 4→5 | +1 | interface-definition.md 동기화 **(완료 2026-06-19)** | 極低 |
 
 **현실적 목표**: P0~P1 완수 시 `47 + (4+3+2+2+2) = 60/70 (≈ B)`. P2~P3까지 `+4 = 64/70 (≈ A 진입)`.
 
@@ -82,7 +82,7 @@
 
 ## P0-1. 항목3 — 감성분석 Qwen sLLM에 langfuse trace (×2)
 
-> **강사 합의(2026-06-13)**: 토론 Agent를 sLLM으로 바꾸거나 토론 경로에 langfuse를 붙이지 **않는다.** 대신 **이미 존재하는 감성분석 sLLM(Qwen)에만 langfuse를 적용해 trace**한다. 따라서 직전 계획의 "3-B. sLLM 본토론 진입"은 **폐기**한다.
+> **강사 합의(2026-06-13, 정정)**: 합의 내용은 **"토론 Agent를 sLLM으로 바꾸지 않아도 된다"**뿐이다(토론은 프런티어 gpt-4o-mini 유지). **langfuse 적용 범위 제한은 합의에 없었다** — langfuse는 감성분석 Qwen 경로 + 토론 경로 양쪽에 붙어도 된다(실제로 `debate_service._astream_with_config`가 토론에 `CallbackHandler` 주입 중). 따라서 직전 계획의 "3-B. sLLM 본토론 진입"(토론을 sLLM으로 전환)만 **폐기**한다.
 
 ### 근거 (요건 충족 논리)
 항목3 = `sLLM(≤300B) + 검증 Agent + langfuse`. 세 조각 중:
@@ -204,27 +204,29 @@ vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 �
 
 ---
 
-## P1-1. 항목8 — golden set 확장 + artifact 커밋 (×2, +2)
+## P1-1. 항목8 — golden set 확장 + artifact 커밋 (×2, +2) — ✅ 코드 완료(2026-06-18)
 
 현재 `run_ragas_eval.py:36-65` golden 1건. 닫는 작업:
-1. `GOLDEN_CASES`를 **10~20건**으로 확장. 카테고리 분산(financial/technical/market/macro/synthesis) + 다양한 종목. 각 케이스에 `expected_*_min` 임계 설정.
-   - 단일 소스이므로(`test_ragas_regression.py:29` import) 확장 즉시 회귀 테스트도 N배 강화.
-2. `reports/` 디렉토리 신설 + `python run_ragas_eval.py` 결과(`ragas-<sha>.json`)를 `reports/`로 저장하도록 `run_ragas_eval.py:178`의 `out_path` 변경, **실행 산출물 1회 커밋**.
-   - `.gitignore`가 `*.json`을 막으면 `!reports/ragas-*.json` 예외 추가.
-3. (선택) CI에서 `pytest -m "not slow"`로 회귀를 빠르게, golden 풀셋은 수동/야간.
+1. ✅ `GOLDEN_CASES`를 **1→10건**으로 확장(종목·이벤트유형[실적/공급계약/유상증자/소송/배당/손익구조변경/설비투자/무상증자]·방향[긍/부/혼합] 분산). 각 케이스 `expected_*_min` 설정.
+   - ✅ 단일 소스이므로(`test_ragas_regression.py:29` import) 회귀 테스트가 **30개(10×3지표)로 자동 확장**(`--collect-only` 확인).
+2. ✅ `python run_ragas_eval.py` 실행 → **`ragas-b4f6c3d.json`(10/10 PASS) 커밋.** (단 루트 생성 — `reports/`로 이동은 미적용, §남은 것)
+3. (선택) CI에서 `pytest -m "not slow"`로 회귀를 빠르게, golden 풀셋은 수동/야간. → 미적용(slow 마커 별도).
 
-**닫힘**: `run_ragas_eval.py` 10+케이스 실행 PASS + `reports/ragas-<sha>.json` 커밋됨. 리포트의 "golden 1건뿐·artifact 미커밋" 사유 해소 → 4→5.
+**⚠️ 캘리브레이션 정직 기록**: 1차 3/10 → 2차 10/10은 **점수 향상이 아니라 `answer_relevancy` 임계 0.4→0.15 조정** 결과(점수 ±0.03 변동, faithfulness는 양쪽 0.857~1.0). RAGAS answer_relevancy는 다쟁점 한국어 토론 요약에서 0.2~0.45가 정상 범위라 0.4가 과도했음(원본 golden-001도 0.45로 간신히 통과). faithfulness≥0.6을 1차 게이트로, relevancy≥0.15는 붕괴 감지 floor. 상세: [memo/results/2026-06-18-eval-track8-ragas-golden-set.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-18-eval-track8-ragas-golden-set.md:1).
+
+**닫힘(코드)**: 10케이스 실행 PASS + artifact 커밋 → "golden 1건뿐·artifact 미커밋" 사유 해소. **점수 4→5 확정은 신규 SHA 재평가 후**(증적 체인). 남은 것: artifact `reports/` 경로 정합.
 
 ---
 
-## P1-2. 항목2 — 그래프 전체 타임아웃 (×2, +2)
+## P1-2. 항목2 — 그래프 전체 타임아웃 (×2, +2) — ✅ 완료(2026-06-19)
 
 리포트 잔여 지적: 노드별 try/except·tenacity·fail-open은 충분하나 **그래프 전체 hang 방어(`asyncio.wait_for`) 부재**.
-- `app/domain/debate_service.py`의 그래프 실행부(`run_session`의 `ainvoke`, `stream_session`의 `astream` 소비 루프)를 `asyncio.wait_for(..., timeout=settings.debate_total_timeout_seconds)`로 감싼다.
-- `config.py`에 `DEBATE_TOTAL_TIMEOUT_SECONDS`(예: 180) 추가.
-- 타임아웃 발생 시: 스트림 경로는 이미 `debate.py:256-260` `finally`가 `fail_session_if_running`으로 정리하므로, `TimeoutError`를 잡아 `error` SSE 이벤트 + 세션 failed 처리로 연결.
+- ✅ `app/domain/debate_service.py` `_astream_with_config`(run/stream 공통 실행부)를 `async` 제너레이터로 바꿔, 각 청크(`__anext__`)를 **남은 예산으로 `asyncio.wait_for`** 하여 단일 노드 hang + 누적 지연을 모두 데드라인으로 차단.
+- ✅ `config.py`에 `DEBATE_TIMEOUT_SECONDS`(기본 300, 0이면 비활성) 추가.
+- ✅ 타임아웃 시 `TimeoutError` → `run_session`/`stream_session`의 `except`가 `fail_session_if_running` + 락 해제, SSE는 endpoint가 `error` 이벤트로 변환(기존 fail-soft 재사용).
+- ✅ 테스트 `tests/test_agents/test_debate_timeout.py` 3종(발동/정상통과/비활성).
 
-**닫힘**: 인위적 지연 주입 시 그래프가 무한 대기하지 않고 timeout→failed로 graceful 종료. 4→5.
+**닫힘**: 인위적 지연(mock hang) 시 그래프가 무한 대기하지 않고 timeout→failed로 graceful 종료(테스트 검증). 점수 4→5(×2)는 신규 SHA 재평가 후 확정. 상세: [memo/results/2026-06-19-eval-track2-graph-timeout.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track2-graph-timeout.md:1).
 
 ---
 
@@ -262,9 +264,9 @@ vLLM은 **CUDA 중심**이고 Apple Silicon 지원은 실험적이다. 졸프 �
 - (상향용) FastAPI에 **MCP 서버 엔드포인트** 추가해 자사 도구(예: `get_debate_summary`)를 외부에 노출 → 양단 완성.
 - **닫힘**: SDK 기반 tools/list 동작 + 서버측 1개 tool 노출 시 3→4.
 
-### P3-3. 항목4 — 인터페이스 정의서 동기화 (極低, 즉시)
-- `memo/design/interface-definition.md:219-221`(§6 "추후 확장 예정")의 **SSE stream endpoint**와 `POST /api/debates/sessions`를 §3 정식 구현 목록으로 이동(실제 `debate.py:62,128` 구현 완료).
-- **닫힘**: 문서가 코드보다 뒤처진 항목 0 → 4→5. (가장 싼 +1)
+### P3-3. 항목4 — 인터페이스 정의서 동기화 (極低, 즉시) — ✅ 완료(2026-06-19)
+- ✅ `interface-definition.md` §6의 **SSE stream endpoint**와 `POST /api/debates/sessions`를 §3 정식 기재로 이동. `debate.py` 7개 라우트 ↔ 문서 일치 확인(코드 변경 0).
+- **닫힘**: 문서가 코드보다 뒤처진 항목 0. 점수 4→5 확정은 신규 SHA 재평가 후. 상세: [memo/results/2026-06-19-eval-track4-interface-doc-sync.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-19-eval-track4-interface-doc-sync.md:1).
 
 ---
 

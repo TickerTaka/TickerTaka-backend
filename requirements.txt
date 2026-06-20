@@ -17,6 +17,7 @@ asyncpg==0.31.0
 langgraph==0.2.40
 langchain-core==0.3.10
 langchain-openai==0.2.1
+openai==1.109.1   # RemoteQwenEvidenceAnalyzer(Ollama/vLLM OpenAI 호환) + langfuse.openai 드롭인이 직접 사용
 langchain-community==0.3.1
 langchain-huggingface==0.1.0
 langchain-chroma==0.1.4
@@ -41,12 +42,13 @@ beautifulsoup4==4.12.3
 trafilatura==2.0.0
 
 # 설정/인증
-pydantic==2.9.2
+pydantic==2.13.4   # mcp>=1.28(>=2.11 요구)로 2.9.2→2.13.4 범프(2.x 마이너, 테스트 통과)
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
-pyjwt==2.9.0
+pyjwt==2.13.0   # mcp(>=2.10.1 요구)로 2.9.0→2.13.0 범프
 passlib[bcrypt]==1.7.4
-langfuse>=3.0.0
+langfuse==4.7.1
+mcp==1.28.0   # MCP 서버(app/mcp_server.py) — 도메인 기능을 tool로 노출 (#6)
 
 # 재시도
 tenacity==8.5.0

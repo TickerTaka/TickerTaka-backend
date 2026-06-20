@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     analysis_prompt_version: str = Field(default="evidence-analysis-v2", alias="ANALYSIS_PROMPT_VERSION")
     analysis_summary_provider: str = Field(default="extractive", alias="ANALYSIS_SUMMARY_PROVIDER")
     analysis_generation_model: str | None = Field(default=None, alias="ANALYSIS_GENERATION_MODEL")
+    # Qwen 서빙 백엔드: transformers(인-프로세스 model.generate) | remote(OpenAI 호환 서빙).
+    # remote 면 Ollama(http://localhost:11434/v1) 또는 vLLM 을 base_url 로 가리킨다. 둘 다 OpenAI 호환이라
+    # 코드는 동일하고 URL 만 다르다(운영 GPU 확보 시 vLLM URL 로 교체, 코드 변경 없음).
+    analysis_generation_backend: str = Field(default="transformers", alias="ANALYSIS_GENERATION_BACKEND")
+    analysis_generation_base_url: str | None = Field(default=None, alias="ANALYSIS_GENERATION_BASE_URL")
+    analysis_generation_api_key: str = Field(default="EMPTY", alias="ANALYSIS_GENERATION_API_KEY")
     # 비동기 Qwen 보강 워커
     analysis_async_enabled: bool = Field(default=True, alias="ANALYSIS_ASYNC_ENABLED")
     analysis_worker_poll_interval: float = Field(default=2.0, alias="ANALYSIS_WORKER_POLL_INTERVAL")
@@ -75,6 +81,9 @@ class Settings(BaseSettings):
     max_debates_per_user_per_day: int = Field(default=20, alias="MAX_DEBATES_PER_USER_PER_DAY")
     debate_active_ttl_seconds: int = Field(default=1800, alias="DEBATE_ACTIVE_TTL_SECONDS")
     debate_graph_recursion_limit: int = Field(default=64, alias="DEBATE_GRAPH_RECURSION_LIMIT")
+    # 토론 그래프 전체 실행 데드라인(초). 노드 hang/누적 지연 방어 — 초과 시 TimeoutError 로
+    # 중단되어 기존 fail-soft(세션 failed 마킹 + 락 해제 + SSE error)로 처리. 0 이면 비활성.
+    debate_timeout_seconds: int = Field(default=300, alias="DEBATE_TIMEOUT_SECONDS")
     default_estimated_tokens_per_debate: int = Field(default=12000, alias="DEFAULT_ESTIMATED_TOKENS_PER_DEBATE")
     estimated_tokens_financial: int = Field(default=12000, alias="ESTIMATED_TOKENS_FINANCIAL")
     estimated_tokens_technical: int = Field(default=10000, alias="ESTIMATED_TOKENS_TECHNICAL")

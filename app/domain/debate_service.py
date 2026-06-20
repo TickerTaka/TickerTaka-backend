@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
@@ -292,7 +294,7 @@ def _get_default_graph():
     return debate_graph
 
 
-def _astream_with_config(
+async def _astream_with_config(
     graph_runner,
     state: DebateState,
     session_id: str | None = None,
@@ -318,9 +320,31 @@ def _astream_with_config(
         logging.getLogger(__name__).debug("[langfuse] callback 설정 실패 (무시): %s", e)
 
     try:
-        return graph_runner.astream(state, config)
+        stream = graph_runner.astream(state, config)
     except TypeError:
-        return graph_runner.astream(state)
+        stream = graph_runner.astream(state)
+
+    timeout = settings.debate_timeout_seconds
+    if not timeout or timeout <= 0:
+        # 타임아웃 비활성 → 패스스루
+        async for chunk in stream:
+            yield chunk
+        return
+
+    # 그래프 전체 데드라인. 각 청크(__anext__)를 남은 예산으로 wait_for 하여
+    # ① 단일 노드 hang ② 누적 지연 둘 다 상한선으로 끊는다. 초과 시 TimeoutError →
+    # 호출부(run_session/stream_session)의 except 가 fail_session_if_running 으로 fail-soft.
+    deadline = time.monotonic() + timeout
+    agen = stream.__aiter__()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"debate graph exceeded {timeout}s deadline")
+        try:
+            chunk = await asyncio.wait_for(agen.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        yield chunk
 
 
 def _stream_event(event: str, payload: dict[str, Any]) -> dict[str, str]:
