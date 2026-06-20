@@ -131,6 +131,9 @@
 | `user_id` | UUID | 필수 |
 | `symbol` | str | 필수, 1–30자 |
 | `category` | enum `DebateCategory` | technical/financial/market/macro/synthesis |
+| `decision_agent` | str | 선택, 기본 `moderator` (`moderator`\|`judge`) — 토론 종결 판정 주체 선택 |
+
+> `decision_agent="judge"`면 토론 종료 후 `moderator_summary` 대신 **`judge_agent`** 노드가 승패/판정을 내린 뒤 요약한다(아래 §3 디베이트 그래프·시퀀스 참조). `POST /api/debates/sessions`(스트리밍)도 동일 바디.
 
 - 응답 `DebateSessionResponse` (201):
 

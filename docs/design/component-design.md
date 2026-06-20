@@ -53,18 +53,19 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 ## 3. Agent Runtime Layer
 
 구성:
-- `app/agents/debate_graph.py`
+- `app/agents/debate_graph.py` (노드: data_agent / moderator_pre / bull_agent / bear_agent / moderator_check / **judge_agent** / moderator_summary)
 - `app/agents/state.py`
 - `app/agents/nodes/data_node.py`
 - `app/agents/nodes/bull_node.py`
 - `app/agents/nodes/bear_node.py`
-- `app/agents/nodes/moderator_node.py`
+- `app/agents/nodes/moderator_node.py` (`moderator_pre`/`moderator_check`/`moderator_summary` + **`judge_agent_node`** @ `:224`)
 
 책임:
 - 토론 상태 관리
 - data context 수집
 - bull/bear 논증 생성
 - moderator 검증/요약
+- **종결 판정 분기**: `decision_agent="judge"`면 `judge_agent`가 승패/판정을 내리고(→ `moderator_summary`), 기본(`moderator`)이면 `moderator_summary`가 단독 종결(`debate_graph.py:23-27,63,72`)
 
 ## 4. Persistence Layer
 

@@ -153,8 +153,9 @@ sequenceDiagram
     end
 ```
 
-> **그래프 엣지(`debate_graph.py:60–66`)**: `START → data_agent → moderator_pre → bull_agent → moderator_check`, 그리고 `bear_agent → moderator_check`. `moderator_check`에서만 `add_conditional_edges(_router)`로 분기하고, `moderator_summary → END`.
-> **`_router`(`:22–47`) 분기 우선순위**: ① `hallucination_count ≥ 2` → summary(강제종료) → ② `moderator_flag == "end"` → summary → ③ `current_topic_index ≥ 3` → summary → ④ `flag == "intervene"` → 직전 화자 재발언 → ⑤ 평상시 `turn∈{2,4}` → bear, `{1,3}` → bull.
+> **그래프 엣지(`debate_graph.py:58–73`)**: `START → data_agent → moderator_pre → bull_agent → moderator_check`, 그리고 `bear_agent → moderator_check`. `moderator_check`에서만 `add_conditional_edges(_router)`로 분기하고, **`judge_agent → moderator_summary → END`**.
+> **`_router`(`:27–52`) 분기 우선순위**: ① `hallucination_count ≥ 2` → 종결 → ② `moderator_flag == "end"` → 종결 → ③ `current_topic_index ≥ 3` → 종결 → ④ `flag == "intervene"` → 직전 화자 재발언 → ⑤ 평상시 `turn∈{2,4}` → bear, `{1,3}` → bull.
+> **종결 분기(`_final_node` `:23–24`)**: 종결 시 `decision_agent == "judge"`면 **`judge_agent`**(승패/판정, `moderator_node.py:224`) → `moderator_summary`, 기본(`moderator`)이면 `moderator_summary` 단독. `decision_agent`는 토론 시작 요청 바디에서 선택(`POST /api/debates`·`/sessions`).
 > **상태 키**: `moderator_flag`(ok/intervene/end), `hallucination_count`, `current_turn`, `current_topic_index`, `agenda`, `statements`, `summary_content`, `key_points` (`debate_service._build_initial_state`).
 > **복원력**: 매 노드 청크마다 `merge_state` 후 `save_checkpoint`(Redis 24h TTL, fail-soft) → 중단 시 `load_checkpoint`로 재개. 가드는 fail-open(Redis 장애 시 토론 허용).
 > **LLM**: `llm_factory.get_llm(role)`이 role별 `settings.{bull,bear,moderator,fallback}_model`을 선택(기본 `gpt-4o-mini`). 현재 공급자는 OpenAI 직접(`openai_api_key`, base_url 미지정) — sLLM/OpenRouter 전환은 이 base_url 재배선이 진입점이라, 다이어그램은 특정 모델에 고정하지 않는다.
