@@ -114,7 +114,32 @@ services:
       chroma:
         condition: service_healthy
 
+  # Ollama 로컬 서빙 (항목7). 감성분석 Qwen을 transformers 인프로세스 대신 OpenAI 호환
+  # 원격 서빙으로 돌리고 싶을 때 사용. 기본 비활성(profile)이라 일반 `up`에선 안 뜬다.
+  #   docker compose --profile ollama up -d ollama
+  #   docker exec tickertaka-ollama ollama pull qwen2.5:3b   # 최초 1회
+  # 그리고 .env(app/worker)에:
+  #   ANALYSIS_GENERATION_BACKEND=remote
+  #   ANALYSIS_GENERATION_BASE_URL=http://ollama:11434/v1
+  #   ANALYSIS_GENERATION_MODEL=qwen2.5:3b
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    container_name: tickertaka-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollamadata:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 volumes:
   pgdata:
   chromadata:
   hfcache:
+  ollamadata:
