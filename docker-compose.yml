@@ -114,14 +114,25 @@ services:
       chroma:
         condition: service_healthy
 
-  # Ollama 로컬 서빙 (항목7). 감성분석 Qwen을 transformers 인프로세스 대신 OpenAI 호환
-  # 원격 서빙으로 돌리고 싶을 때 사용. 기본 비활성(profile)이라 일반 `up`에선 안 뜬다.
-  #   docker compose --profile ollama up -d ollama
-  #   docker exec tickertaka-ollama ollama pull qwen2.5:3b   # 최초 1회
-  # 그리고 .env(app/worker)에:
+  # ── Ollama 원격 서빙 ────────────────────────────────────────
+  # 감성분석 Qwen sLLM을 transformers 인-프로세스 대신 OpenAI 호환 원격 서빙으로
+  # 돌리고 싶을 때 사용. 기본 비활성(profile)이라 일반 `up`에선 뜨지 않는다.
+  #
+  # 원커맨드 기동 (서버 + 모델 자동 pull):
+  #   docker compose --profile ollama up -d
+  #
+  # .env 전환 (호스트 직접 실행 시):
   #   ANALYSIS_GENERATION_BACKEND=remote
-  #   ANALYSIS_GENERATION_BASE_URL=http://ollama:11434/v1
+  #   ANALYSIS_GENERATION_BASE_URL=http://localhost:11434/v1
   #   ANALYSIS_GENERATION_MODEL=qwen2.5:3b
+  #
+  # .env 전환 (Docker Compose 내부 서비스 간):
+  #   ANALYSIS_GENERATION_BASE_URL=http://ollama:11434/v1
+  #
+  # vLLM 전환 시 URL만 교체 (코드 변경 없음, OpenAI 호환):
+  #   ANALYSIS_GENERATION_BASE_URL=http://<vllm-host>:8000/v1
+  #   ANALYSIS_GENERATION_MODEL=Qwen/Qwen2.5-3B-Instruct
+  #   ANALYSIS_GENERATION_API_KEY=<vllm-api-key>
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest
@@ -137,6 +148,20 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # Ollama 모델 자동 pull. ollama 서비스가 healthy 된 후 qwen2.5:3b 를 pull 한다.
+  # 이미 존재하면 즉시 완료(no-op). 별도 docker exec 없이 원커맨드로 끝난다.
+  ollama-init:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    container_name: tickertaka-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["ollama", "pull", "qwen2.5:3b"]
+    restart: "no"
 
 volumes:
   pgdata:
