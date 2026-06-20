@@ -105,7 +105,7 @@ Claude Desktop 연결(`claude_desktop_config.json`, WSL 서버 spawn 예시):
 }
 ```
 
-> tool: `list_available_symbols`(데이터 있는 종목) / `get_stock_detail` / `get_watchlist_feed` / `list_debates` / `get_debate` / `start_debate`. 토론·조회는 **수집된 종목만** 의미 있으므로 `list_available_symbols`로 먼저 확인.
+> tool: `list_available_symbols`(데이터 있는 종목) / `get_stock_detail` / `get_watchlist_feed` / `list_debates` / `get_debate` / `start_debate` / `add_watchlist`(관심종목 추가+데이터 수집, 수십 초). 토론·조회는 **수집된 종목만** 의미 있으므로 `list_available_symbols`로 먼저 확인.
 
 ## 환경 변수 (주요 키)
 

@@ -166,7 +166,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 ## 9. MCP (양방향)
 
 - **클라이언트(소비)**: `app/integrations/notion_mcp.py` — Notion MCP 서버를 stdio로 호출해 토론 발행(현재 자체 JSON-RPC 구현).
-- **서버(제공)**: `app/mcp_server.py` — 공식 `mcp` SDK(FastMCP)로 도메인 기능을 tool로 노출. 기존 FastAPI route 함수를 `db=<session>`으로 직접 호출해 로직 재사용(중복 0). tool: `list_available_symbols`/`get_stock_detail`/`get_watchlist_feed`/`list_debates`/`get_debate`/`start_debate`. stdio 기동(`python -m app.mcp_server`) → Claude Desktop 등 외부 MCP 클라이언트가 호출.
+- **서버(제공)**: `app/mcp_server.py` — 공식 `mcp` SDK(FastMCP)로 도메인 기능을 tool로 노출. 기존 FastAPI route 함수를 `db=<session>`으로 직접 호출해 로직 재사용(중복 0). tool: `list_available_symbols`/`get_stock_detail`/`get_watchlist_feed`/`list_debates`/`get_debate`/`start_debate`/`add_watchlist`(관심종목 추가+데이터 수집). stdio 기동(`python -m app.mcp_server`) → Claude Desktop 등 외부 MCP 클라이언트가 호출.
 - 책임: 우리 시스템이 **MCP 소비자이자 제공자**(양방향)가 됨. 데이터 제약(수집된 종목만 의미)은 `list_available_symbols`로 노출.
 
 ## 배포/실행 환경

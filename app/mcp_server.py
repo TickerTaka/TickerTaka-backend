@@ -126,5 +126,58 @@ async def start_debate(user_id: str, symbol: str, category: str = "financial") -
             return _err(exc)
 
 
+@mcp.tool()
+def add_watchlist(user_id: str, symbol: str, memo: str = "") -> dict:
+    """관심종목 추가 + 데이터 수집(뉴스/재무/가격/공시 인덱싱).
+
+    ⚠️ 외부 API fetch + 벡터 인덱싱이라 수십 초~분 소요. 추가·수집 후에야 그 종목으로
+    토론(start_debate)·피드(get_watchlist_feed)가 의미 있다. 이미 담긴 종목이면 데이터만 갱신.
+    """
+    from app.domain.watchlist_service import (
+        TickerNotFoundError,
+        UserNotFoundError,
+        WatchlistAlreadyExistsError,
+        WatchlistService,
+        sync_watchlist_filings,
+        sync_watchlist_financials,
+        sync_watchlist_news,
+        sync_watchlist_prices,
+        sync_watchlist_valuation,
+    )
+
+    already = False
+    with session_scope() as s:
+        try:
+            WatchlistService(s).create_watchlist(UUID(user_id), symbol, memo or None)
+            s.commit()
+        except WatchlistAlreadyExistsError:
+            already = True
+        except (UserNotFoundError, TickerNotFoundError) as exc:
+            return _err(exc)
+        except Exception as exc:  # noqa: BLE001
+            return _err(exc)
+
+    # 데이터 수집(인라인, 느림). 각 sync 함수는 자체 세션을 연다. 실패는 항목별로 격리.
+    synced: list[str] = []
+    for fn in (
+        sync_watchlist_news,
+        sync_watchlist_financials,
+        sync_watchlist_prices,
+        sync_watchlist_filings,
+        sync_watchlist_valuation,
+    ):
+        try:
+            fn(symbol)
+            synced.append(fn.__name__)
+        except Exception as exc:  # noqa: BLE001
+            synced.append(f"{fn.__name__}: FAIL({type(exc).__name__})")
+    return {
+        "symbol": symbol,
+        "already_in_watchlist": already,
+        "synced": synced,
+        "note": "수집 완료 — 이제 get_watchlist_feed / start_debate 사용 가능",
+    }
+
+
 if __name__ == "__main__":
     mcp.run()
