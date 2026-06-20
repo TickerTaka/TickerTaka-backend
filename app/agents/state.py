@@ -42,11 +42,18 @@ class DebateState(TypedDict):
     # 발언 누적 (add 리듀서)
     statements: Annotated[list[Statement], operator.add]
 
+    # 에이전트별 교정 이력 (add 리듀서 — 세션 전체 누적)
+    bull_corrections: Annotated[list[str], operator.add]
+    bear_corrections: Annotated[list[str], operator.add]
+
     # 사회자 제어 신호
-    moderator_flag:      str    # ok | intervene | end
-    intervention_note:   str
-    hallucination_count: int
-    debate_ended_by:     NotRequired[str]  # bull | bear | ""
+    moderator_flag:           str    # ok | intervene | end
+    intervention_note:        str
+    corrected_fact:           str    # 환각 탐지 시 올바른 수치 (재발언 교정용)
+    hallucination_count:      int    # 총 누적 (Langfuse 로깅용)
+    bull_hallucination_count: int    # Bull 누적 (종료 판단용)
+    bear_hallucination_count: int    # Bear 누적 (종료 판단용)
+    debate_ended_by:          NotRequired[str]  # bull | bear | ""
     debate_end_reason:   NotRequired[str]
     judge_result:        NotRequired[dict]
 

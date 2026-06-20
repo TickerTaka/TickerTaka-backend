@@ -15,6 +15,19 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from dotenv import load_dotenv
 load_dotenv(".env")
 load_dotenv(".env.local", override=True)
+
+# --provider 플래그: get_settings() lru_cache 호출 전에 env 주입
+# 사용 예) --provider openrouter  또는  --provider openai
+_PROVIDER_IDX = next((i for i, a in enumerate(sys.argv) if a == "--provider"), None)
+if _PROVIDER_IDX is not None and _PROVIDER_IDX + 1 < len(sys.argv):
+    _provider_val = sys.argv[_PROVIDER_IDX + 1]
+    if _provider_val not in ("openai", "openrouter", "anthropic"):
+        print(f"[error] --provider 값은 'openai', 'openrouter', 'anthropic' 중 하나이어야 합니다. (받은 값: {_provider_val})")
+        sys.exit(1)
+    os.environ["DEBATE_LLM_PROVIDER"] = _provider_val
+    sys.argv.pop(_PROVIDER_IDX)  # "--provider"
+    sys.argv.pop(_PROVIDER_IDX)  # 값
+    print(f"[provider] {_provider_val} 모드로 실행")
 import logging
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.CRITICAL)
@@ -22,7 +35,7 @@ logging.getLogger("chromadb").setLevel(logging.CRITICAL)
 if "--help" in sys.argv or "-h" in sys.argv:
     print(
         "Usage: python test_debate.py [symbol] [symbol_name] [category] [session_id] [user_id] "
-        "[--no-db] [--moderator|--judge] [--wait-eval]"
+        "[--no-db] [--moderator|--judge] [--wait-eval] [--provider openai|openrouter|anthropic]"
     )
     sys.exit(0)
 
@@ -30,6 +43,7 @@ if "--help" in sys.argv or "-h" in sys.argv:
 NO_DB = "--no-db" in sys.argv
 if NO_DB:
     sys.argv.remove("--no-db")
+    
     # DB 저장 함수를 모두 no-op으로 패치
     import unittest.mock as mock
     _noop = mock.AsyncMock(return_value=None)
@@ -39,6 +53,7 @@ if NO_DB:
     _repo.save_moderator_summary = _noop
     _repo.update_session_status  = _noop
     _repo.fail_session_if_running = _noop
+    
     # RAGAS eval DB 저장도 skip
     import app.domain.debate_evaluation as _eval
     _orig_summary_eval  = _eval.evaluate_summary_async
@@ -59,12 +74,55 @@ if MODERATOR_MODE:
 WAIT_EVAL = "--wait-eval" in sys.argv
 if WAIT_EVAL:
     sys.argv.remove("--wait-eval")
+SAVE_LOG = "--save-log" in sys.argv
+if SAVE_LOG:
+    sys.argv.remove("--save-log")
+
+import io
+import subprocess
+from pathlib import Path
 
 from app.agents.debate_checkpoint import load_checkpoint, merge_state, save_checkpoint
 from app.agents.debate_graph import debate_graph
 from app.agents.state import DebateState
 from app.config import get_settings
 from app.core.debate_runtime_guard import get_tracker
+
+
+class _Tee:
+    """stdout을 콘솔과 파일에 동시에 출력."""
+    def __init__(self, file):
+        self._file = file
+        self._stdout = sys.stdout
+
+    def write(self, data):
+        self._stdout.write(data)
+        self._file.write(data)
+
+    def flush(self):
+        self._stdout.flush()
+        self._file.flush()
+
+    def __enter__(self):
+        sys.stdout = self
+        return self
+
+    def __exit__(self, *_):
+        sys.stdout = self._stdout
+        self._file.close()
+
+
+def _make_log_path(provider: str, session_id: str) -> Path:
+    reports = Path("reports")
+    reports.mkdir(exist_ok=True)
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        sha = "unknown"
+    sid = session_id[:8]
+    return reports / f"debate-{provider}-{sha}-{sid}.log"
 
 
 async def run(
@@ -111,10 +169,15 @@ async def run(
         "news_chunks":         [],
         "initial_evidences":   [],
         "statements":          [],
-        "moderator_flag":      "ok",
-        "intervention_note":   "",
-        "hallucination_count": 0,
-        "debate_ended_by":     "",
+        "bull_corrections":    [],
+        "bear_corrections":    [],
+        "moderator_flag":           "ok",
+        "intervention_note":        "",
+        "corrected_fact":           "",
+        "hallucination_count":      0,
+        "bull_hallucination_count": 0,
+        "bear_hallucination_count": 0,
+        "debate_ended_by":          "",
         "debate_end_reason":   "",
         "judge_result":        {},
         "summary_content":     "",
@@ -217,4 +280,14 @@ if __name__ == "__main__":
     session_id  = sys.argv[4] if len(sys.argv) > 4 else None
     user_id     = sys.argv[5] if len(sys.argv) > 5 else "00000000-0000-0000-0000-000000000001"
     decision_agent = "judge" if JUDGE_MODE else "moderator"
-    asyncio.run(run(symbol, symbol_name, category, session_id, user_id, decision_agent))
+
+    _session_id = session_id or str(uuid.uuid4())
+    if SAVE_LOG:
+        provider = os.environ.get("DEBATE_LLM_PROVIDER", "openai")
+        log_path = _make_log_path(provider, _session_id)
+        print(f"[save-log] → {log_path}")
+        with _Tee(open(log_path, "w", encoding="utf-8")) as _tee:
+            asyncio.run(run(symbol, symbol_name, category, _session_id, user_id, decision_agent))
+        print(f"[save-log] 저장 완료: {log_path}")
+    else:
+        asyncio.run(run(symbol, symbol_name, category, _session_id, user_id, decision_agent))

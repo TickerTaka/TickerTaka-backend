@@ -25,11 +25,7 @@ def _final_node(state: DebateState) -> Literal["judge_agent", "moderator_summary
 
 
 def _router(state: DebateState) -> Literal["bull_agent", "bear_agent", "judge_agent", "moderator_summary"]:
-    # 환각 2회 이상 → 강제 종료
-    if state.get("hallucination_count", 0) >= 2:
-        logger.warning("[graph] 환각 2회 초과 → final 이동")
-        return _final_node(state)
-
+    # moderator_check에서 end 판정 → final (per-agent 3회 임계값)
     if state["moderator_flag"] == "end":
         return _final_node(state)
 

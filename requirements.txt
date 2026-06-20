@@ -18,6 +18,7 @@ langgraph==0.2.40
 langchain-core==0.3.10
 langchain-openai==0.2.1
 openai==1.109.1   # RemoteQwenEvidenceAnalyzer(Ollama/vLLM OpenAI 호환) + langfuse.openai 드롭인이 직접 사용
+langchain-anthropic>=0.3.0,<0.4.0
 langchain-community==0.3.1
 langchain-huggingface==0.1.0
 langchain-chroma==0.1.4

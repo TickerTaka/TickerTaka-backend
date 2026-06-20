@@ -41,6 +41,35 @@ def _parse(text: str, fallback: dict) -> dict:
         return fallback
 
 
+# sLLM이 JSON verdict="hallucination"으로 마크하면서 note 텍스트에는
+# "일치", "사실", "ok" 등 ok 신호를 쓰는 불일치를 방어하는 키워드 목록.
+_OK_SIGNALS = (
+    "일치함", "일치한다", "사실임", "근거 있", "근거가 있", "근거 존재",
+    "뉴스에 근거", "계산 일치", "수치는 사실", "검증 불가로 ok",
+    "모두 ok", "모두ok", "검증 불가", "실제 데이터와 일치",
+    "검색 결과와 일치", "뉴스·공시", "뉴스/공시",
+    "근거가 있으면 반드시 ok", "all ok", "해당 수치는 사실",
+)
+
+
+def _sanitize_verdict(verdict: str, note: str, raw: str) -> str:
+    """
+    JSON verdict='hallucination'이지만 note 또는 raw 텍스트에
+    ok 신호가 포함된 경우 'ok'로 정정.
+    OpenRouter sLLM 계열의 JSON/텍스트 불일치 오류를 방어한다.
+    """
+    if verdict != "hallucination":
+        return verdict
+    combined = (note + " " + raw).lower()
+    if any(sig.lower() in combined for sig in _OK_SIGNALS):
+        logger.warning(
+            "[moderator_check] JSON verdict=hallucination이지만 ok 신호 감지 → ok로 정정. note=%s",
+            note[:150],
+        )
+        return "ok"
+    return verdict
+
+
 def _default_agenda() -> list[str]:
     return ["쟁점1", "쟁점2", "쟁점3"]
 
@@ -144,25 +173,43 @@ def moderator_check_node(state: DebateState) -> dict:
             content=last["content"],
             price_context=state["price_context"],
             financial_context=state["financial_context"],
+            evidence_context=state.get("evidence_context", ""),
         ), temp=0.0)
     except Exception as e:
         logger.error(f"[moderator_check] 오류: {e}")
         return {"moderator_flag": "ok", "intervention_note": ""}
 
     parsed  = _parse(raw, {"verdict": "ok", "note": "", "corrected_fact": ""})
-    verdict = parsed.get("verdict", "ok")
-    note    = parsed.get("note", "")
+    verdict       = _sanitize_verdict(
+        parsed.get("verdict", "ok"),
+        parsed.get("note", ""),
+        raw,
+    )
+    note          = parsed.get("note", "")
+    corrected_fact = parsed.get("corrected_fact", "")
 
-    hallucination_count = state.get("hallucination_count", 0)
+    hallucination_count      = state.get("hallucination_count", 0)
+    bull_hallucination_count = state.get("bull_hallucination_count", 0)
+    bear_hallucination_count = state.get("bear_hallucination_count", 0)
     extra = []
 
     if verdict == "hallucination":
         hallucination_count += 1
+        last_role = last["agent_role"]
+        if last_role == "bull":
+            bull_hallucination_count += 1
+            per_agent_count = bull_hallucination_count
+        else:
+            bear_hallucination_count += 1
+            per_agent_count = bear_hallucination_count
+
         msg = f"[사회자 개입] {note}"
-        if parsed.get("corrected_fact"):
-            msg += f"\n정정: {parsed['corrected_fact']}"
-        if hallucination_count >= 2:
-            msg += f"\n토론 중단: {last['agent_role']} 발언에서 반복적인 검증 문제가 감지되었습니다."
+        if corrected_fact:
+            msg += f"\n정정: {corrected_fact}"
+        if per_agent_count >= 3:
+            msg += f"\n토론 중단: {last_role} 발언에서 반복적인 검증 문제가 감지되었습니다."
+        else:
+            msg += f"\n발언을 수정해 주세요. ({last_role.upper()} 누적 {per_agent_count}회)"
         extra = [{
             "agent_role":  "moderator",
             "round":       last["round"],
@@ -173,11 +220,10 @@ def moderator_check_node(state: DebateState) -> dict:
             "evidences":   [],
         }]
 
-    # Langfuse: 사회자 개입 기록
-    if verdict == "hallucination":
+        # Langfuse: 사회자 개입 기록
         _log_hallucination(
             session_id=state["session_id"],
-            agent_role=last["agent_role"],
+            agent_role=last_role,
             round_=last.get("round", ""),
             topic_index=last.get("topic_index", 0),
             note=note,
@@ -185,13 +231,24 @@ def moderator_check_node(state: DebateState) -> dict:
         )
 
     result = {
-        "moderator_flag":      "intervene" if verdict == "hallucination" else "ok",
-        "intervention_note":   note,
-        "hallucination_count": hallucination_count,
-        "statements":          extra,
-        "round_order":         state["round_order"] + (1 if extra else 0),
+        "moderator_flag":           "intervene" if verdict == "hallucination" else "ok",
+        "intervention_note":        note          if verdict == "hallucination" else "",
+        "corrected_fact":           corrected_fact if verdict == "hallucination" else "",
+        "hallucination_count":      hallucination_count,
+        "bull_hallucination_count": bull_hallucination_count,
+        "bear_hallucination_count": bear_hallucination_count,
+        "statements":               extra,
+        "round_order":              state["round_order"] + (1 if extra else 0),
     }
-    if verdict == "hallucination" and hallucination_count >= 2:
+
+    # 환각 탐지 시 해당 에이전트의 교정 이력에 추가 (이후 모든 발언에 주입됨)
+    if verdict == "hallucination":
+        correction_entry = note + (f" → {corrected_fact}" if corrected_fact else "")
+        if last["agent_role"] == "bull":
+            result["bull_corrections"] = [correction_entry]
+        else:
+            result["bear_corrections"] = [correction_entry]
+    if verdict == "hallucination" and per_agent_count >= 3:
         result["moderator_flag"] = "end"
         result["debate_ended_by"] = last["agent_role"]
         result["debate_end_reason"] = note or "반복적인 발언 검증 실패"

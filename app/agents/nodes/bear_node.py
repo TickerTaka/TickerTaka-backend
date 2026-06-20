@@ -34,6 +34,26 @@ def bear_agent_node(state: DebateState) -> dict:
     ]
     last_bull = bull_stmts[-1]["content"] if bull_stmts else "없음"
 
+    # 교정 이력 주입: retry 여부와 무관하게 세션 내 모든 발언에 상시 포함
+    corrections = state.get("bear_corrections", [])
+    if state.get("moderator_flag") == "intervene":
+        note = state.get("intervention_note", "")
+        fact = state.get("corrected_fact", "")
+        current = note + (f" → 올바른 수치: {fact}" if fact else "")
+        if current and current not in corrections:
+            corrections = corrections + [current]
+
+    correction_block = ""
+    if corrections:
+        lines = "\n".join(f"  - {c}" for c in corrections)
+        prefix = "[사회자 교정 요청 — 즉시 수정]\n" if state.get("moderator_flag") == "intervene" else "[교정 이력 — 반드시 준수]\n"
+        correction_block = (
+            f"\n\n{prefix}"
+            "아래 항목은 이전 발언에서 사회자가 지적한 오류입니다. 동일한 실수를 반복하지 마세요.\n"
+            f"{lines}\n"
+            "데이터에 명시된 수치만 인용하세요."
+        )
+
     user_input = BEAR_HUMAN.format(
         symbol=state["symbol"],
         symbol_name=state["symbol_name"],
@@ -46,7 +66,7 @@ def bear_agent_node(state: DebateState) -> dict:
         financial_context=state["financial_context"],
         evidence_context=state["evidence_context"],
         last_bull_statement=last_bull,
-    )
+    ) + correction_block
 
     try:
         content, evidences = _invoke_bear(user_input)
