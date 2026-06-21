@@ -97,13 +97,17 @@
 ### 3-1. 항목6 MCP 클라이언트 E2E — 4→5 (×1, +1)
 - 사유: `reports/mcp-e2e-2026-06-20.md`가 **자가서술 docs**이고 내부 tools/list 캡처가 **구버전 6개**(현재 `add_watchlist` 추가로 7개)라 불일치 → 클라 round-trip 독립 [D] 부재.
 - 작업: `NOTION_TOKEN` 유효 환경에서 Notion round-trip을 `mcp_selftest`급 스크립트로 **raw 캡처**(타임스탬프 포함), tools/list를 **7개로 갱신**해 일관성 확보. 서버측은 이미 selftest [D] 확보됨.
+- **진행(2026-06-21)**:
+  - ✅ **서버측 raw [D] 확보** — `python -m scripts.mcp_selftest` 실행 캡처를 `reports/mcp-selftest-2026-06-21.log`로 커밋(tools/list **7개** + call_tool `list_available_symbols` **27종목** + PASS, DB 연결 E2E). 직전 평가가 받은 OperationalError보다 강한 증적. `mcp-e2e-2026-06-20.md` §3 stale 6개 → 실 7개 raw로 교체, 요약표 갱신.
+  - ✅ **클라이언트측 raw [D] 확보(2026-06-21)** — 라이브 uvicorn + redis/chroma 기동 후 미발행 세션(005380)에 `POST .../publish/notion` 실행: 1차 HTTP 200 **실 페이지 `386bee7e` 생성**, 2차 HTTP 200 **동일 page_id 반환(멱등)**. raw 응답을 `reports/notion-publish-e2e-2026-06-21.log`로 커밋, `mcp-e2e-2026-06-20.md` §1·요약표 갱신.
+  - → **항목6 양방향(서버·클라) 모두 raw [D] 확보. 4→5 근거 완비**(신규 SHA 재평가 시 확정).
 
 ### 3-2. 항목10 토큰단위 스트리밍 — 4→5 (×1, +1)
 - 사유: 현재 **노드단위** yield(`stream_mode` 미전환). 토큰단위 아님으로 5 차단.
 - 작업: `astream(..., stream_mode="messages")` 전환 후 LLM 토큰 청크를 SSE에 패스스루.
 
-### 3-3. 항목4 경미(점수 영향 없음)
-- `component-design.md`의 `judge_agent_node` 위치 라인 `:224`를 실제 `:281`로 정정(정확성 차원, 감점 아님).
+### 3-3. 항목4 경미(점수 영향 없음) — ✅ 완료(2026-06-21)
+- ✅ `component-design.md:61`의 `judge_agent_node` 위치 라인 `:224` → 실제 `:281`로 정정(`moderator_node.py:281` 확인).
 
 ---
 

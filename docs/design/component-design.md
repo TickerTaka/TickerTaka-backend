@@ -58,7 +58,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - `app/agents/nodes/data_node.py`
 - `app/agents/nodes/bull_node.py`
 - `app/agents/nodes/bear_node.py`
-- `app/agents/nodes/moderator_node.py` (`moderator_pre`/`moderator_check`/`moderator_summary` + **`judge_agent_node`** @ `:224`)
+- `app/agents/nodes/moderator_node.py` (`moderator_pre`/`moderator_check`/`moderator_summary` + **`judge_agent_node`** @ `:281`)
 
 책임:
 - 토론 상태 관리
