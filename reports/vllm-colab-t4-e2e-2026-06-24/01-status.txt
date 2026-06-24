@@ -1,0 +1,2 @@
+[vllm] gpu-t4-s-kkb-ass1b2-qvc3i79elzf7 | Hardware: T4 | Variant: GPU | Status: IDLE
+  Last Execution: scripts/colab/setup.py at 2026-06-24 22:45:27

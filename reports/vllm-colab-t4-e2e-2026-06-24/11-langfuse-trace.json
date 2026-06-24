@@ -1,0 +1,122 @@
+{
+    "data": [
+        {
+            "id": "8a8218586ad81c2d8d32f5d6ec35ee7e",
+            "projectId": "cmqjflaln007fad0cix5x0uv2",
+            "name": "evidence-enrich",
+            "timestamp": "2026-06-24T15:04:46.969Z",
+            "environment": "default",
+            "tags": [],
+            "bookmarked": false,
+            "release": null,
+            "version": null,
+            "userId": null,
+            "sessionId": null,
+            "public": false,
+            "input": {
+                "source_type": "filing",
+                "symbol": "000660",
+                "title": "\ud48d\ubb38\ub610\ub294\ubcf4\ub3c4\uc5d0\ub300\ud55c\ud574\uba85"
+            },
+            "output": {
+                "sentiment": "positive",
+                "impact_score": 1,
+                "event_type": null,
+                "status": "pass"
+            },
+            "metadata": {
+                "qwen_status": "skipped",
+                "gate_passed": false,
+                "qwen": {
+                    "status": "skipped",
+                    "reason": "gate_not_passed"
+                },
+                "resourceAttributes": {
+                    "telemetry.sdk.language": "python",
+                    "telemetry.sdk.name": "opentelemetry",
+                    "telemetry.sdk.version": "1.42.1",
+                    "service.name": "tickertaka-analysis-worker"
+                },
+                "scope": {
+                    "name": "langfuse-sdk",
+                    "version": "4.7.1",
+                    "attributes": {
+                        "public_key": "pk-lf-0e159e62-a582-40fb-b333-6fa167dc23d7"
+                    }
+                }
+            },
+            "createdAt": "2026-06-24T15:04:55.000Z",
+            "updatedAt": "2026-06-24T15:04:55.137Z",
+            "observations": [
+                "8d630d8f7b912597"
+            ],
+            "scores": [],
+            "totalCost": 0,
+            "latency": 4.869,
+            "htmlPath": "/project/cmqjflaln007fad0cix5x0uv2/traces/8a8218586ad81c2d8d32f5d6ec35ee7e",
+            "externalId": null
+        },
+        {
+            "id": "4ab8927a01a25888584bded63c93a18e",
+            "projectId": "cmqjflaln007fad0cix5x0uv2",
+            "name": "evidence-enrich",
+            "timestamp": "2026-06-24T13:32:01.396Z",
+            "environment": "default",
+            "tags": [],
+            "bookmarked": false,
+            "release": null,
+            "version": null,
+            "userId": null,
+            "sessionId": null,
+            "public": false,
+            "input": {
+                "source_type": "filing",
+                "symbol": "000660",
+                "title": "\ud48d\ubb38\ub610\ub294\ubcf4\ub3c4\uc5d0\ub300\ud55c\ud574\uba85"
+            },
+            "output": {
+                "sentiment": "positive",
+                "impact_score": 1,
+                "event_type": null,
+                "status": "pass"
+            },
+            "metadata": {
+                "qwen_status": "skipped",
+                "gate_passed": false,
+                "qwen": {
+                    "status": "skipped",
+                    "reason": "gate_not_passed"
+                },
+                "resourceAttributes": {
+                    "telemetry.sdk.language": "python",
+                    "telemetry.sdk.name": "opentelemetry",
+                    "telemetry.sdk.version": "1.42.1",
+                    "service.name": "tickertaka-analysis-worker"
+                },
+                "scope": {
+                    "name": "langfuse-sdk",
+                    "version": "4.7.1",
+                    "attributes": {
+                        "public_key": "pk-lf-0e159e62-a582-40fb-b333-6fa167dc23d7"
+                    }
+                }
+            },
+            "createdAt": "2026-06-24T13:32:05.000Z",
+            "updatedAt": "2026-06-24T13:32:04.256Z",
+            "observations": [
+                "b0833cb9e8ba8056"
+            ],
+            "scores": [],
+            "totalCost": 0,
+            "latency": 0.335,
+            "htmlPath": "/project/cmqjflaln007fad0cix5x0uv2/traces/4ab8927a01a25888584bded63c93a18e",
+            "externalId": null
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "limit": 2,
+        "totalItems": 488,
+        "totalPages": 244
+    }
+}

@@ -1,0 +1,2 @@
+vllm starting (model=Qwen/Qwen2.5-3B-Instruct) ... log: /content/vllm.log
+수 분 후 'colab exec -s vllm -f scripts/colab/verify.py' 로 확인하세요.

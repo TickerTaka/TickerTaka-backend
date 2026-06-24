@@ -1,0 +1,100 @@
+torch 2.5.1+cu124 cuda 12.4 device Tesla T4
+setup done
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/jupyter_kernel_client/wsclient.py:1353 in _recv_reply                 │
+│                                                                              │
+│   1350 │   │   │   │   if channel == "control":                              │
+│   1351 │   │   │   │   │   reply =                                           │
+│        self.control_channel.get_msg(timeout=timeout)                         │
+│   1352 │   │   │   │   else:                                                 │
+│ ❱ 1353 │   │   │   │   │   reply =                                           │
+│        self.shell_channel.get_msg(timeout=timeout)                           │
+│   1354 │   │   │   except queue.Empty as e:                                  │
+│   1355 │   │   │   │   msg = "Timeout waiting for reply"                     │
+│   1356 │   │   │   │   raise TimeoutError(msg) from e                        │
+│                                                                              │
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/jupyter_kernel_client/wsclient.py:411 in get_msg                      │
+│                                                                              │
+│    408 │   │   ------                                                        │
+│    409 │   │   Empty exception if no message is received before the timeout. │
+│    410 │   │   """                                                           │
+│ ❱  411 │   │   return self._messages.get(timeout=timeout)                    │
+│    412 │                                                                     │
+│    413 │   def get_msgs(self) -> list[dict[str, t.Any]]:                     │
+│    414 │   │   """Get all available messages.                                │
+│                                                                              │
+│ /usr/lib/python3.14/queue.py:209 in get                                      │
+│                                                                              │
+│   206 │   │   │   │   while not self._qsize():                               │
+│   207 │   │   │   │   │   remaining = endtime - time()                       │
+│   208 │   │   │   │   │   if remaining <= 0.0:                               │
+│ ❱ 209 │   │   │   │   │   │   raise Empty                                    │
+│   210 │   │   │   │   │   self.not_empty.wait(remaining)                     │
+│   211 │   │   │   │   │   if self.is_shutdown and not self._qsize():         │
+│   212 │   │   │   │   │   │   raise ShutDown                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Empty
+
+The above exception was the direct cause of the following exception:
+
+╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/colab_cli/commands/execution.py:216 in exec_command                   │
+│                                                                              │
+│   213 │   │   │   )                                                          │
+│   214 │   │   │   state.store.add(s)                                         │
+│   215 │   │   │                                                              │
+│ ❱ 216 │   │   │   outputs = runtime.execute_code(                            │
+│   217 │   │   │   │   code,                                                  │
+│   218 │   │   │   │   output_hook=lambda o: display_output(o, output_image), │
+│   219 │   │   │   │   timeout=timeout,                                       │
+│                                                                              │
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/colab_cli/runtime.py:221 in execute_code                              │
+│                                                                              │
+│   218 │   │   │   │   │   │   if idx < len(outputs):                         │
+│   219 │   │   │   │   │   │   │   output_hook(outputs[idx])                  │
+│   220 │   │   │                                                              │
+│ ❱ 221 │   │   │   reply = self.kernel_client.execute_interactive(            │
+│   222 │   │   │   │   code, output_hook=wrapped_output_hook, **kwargs        │
+│   223 │   │   │   )                                                          │
+│   224 │   │   │   # execute_interactive returns the raw reply message        │
+│                                                                              │
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/jupyter_kernel_client/client.py:364 in execute_interactive            │
+│                                                                              │
+│   361 │   │   │   The reply message for this request                         │
+│   362 │   │   """                                                            │
+│   363 │   │   self._set_variables(variables)                                 │
+│ ❱ 364 │   │   return self._manager.client.execute_interactive(               │
+│   365 │   │   │   code,                                                      │
+│   366 │   │   │   silent=silent,                                             │
+│   367 │   │   │   store_history=store_history,                               │
+│                                                                              │
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/jupyter_kernel_client/wsclient.py:1112 in execute_interactive         │
+│                                                                              │
+│   1109 │   │   │   # output is done, get the reply                           │
+│   1110 │   │   │   if timeout is not None:                                   │
+│   1111 │   │   │   │   timeout = max(0, deadline - time.monotonic())         │
+│ ❱ 1112 │   │   │   return self._recv_reply(msg_id, timeout=timeout)          │
+│   1113 │                                                                     │
+│   1114 │   def is_alive(self) -> bool:                                       │
+│   1115 │   │   """Is the kernel process still running?"""                    │
+│                                                                              │
+│ /home/syt07203/.local/share/uv/tools/google-colab-cli/lib/python3.14/site-pa │
+│ ckages/jupyter_kernel_client/wsclient.py:1356 in _recv_reply                 │
+│                                                                              │
+│   1353 │   │   │   │   │   reply =                                           │
+│        self.shell_channel.get_msg(timeout=timeout)                           │
+│   1354 │   │   │   except queue.Empty as e:                                  │
+│   1355 │   │   │   │   msg = "Timeout waiting for reply"                     │
+│ ❱ 1356 │   │   │   │   raise TimeoutError(msg) from e                        │
+│   1357 │   │   │   if reply["parent_header"].get("msg_id") != msg_id:        │
+│   1358 │   │   │   │   self.log.debug("Ignoring message not from request:    │
+│        %s", msg_id)                                                          │
+│   1359 │   │   │   │   continue                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+TimeoutError: Timeout waiting for reply
