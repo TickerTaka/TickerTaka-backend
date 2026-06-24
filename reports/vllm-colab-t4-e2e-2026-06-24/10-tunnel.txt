@@ -1,2 +1,2 @@
-# ngrok 터널 (Colab VM에서 pyngrok, 8000 노출). 진행바 로그는 제거, URL만.
+# ngrok 터널 (Colab VM에서 pyngrok, 8000 노출). 진행바 로그 제거, URL만.
 PUBLIC_BASE_URL = https://unmatched-hacker-overhead.ngrok-free.dev/v1

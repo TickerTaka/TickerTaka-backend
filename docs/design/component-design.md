@@ -117,6 +117,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 - **Notion 발행(MCP)**: `app/integrations/notion_mcp.py`가 **MCP client**로 self-host Notion MCP server(`@notionhq/notion-mcp-server`, stdio·newline-delimited JSON)를 spawn → `API-post-page`로 토론 결과를 Notion DB row(page)로 발행. PostgreSQL은 SOT, Notion은 2차 mirror
 - **감성분석 sLLM**: baseline = FinBERT `snunlp/KR-FinBert-SC`(local HF), 보강 = **Qwen**(`ANALYSIS_GENERATION_MODEL`). 뉴스는 본문 스크랩(`article_scraper`), 공시는 `DartClient` 문서 fetch 후 구조화 분석
 - **Qwen 서빙 백엔드**(`ANALYSIS_GENERATION_BACKEND`): `transformers`(인-프로세스 `LocalQwenEvidenceAnalyzer`, 기본) 또는 `remote`(`RemoteQwenEvidenceAnalyzer` — OpenAI 호환 HTTP). remote는 `ANALYSIS_GENERATION_BASE_URL`로 **Ollama(`/v1`)·vLLM** 양쪽을 동일 코드로 호출(엔진 교체는 URL만). 프롬프트·파서·게이팅 로직은 두 백엔드 공유
+  - **실증(항목7, vLLM·GPU)**: Colab CLI 무료 T4에서 `vLLM 0.6.6.post1`(XFORMERS, fp16)로 `Qwen/Qwen2.5-3B-Instruct` 서빙 → 워커가 ngrok 경유 `POST /v1/chat/completions 200`으로 공시 1건 보강하는 E2E 실행 raw 캡처. 증적: [reports/vllm-colab-t4-e2e-2026-06-24/](/home/syt07203/TickerTaka-backend/reports/vllm-colab-t4-e2e-2026-06-24/README.md), 런북: [memo/results/2026-06-24-eval-track7-vllm-colab-t4-runbook.md](/home/syt07203/TickerTaka-backend/memo/results/2026-06-24-eval-track7-vllm-colab-t4-runbook.md)
 
 ## 6. Infra Support Layer
 
@@ -161,6 +162,7 @@ TickerTaka 백엔드의 주요 컴포넌트와 책임, 데이터 흐름, 배포 
 
 책임:
 - 호출 1건을 **1 trace**로 묶어 단계별 가시화(진단 + 평가 항목3 관측성 충족)
+- **실증(항목3, langfuse)**: vLLM 보강 E2E와 **같은 실행**에서 `evidence-enrich` trace 1건 적재(REST API 원본 캡처). 증적: [reports/vllm-colab-t4-e2e-2026-06-24/11-langfuse-trace.json](/home/syt07203/TickerTaka-backend/reports/vllm-colab-t4-e2e-2026-06-24/11-langfuse-trace.json) — remote(vLLM) 호출은 `langfuse.openai` 드롭인으로 token/latency 자동계측
 - **게이트**: `LANGFUSE_PUBLIC_KEY`+`SECRET_KEY`+`LANGFUSE_TRACING_ENABLED`가 모두 있을 때만 활성, 하나라도 없으면 `None` 반환 → 호출부 전부 no-op(운영/테스트 영향 0)
 - (정정) 강사 합의는 **"토론 Agent를 sLLM으로 바꾸지 않아도 된다"**였을 뿐 langfuse 적용 범위 제한이 아니다. 토론은 프런티어(gpt-4o-mini) 유지하되 trace는 붙는다.
 
