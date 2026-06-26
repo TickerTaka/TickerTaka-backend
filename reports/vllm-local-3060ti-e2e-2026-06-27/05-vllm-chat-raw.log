@@ -1,0 +1,34 @@
+### vLLM RAW E2E capture (laptop -> desktop RTX 3060 Ti via Tailscale) 2026-06-26T15:47:09Z
+### host: http://100.105.127.81:8000  model: Qwen/Qwen2.5-1.5B-Instruct
+
+===== [1] GET /v1/models (verbose) =====
+HTTP/1.1 200 OK
+date: Fri, 26 Jun 2026 15:47:09 GMT
+server: uvicorn
+content-length: 502
+content-type: application/json
+
+{"object":"list","data":[{"id":"Qwen/Qwen2.5-1.5B-Instruct","object":"model","created":1782488830,"owned_by":"vllm","root":"Qwen/Qwen2.5-1.5B-Instruct","parent":null,"max_model_len":4096,"permission":[{"id":"modelperm-dcceca8b91034d7abc89724d9d0dda1a","object":"model_permission","created":1782488830,"allow_create_engine":false,"allow_sampling":true,"allow_logprobs":true,"allow_search_indices":false,"allow_view":true,"allow_fine_tuning":false,"organization":"*","group":null,"is_blocking":false}]}]}
+
+===== [2] POST /v1/chat/completions (request + response, verbose) =====
+*   Trying 100.105.127.81:8000...
+* Established connection to 100.105.127.81 (100.105.127.81 port 8000) from 100.100.252.3 port 33692 
+* using HTTP/1.x
+> POST /v1/chat/completions HTTP/1.1
+> Host: 100.105.127.81:8000
+> User-Agent: curl/8.18.0
+> Accept: */*
+> Content-Type: application/json
+> Content-Length: 310
+> 
+} [310 bytes data]
+* upload completely sent off: 310 bytes
+< HTTP/1.1 200 OK
+< date: Fri, 26 Jun 2026 15:47:10 GMT
+< server: uvicorn
+< content-length: 431
+< content-type: application/json
+< 
+{ [431 bytes data]
+* Connection #0 to host 100.105.127.81:8000 left intact
+{"id":"chatcmpl-7dd5d5ceba9b4ef79767d61aa40cef4a","object":"chat.completion","created":1782488830,"model":"Qwen/Qwen2.5-1.5B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"positive","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":64,"total_tokens":66,"completion_tokens":2,"prompt_tokens_details":null},"prompt_logprobs":null}
